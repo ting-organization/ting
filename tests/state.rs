@@ -45,7 +45,7 @@ fn stored(records: &[(Hash, Vec<u8>)]) -> (Hash, Reader) {
 }
 #[test]
 fn proofs_show_records_present_and_absent_against_the_root() {
-    use ting_core::state::{End, prove, verify};
+    use ting_core::state::{End, Proof, prove, verify};
     // An empty state: every key ends at the empty root.
     let (root, reader) = stored(&[]);
     let proof = prove(&reader, &[9; 32]).unwrap();
@@ -87,6 +87,15 @@ fn proofs_show_records_present_and_absent_against_the_root() {
             first[0] ^= 1;
             assert!(!verify(&root, key, Some(value), &forged));
         }
+        // The record's own leaf passed off as a neighbour's, which shares the
+        // path but for its last bit, does not show the record absent.
+        let mut neighbour = *key;
+        neighbour[31] ^= 1;
+        let disguised = Proof {
+            end: End::Other(neighbour, value.clone()),
+            siblings: proof.siblings.clone(),
+        };
+        assert!(!verify(&root, key, None, &disguised), "{key:?}");
     }
     assert_eq!(prove(&reader, &twin).unwrap().siblings.len(), 256);
     let mut ends = BTreeSet::new();
@@ -96,6 +105,18 @@ fn proofs_show_records_present_and_absent_against_the_root() {
         ends.insert(matches!(proof.end, End::Empty));
         assert!(verify(&root, &key, None, &proof));
         assert!(!verify(&root, &key, Some(&[]), &proof));
+        // The other record comes with its true value, and with no other.
+        if let End::Other(other, value) = &proof.end {
+            assert_eq!(
+                Some(value),
+                records.iter().find(|r| r.0 == *other).map(|r| &r.1)
+            );
+            let changed = Proof {
+                end: End::Other(*other, [value.as_slice(), &[0]].concat()),
+                siblings: proof.siblings.clone(),
+            };
+            assert!(!verify(&root, &key, None, &changed));
+        }
     }
     assert_eq!(ends.len(), 2, "both an empty end and another record's leaf");
     // Another record's leaf proves nothing for a key off its path.

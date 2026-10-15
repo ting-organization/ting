@@ -84,6 +84,9 @@ each level of its path, from its leaf up to the root. The verifier hashes the le
 combines it with each of those hashes in the order the key's bits say, and compares
 the result with the state root. A proof that a record is absent ends the key's path
 at an empty subtree, or at the leaf of a different record whose key shares that path.
+That record comes with its key and value, and the verifier hashes its leaf from them:
+a leaf hash alone could be any leaf, the absent record's own included, so it would
+prove nothing about which key the path leads to.
 
 The reference node's storage reads give a record's proof when asked
 ([the REST API](/wiki/start/explore#the-rest-api)), beside its value and the state
@@ -93,14 +96,14 @@ root and canonical tip it was read at:
 |---|---|
 | `record_key` | The record's key, which the verifier computes for itself from the contract and the storage key |
 | `end` | Where the key's path ends: `present`, the record's own leaf; `empty`, an empty subtree; `other`, another record's leaf |
-| `other_key`, `other_leaf` | For `other`: that record's key and its leaf hash |
+| `other_key`, `other_value_hex` | For `other`: that record's key and value |
 | `siblings` | The other child's hash at each level of the path, from its end up to the root |
 
 With `n` siblings the path ends at depth `n`. The verifier starts from the leaf of
-the record and its value for `present`, from `EMPTY` for `empty`, and from
-`other_leaf` for `other`, after checking that `other_key` differs from the key and
-shares its first `n` bits. Then, for `d` from `n − 1` down to 0, it combines the hash
-so far with the next sibling as the node at depth `d`, the hash so far on the side
-the key's bit `d` names, and compares the result with the state root. A proof checks
-only against a root the client trusts: one in a header it has checked, on the chain
-with the most work.
+the record and its value for `present`, from `EMPTY` for `empty`, and for `other`
+from the leaf of `other_key` and its value, after checking that `other_key` differs
+from the key and shares its first `n` bits. Then, for `d` from `n − 1` down to 0, it
+combines the hash so far with the next sibling as the node at depth `d`, the hash so
+far on the side the key's bit `d` names, and compares the result with the state
+root. A proof checks only against a root the client trusts: one in a header it has
+checked, on the chain with the most work.

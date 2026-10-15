@@ -2693,7 +2693,10 @@ fn proof_of(answer: &serde_json::Value) -> ting_core::state::Proof {
         end: match proof["end"].as_str().unwrap() {
             "present" => End::Present,
             "empty" => End::Empty,
-            "other" => End::Other(hash(&proof["other_key"]), hash(&proof["other_leaf"])),
+            "other" => End::Other(
+                hash(&proof["other_key"]),
+                ting_node::unhex(proof["other_value_hex"].as_str().unwrap(), usize::MAX).unwrap(),
+            ),
             end => panic!("unknown end {end}"),
         },
         siblings: proof["siblings"]
@@ -2766,6 +2769,22 @@ fn storage_reads_carry_merkle_proofs_on_request() {
     }
     assert_eq!(batch["values"][0]["value_hex"], "2a");
     assert_eq!(batch["values"][1]["value_hex"], serde_json::Value::Null);
+    // Absent records: their paths end both at empty subtrees and at other
+    // records' leaves, which come with those records' values.
+    let keys: Vec<[u8; 32]> = (2..66u8).map(|i| [i; 32]).collect();
+    let reads: Vec<_> = keys
+        .iter()
+        .map(|k| json!({"contract":contract,"key":hex(k)}))
+        .collect();
+    let batch = chain
+        .request("storage_batch", json!({"reads":reads,"proof":true}))
+        .unwrap();
+    let mut ends = std::collections::BTreeSet::new();
+    for (answer, key) in batch["values"].as_array().unwrap().iter().zip(&keys) {
+        check(answer, &batch["state_root"], *key);
+        ends.insert(answer["proof"]["end"].as_str().unwrap().to_string());
+    }
+    assert_eq!(ends, ["empty", "other"].map(String::from).into());
 }
 #[test]
 fn a_restart_reads_side_blocks_from_their_table_which_older_databases_fill_once() {

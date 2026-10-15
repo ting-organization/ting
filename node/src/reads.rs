@@ -104,7 +104,10 @@ pub fn answer(view: &View, method: &str, p: &Value) -> Result<Value> {
 /// A response small enough for one answer.
 pub fn fits(value: Value) -> Result<Value> {
     if serde_json::to_vec(&value).map_err(|e| e.to_string())?.len() > crate::FRAME_MAX - 1024 {
-        return Err("JSON response size limit; fetch a smaller page or canonical raw block".into());
+        return Err(
+            "JSON response size limit; ask for fewer entries or records, or read the block raw"
+                .into(),
+        );
     }
     Ok(value)
 }
@@ -309,10 +312,10 @@ fn proof_json(view: &View, record: &Hash) -> Result<Value> {
     match proof.end {
         End::Present => answer["end"] = json!("present"),
         End::Empty => answer["end"] = json!("empty"),
-        End::Other(key, leaf) => {
+        End::Other(key, value) => {
             answer["end"] = json!("other");
             answer["other_key"] = json!(hex(&key));
-            answer["other_leaf"] = json!(hex(&leaf));
+            answer["other_value_hex"] = json!(hex(&value));
         }
     }
     Ok(answer)

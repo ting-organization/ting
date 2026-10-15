@@ -136,9 +136,10 @@ pub enum End {
     Present,
     /// An empty subtree: it is absent.
     Empty,
-    /// The leaf of another record, its key and hash, whose key shares the
-    /// path: it is absent.
-    Other(Hash, Hash),
+    /// The leaf of another record whose key shares the path: it is absent.
+    /// The record's key and value, from which the verifier hashes the leaf, so
+    /// that the leaf is bound to that key.
+    Other(Hash, Vec<u8>),
 }
 /// A proof that a record is present or absent: where its key's path ends, and
 /// the hash of the other child at each level above that, from the end up to
@@ -156,7 +157,12 @@ pub fn prove(reader: &dyn StateReader, key: &Hash) -> Result<Proof, String> {
         match reader.node(&position(key, depth))? {
             None => break End::Empty,
             Some(Entry::Leaf(other, _)) if other == *key => break End::Present,
-            Some(Entry::Leaf(other, hash)) => break End::Other(other, hash),
+            Some(Entry::Leaf(other, _)) => {
+                let value = reader
+                    .record(&other)?
+                    .ok_or("state tree leaf without its record")?;
+                break End::Other(other, value);
+            }
             Some(Entry::Node(_)) if depth == 256 => {
                 return Err("state tree node below the deepest level".into());
             }
@@ -182,10 +188,10 @@ pub fn verify(root: &Hash, key: &Hash, value: Option<&[u8]>, proof: &Proof) -> b
     let mut hash = match (&proof.end, value) {
         (End::Present, Some(value)) => leaf(key, value),
         (End::Empty, None) => empty(),
-        (End::Other(other, hash), None)
+        (End::Other(other, value), None)
             if other != key && (0..depth).all(|d| bit(other, d) == bit(key, d)) =>
         {
-            *hash
+            leaf(other, value)
         }
         _ => return false,
     };
