@@ -283,29 +283,44 @@ fn contract(view: &View, p: &Value) -> Result<Value> {
         json!({"id":hex(&id),"code_hash":hex(&m[..32]),"code_bytes":u32::from_le_bytes(m[32..36].try_into().unwrap()),"code_price":u64::from_le_bytes(m[36..44].try_into().unwrap()),"state_root":hex(&view.root()?)}),
     )
 }
+/// The values of the records that proofs end at instead of the record asked
+/// for, by key: listed once per answer, since many proofs of one answer can
+/// end at the same record (wiki: data/state-tree#proofs).
+type Others = serde_json::Map<String, Value>;
 /// A storage record, with `proof` its Merkle proof against the state root.
 fn storage(view: &View, p: &Value) -> Result<Value> {
     let id = hash_arg(str_param(p, "id")?)?;
     let key = hash_arg(str_param(p, "key")?)?;
-    let mut answer = record_json(view, id, key, p["proof"] == true)?;
+    let proof = p["proof"] == true;
+    let mut others = Others::new();
+    let mut answer = record_json(view, id, key, proof.then_some(&mut others))?;
     answer["state_root"] = json!(hex(&view.root()?));
     answer["tip"] = json!(hex(&view.tip()?));
+    if proof {
+        answer["others"] = Value::Object(others);
+    }
     Ok(answer)
 }
-/// A storage record by contract and key, and with `proof` its proof.
-fn record_json(view: &View, contract: Hash, key: Hash, proof: bool) -> Result<Value> {
+/// A storage record by contract and key, and with `others` its proof.
+fn record_json(
+    view: &View,
+    contract: Hash,
+    key: Hash,
+    others: Option<&mut Others>,
+) -> Result<Value> {
     let record = record_key(2, contract, key);
     let value = view.record(&record)?;
     let mut answer = json!({"contract":hex(&contract),"key":hex(&key),"value_hex":value.as_ref().map(|v|hex(v))});
-    if proof {
-        answer["proof"] = proof_json(view, &record)?;
+    if let Some(others) = others {
+        answer["proof"] = proof_json(view, &record, others)?;
     }
     Ok(answer)
 }
 /// A record's Merkle proof as the API gives it (wiki: data/state-tree#proofs):
 /// its record key, where its path ends, and the other child's hash at each
-/// level above that, from the end up to the root.
-fn proof_json(view: &View, record: &Hash) -> Result<Value> {
+/// level above that, from the end up to the root. A path that ends at another
+/// record names its key and adds its value to `others`.
+fn proof_json(view: &View, record: &Hash, others: &mut Others) -> Result<Value> {
     let proof = prove(view, record)?;
     let mut answer = json!({"record_key":hex(record),
         "siblings":proof.siblings.iter().map(|s| hex(s)).collect::<Vec<_>>()});
@@ -313,9 +328,12 @@ fn proof_json(view: &View, record: &Hash) -> Result<Value> {
         End::Present => answer["end"] = json!("present"),
         End::Empty => answer["end"] = json!("empty"),
         End::Other(key, value) => {
+            let key = hex(&key);
+            if !others.contains_key(&key) {
+                others.insert(key.clone(), json!(hex(&value)));
+            }
             answer["end"] = json!("other");
-            answer["other_key"] = json!(hex(&key));
-            answer["other_value_hex"] = json!(hex(&value));
+            answer["other_key"] = json!(key);
         }
     }
     Ok(answer)
@@ -332,13 +350,19 @@ fn storage_batch(view: &View, p: &Value) -> Result<Value> {
         return Err(format!("reads must name 1 to {BATCH_MAX} records"));
     }
     let proof = p["proof"] == true;
+    let mut others = Others::new();
     let mut values = Vec::with_capacity(reads.len());
     for read in reads {
         let id = hash_arg(str_param(read, "contract")?)?;
         let key = hash_arg(str_param(read, "key")?)?;
-        values.push(record_json(view, id, key, proof)?);
+        values.push(record_json(view, id, key, proof.then_some(&mut others))?);
     }
-    Ok(json!({"values":values,"state_root":hex(&view.root()?),"tip":hex(&view.tip()?)}))
+    let mut answer =
+        json!({"values":values,"state_root":hex(&view.root()?),"tip":hex(&view.tip()?)});
+    if proof {
+        answer["others"] = Value::Object(others);
+    }
+    Ok(answer)
 }
 pub fn receipt_json(r: &Receipt) -> Value {
     json!({"transaction":hex(&r.transaction),"status":r.status as u8,"status_name":format!("{:?}",r.status),

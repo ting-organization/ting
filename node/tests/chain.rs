@@ -2684,8 +2684,9 @@ fn side_branches_below_the_settled_height_are_forgotten() {
     assert_eq!(status["held_headers"], 56);
     assert_eq!(chain.tip(), a[119].header.id());
 }
-/// A proof as the API gives it.
-fn proof_of(answer: &serde_json::Value) -> ting_core::state::Proof {
+/// A proof as the API gives it, the values of other records from the
+/// answer's `others`.
+fn proof_of(answer: &serde_json::Value, others: &serde_json::Value) -> ting_core::state::Proof {
     use ting_core::state::{End, Proof};
     let hash = |v: &serde_json::Value| ting_node::hash_arg(v.as_str().unwrap()).unwrap();
     let proof = &answer["proof"];
@@ -2693,10 +2694,14 @@ fn proof_of(answer: &serde_json::Value) -> ting_core::state::Proof {
         end: match proof["end"].as_str().unwrap() {
             "present" => End::Present,
             "empty" => End::Empty,
-            "other" => End::Other(
-                hash(&proof["other_key"]),
-                ting_node::unhex(proof["other_value_hex"].as_str().unwrap(), usize::MAX).unwrap(),
-            ),
+            "other" => {
+                let key = proof["other_key"].as_str().unwrap();
+                let value = others[key].as_str().unwrap();
+                End::Other(
+                    ting_node::hash_arg(key).unwrap(),
+                    ting_node::unhex(value, usize::MAX).unwrap(),
+                )
+            }
             end => panic!("unknown end {end}"),
         },
         siblings: proof["siblings"]
@@ -2726,14 +2731,14 @@ fn storage_reads_carry_merkle_proofs_on_request() {
         .unwrap()
         .to_string();
     let id = ting_node::hash_arg(&contract).unwrap();
-    let check = |answer: &serde_json::Value, root: &serde_json::Value, key: [u8; 32]| {
-        let root = ting_node::hash_arg(root.as_str().unwrap()).unwrap();
+    let check = |answer: &serde_json::Value, of: &serde_json::Value, key: [u8; 32]| {
+        let root = ting_node::hash_arg(of["state_root"].as_str().unwrap()).unwrap();
         let record = record_key(2, id, key);
         assert_eq!(answer["proof"]["record_key"], json!(hex(&record)));
         let value = answer["value_hex"]
             .as_str()
             .map(|v| ting_node::unhex(v, usize::MAX).unwrap());
-        let proof = proof_of(answer);
+        let proof = proof_of(answer, &of["others"]);
         assert!(verify(&root, &record, value.as_deref(), &proof), "{answer}");
         // The same proof shows no other value.
         assert!(!verify(&root, &record, Some(&[1, 2, 3]), &proof));
@@ -2743,6 +2748,7 @@ fn storage_reads_carry_merkle_proofs_on_request() {
         .request("storage", json!({"id":contract,"key":hex(&[0; 32])}))
         .unwrap();
     assert!(plain.get("proof").is_none());
+    assert!(plain.get("others").is_none());
     for key in [[0; 32], [1; 32]] {
         let answer = chain
             .request(
@@ -2751,7 +2757,7 @@ fn storage_reads_carry_merkle_proofs_on_request() {
             )
             .unwrap();
         assert_eq!(answer["tip"], block["id"]);
-        check(&answer, &answer["state_root"], key);
+        check(&answer, &answer, key);
     }
     let batch = chain
         .request(
@@ -2765,7 +2771,7 @@ fn storage_reads_carry_merkle_proofs_on_request() {
         .iter()
         .zip([[0; 32], [1; 32]])
     {
-        check(answer, &batch["state_root"], key);
+        check(answer, &batch, key);
     }
     assert_eq!(batch["values"][0]["value_hex"], "2a");
     assert_eq!(batch["values"][1]["value_hex"], serde_json::Value::Null);
@@ -2781,10 +2787,25 @@ fn storage_reads_carry_merkle_proofs_on_request() {
         .unwrap();
     let mut ends = std::collections::BTreeSet::new();
     for (answer, key) in batch["values"].as_array().unwrap().iter().zip(&keys) {
-        check(answer, &batch["state_root"], *key);
+        check(answer, &batch, *key);
         ends.insert(answer["proof"]["end"].as_str().unwrap().to_string());
     }
     assert_eq!(ends, ["empty", "other"].map(String::from).into());
+    // Each other record's value is listed once, and only those proofs name.
+    let named: std::collections::BTreeSet<_> = batch["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["proof"]["other_key"].as_str())
+        .collect();
+    let listed: std::collections::BTreeSet<_> = batch["others"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(named, listed);
+    assert!(named.len() < keys.len(), "proofs share other records");
 }
 #[test]
 fn a_restart_reads_side_blocks_from_their_table_which_older_databases_fill_once() {

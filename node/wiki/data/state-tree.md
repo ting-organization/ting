@@ -96,14 +96,19 @@ root and canonical tip it was read at:
 |---|---|
 | `record_key` | The record's key, which the verifier computes for itself from the contract and the storage key |
 | `end` | Where the key's path ends: `present`, the record's own leaf; `empty`, an empty subtree; `other`, another record's leaf |
-| `other_key`, `other_value_hex` | For `other`: that record's key and value |
+| `other_key` | For `other`: that record's key |
 | `siblings` | The other child's hash at each level of the path, from its end up to the root |
+
+The answer also gives `others`, the value of each record a proof ends at, as hex
+under that record's key. Many proofs of one answer can end at the same record, a
+program's code for one, so each value is listed once. A proof whose `other_key` has
+no entry there does not check.
 
 With `n` siblings the path ends at depth `n`. The verifier starts from the leaf of
 the record and its value for `present`, from `EMPTY` for `empty`, and for `other`
-from the leaf of `other_key` and its value, after checking that `other_key` differs
-from the key and shares its first `n` bits. Then, for `d` from `n − 1` down to 0, it
-combines the hash so far with the next sibling as the node at depth `d`, the hash so
-far on the side the key's bit `d` names, and compares the result with the state
-root. A proof checks only against a root the client trusts: one in a header it has
-checked, on the chain with the most work.
+from the leaf of `other_key` and its value in `others`, after checking that
+`other_key` differs from the key and shares its first `n` bits. Then, for `d` from
+`n − 1` down to 0, it combines the hash so far with the next sibling as the node at
+depth `d`, the hash so far on the side the key's bit `d` names, and compares the
+result with the state root. A proof checks only against a root the client trusts:
+one in a header it has checked, on the chain with the most work.

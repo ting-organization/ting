@@ -82,9 +82,10 @@ no REST surface; it runs over the [control channel](/wiki/node/security#the-cont
   read from its block's slices.
 - Pages report the canonical `tip` they were read at.
 - A storage read is answered whole or not at all: one whose answer would pass 16 MiB
-  is refused. A proof that a record is absent can carry another record's value
-  ([proofs](/wiki/data/state-tree#proofs)), up to a program's code, so a large batch
-  with proofs that is refused is read again in smaller parts.
+  is refused. With proofs, an answer also lists the values of the records its
+  absence proofs end at, once each ([proofs](/wiki/data/state-tree#proofs)), up to a
+  program's code, so a large batch with proofs that is refused is read again in
+  smaller parts.
 
 Errors are JSON with an `error` string:
 
