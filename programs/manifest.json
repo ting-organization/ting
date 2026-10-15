@@ -1,0 +1,37 @@
+[
+  {
+    "name": "sha256",
+    "bytes": 2474,
+    "code_hash": "1c3f95c74b7f77b462e892d29482dbc7e08a690999a4bd45f59fc846c7bc2a85"
+  },
+  {
+    "name": "policy-secp256k1",
+    "bytes": 68890,
+    "code_hash": "492e5470e3384a0bfa7cdfcf496c2e374a314325ce24327c75670f17e9201dcf"
+  },
+  {
+    "name": "policy-multisig-secp256k1",
+    "bytes": 69291,
+    "code_hash": "b3ccde2a6007ee8b71c1f9c642c6713ce789918a6ae42197b6b40ad72e33cee0"
+  },
+  {
+    "name": "policy-p256",
+    "bytes": 63879,
+    "code_hash": "f065bf6d04a34ecbbeb94fb91571ccb2c08c6070cffd2ea4df948b46cda5ef06"
+  },
+  {
+    "name": "coin",
+    "bytes": 21460,
+    "code_hash": "c675a4b753b61b50ae4b63cde122171f8f2bfb9a05a92df895633ca8c351e4d6"
+  },
+  {
+    "name": "id-registry",
+    "bytes": 19849,
+    "code_hash": "edea54d81ee9c28319bb5f0aea7aacbe891654e358f6a5cbe7225078ba7396d3"
+  },
+  {
+    "name": "batch",
+    "bytes": 4669,
+    "code_hash": "68118bab6c4f9c9a88147a25cbc2327a89b50ea997633e26bfe84e9563438a6e"
+  }
+]

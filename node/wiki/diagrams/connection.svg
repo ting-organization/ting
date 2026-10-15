@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 500" role="img" aria-labelledby="conn-title conn-desc">
+  <title id="conn-title">One connection between two nodes</title>
+  <desc id="conn-desc">This node connects to a peer and says hello, asking to hear of changes. It asks for headers past the best common block and fetches the blocks it lacks. When the peer's tip changes, the peer announces it and this node asks for the new headers. When this node has a new block and more work, it pushes the block. Both pools are swapped when either changes.</desc>
+  <style>
+    .conn-box { fill: var(--card, #ffffff); stroke: var(--border, #d0d5dd); stroke-width: 1.5; }
+    .conn-title { fill: var(--text, #101828); font: 600 14px var(--font, system-ui, sans-serif); }
+    .conn-life { stroke: var(--faint, #98a2b3); stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .conn-line { fill: none; stroke: var(--muted, #667085); stroke-width: 1.5; }
+    .conn-head { fill: var(--muted, #667085); }
+    .conn-key { fill: none; stroke: var(--primary, #4f46e5); stroke-width: 1.8; }
+    .conn-key-head { fill: var(--primary, #4f46e5); }
+    .conn-code { fill: var(--text, #101828); font: 600 13px var(--mono, ui-monospace, monospace); }
+    .conn-note { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .conn-step { fill: var(--muted, #667085); font: italic 12px var(--font, system-ui, sans-serif); }
+  </style>
+  <defs>
+    <marker id="conn-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="conn-head"/>
+    </marker>
+    <marker id="conn-arrow-key" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="conn-key-head"/>
+    </marker>
+  </defs>
+
+  <rect x="90" y="16" width="160" height="44" rx="8" class="conn-box"/>
+  <text x="170" y="43" text-anchor="middle" class="conn-title">This node</text>
+  <rect x="450" y="16" width="160" height="44" rx="8" class="conn-box"/>
+  <text x="530" y="43" text-anchor="middle" class="conn-title">Peer</text>
+  <line x1="170" y1="60" x2="170" y2="488" class="conn-life"/>
+  <line x1="530" y1="60" x2="530" y2="488" class="conn-life"/>
+
+  <!-- Opening -->
+  <text x="20" y="98" class="conn-step">open</text>
+  <text x="350" y="88" text-anchor="middle"><tspan class="conn-code">hello</tspan><tspan class="conn-note"> · asks to hear of changes</tspan></text>
+  <line x1="172" y1="96" x2="528" y2="96" class="conn-line" marker-end="url(#conn-arrow)"/>
+  <text x="350" y="124" text-anchor="middle"><tspan class="conn-code">hello</tspan><tspan class="conn-note"> · its tip, work and locator</tspan></text>
+  <line x1="528" y1="132" x2="172" y2="132" class="conn-line" marker-end="url(#conn-arrow)"/>
+
+  <!-- Following the peer's chain -->
+  <text x="20" y="190" class="conn-step">follow</text>
+  <text x="350" y="172" text-anchor="middle"><tspan class="conn-code">headers</tspan><tspan class="conn-note"> · from the best common block</tspan></text>
+  <line x1="172" y1="180" x2="528" y2="180" class="conn-line" marker-end="url(#conn-arrow)"/>
+  <text x="350" y="208" text-anchor="middle" class="conn-note">up to 2,000 headers, checked as they arrive</text>
+  <line x1="528" y1="216" x2="172" y2="216" class="conn-line" marker-end="url(#conn-arrow)"/>
+  <text x="350" y="250" text-anchor="middle"><tspan class="conn-code">raw</tspan><tspan class="conn-note"> · a block the chain wants from this peer</tspan></text>
+  <line x1="172" y1="258" x2="528" y2="258" class="conn-line" marker-end="url(#conn-arrow)"/>
+  <text x="350" y="286" text-anchor="middle" class="conn-note">the block, slice by slice, stored unexecuted</text>
+  <line x1="528" y1="294" x2="172" y2="294" class="conn-line" marker-end="url(#conn-arrow)"/>
+
+  <!-- The peer's tip moves -->
+  <text x="20" y="342" class="conn-step">its tip</text>
+  <text x="350" y="334" text-anchor="middle"><tspan class="conn-code">announce</tspan><tspan class="conn-note"> · a new tip or pool size</tspan></text>
+  <line x1="528" y1="342" x2="172" y2="342" class="conn-key" marker-end="url(#conn-arrow-key)"/>
+  <text x="350" y="370" text-anchor="middle"><tspan class="conn-code">headers</tspan><tspan class="conn-note">, then </tspan><tspan class="conn-code">raw</tspan><tspan class="conn-note"> · as above</tspan></text>
+  <line x1="172" y1="378" x2="528" y2="378" class="conn-line" marker-end="url(#conn-arrow)"/>
+
+  <!-- This node's tip moves -->
+  <text x="20" y="424" class="conn-step">our tip</text>
+  <text x="350" y="416" text-anchor="middle"><tspan class="conn-code">import</tspan><tspan class="conn-note"> · its new blocks, when it has more work</tspan></text>
+  <line x1="172" y1="424" x2="528" y2="424" class="conn-key" marker-end="url(#conn-arrow-key)"/>
+
+  <!-- Pools -->
+  <text x="20" y="470" class="conn-step">pools</text>
+  <text x="350" y="462" text-anchor="middle"><tspan class="conn-code">submit</tspan><tspan class="conn-note">, </tspan><tspan class="conn-code">pending</tspan><tspan class="conn-note"> · both ways, when either changes</tspan></text>
+  <line x1="172" y1="470" x2="528" y2="470" class="conn-line" marker-start="url(#conn-arrow)" marker-end="url(#conn-arrow)"/>
+</svg>

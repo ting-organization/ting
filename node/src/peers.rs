@@ -1,0 +1,1034 @@
+//! Outbound peer connections (wiki: node/sync). A node keeps one connection
+//! open to each configured peer and to each peer discovery chose. The peer
+//! announces its tip and pool over it as they change, and the node follows:
+//! it asks for the peer's new headers and the blocks it lacks, pushes its own
+//! new blocks when it has more work, and exchanges pooled transactions. `run`
+//! keeps the connections: it opens them, opens them again after a failure,
+//! bans a peer that sent invalid data, and connects one more peer while the
+//! tip has not moved for a while.
+use crate::{
+    FRAME_MAX, Result,
+    chain::{
+        DEFERRED_MAX, Event, HEADERS_PAGE, INVALID, INVENTORY_PAGE, LOCATOR_MAX, NOT_ASKED,
+        RELAY_PAGE, SLICE_MAX, TOO_LARGE, is_invalid, is_policy, transfer_time,
+    },
+    config,
+    daemon::Node,
+    discovery::{self, BAN},
+    hash_arg,
+    pool::POOL_MAX,
+    transport::{self, ITSELF},
+    wire::{self, Answer, Body, Part, Request},
+};
+use num_bigint::BigUint;
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+use ting_core::{
+    hash::{Hash, hash, hex},
+    protocol::{HEADER_LEN, Header},
+};
+use tokio::{
+    net::tcp::OwnedWriteHalf,
+    sync::mpsc,
+    task::{AbortHandle, JoinSet},
+    time::Instant,
+};
+
+/// Most blocks pushed to a peer in one round.
+const PUSH_MAX: usize = 32;
+/// Header pages asked for in one round before blocks get their turn.
+const PAGES: usize = 8;
+/// The time a peer has to answer a request.
+const REPLY_DEADLINE: Duration = Duration::from_secs(30);
+/// A connection with nothing to do asks for headers this often, so that it
+/// stays open and misses no tip; while the node looks for more peers, as
+/// often as `LOOKING`, asking for addresses too.
+const KEEPALIVE: Duration = Duration::from_secs(30);
+const LOOKING: Duration = Duration::from_secs(10);
+/// Rounds of one connection start at least this far apart, whatever the peer
+/// announces.
+const ROUND_GAP: Duration = Duration::from_millis(100);
+/// Addresses are asked of each peer this often while the node has the
+/// connections it wants.
+const ASK_INTERVAL: u64 = 600;
+/// With every connection slot taken, one unproven address is probed this often.
+const PROBE_INTERVAL: u64 = 120;
+/// A tip that has not moved for this long may be stale: one more peer is
+/// connected until it moves.
+const STALE_TIP: u64 = 600;
+
+/// One outbound connection's transport: requests go out one at a time, and
+/// frames come back through a reader task, so that the announcements a peer
+/// sends between answers are noticed while the connection is idle.
+struct Conn {
+    writer: OwnedWriteHalf,
+    frames: mpsc::Receiver<Result<wire::Frame>>,
+    reader: tokio::task::JoinHandle<()>,
+    /// The peer's latest announcement not yet acted on.
+    news: Option<wire::Announcement>,
+    /// Why the connection can no longer be used: a request that got no answer
+    /// leaves the next answer unmatched.
+    broken: Option<String>,
+}
+impl Drop for Conn {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+impl Conn {
+    /// Connects and says hello; with `announce`, asks to be told of the
+    /// peer's changes. Returns the connection and the peer's state.
+    async fn open(address: SocketAddr, node: &Node, announce: bool) -> Result<(Self, wire::State)> {
+        let mut stream = transport::connect(address).await?;
+        let chain_id = state(node).await?.chain_id;
+        let hello = wire::Hello {
+            version: wire::VERSION,
+            chain_id,
+            agent: wire::AGENT.into(),
+            features: Vec::new(),
+            nonce: node.nonce,
+            announce,
+            listen: node.discovery.then(|| node.info.lock().unwrap().p2p.port()),
+        };
+        let remote = match transport::ask(&mut stream, Request::Hello(hello)).await? {
+            Answer::State(state) => state,
+            _ => return Err("invalid peer hello".into()),
+        };
+        if !transport::compatible(remote.version, &remote.chain_id, &chain_id) {
+            return Err(transport::MISMATCH.into());
+        }
+        if remote.nonce == node.nonce {
+            return Err(ITSELF.into());
+        }
+        let (mut read, writer) = stream.into_split();
+        let (sender, frames) = mpsc::channel(8);
+        let reader = tokio::spawn(async move {
+            loop {
+                let frame = transport::read_wire(&mut read, None, FRAME_MAX).await;
+                let end = frame.is_err();
+                if sender.send(frame).await.is_err() || end {
+                    break;
+                }
+            }
+        });
+        let conn = Self {
+            writer,
+            frames,
+            reader,
+            news: None,
+            broken: None,
+        };
+        Ok((conn, remote))
+    }
+    /// A request's answer; an error answer is the peer's, and the connection
+    /// stays usable.
+    async fn request(&mut self, request: Request) -> Result<Answer> {
+        if let Some(error) = &self.broken {
+            return Err(error.clone());
+        }
+        match self.answer(request).await {
+            Ok(answer) => answer,
+            Err(error) => {
+                self.broken = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+    async fn answer(&mut self, request: Request) -> Result<Result<Answer>> {
+        transport::write_wire(&mut self.writer, &wire::Frame::Request(request)).await?;
+        let deadline = Instant::now() + REPLY_DEADLINE;
+        loop {
+            let frame = tokio::time::timeout_at(deadline, self.frames.recv())
+                .await
+                .map_err(|_| "reply deadline exceeded")?
+                .ok_or("connection closed")??;
+            match frame {
+                wire::Frame::Announcement(news) => self.news = Some(news),
+                wire::Frame::Answer(answer) => return Ok(Ok(answer)),
+                wire::Frame::Error(error) => return Ok(Err(error)),
+                wire::Frame::Request(_) => return Err("unexpected frame".into()),
+            }
+        }
+    }
+    /// Waits for the peer's next announcement.
+    async fn announced(&mut self) -> Result<()> {
+        match self.frames.recv().await.ok_or("connection closed")?? {
+            wire::Frame::Announcement(news) => {
+                self.news = Some(news);
+                Ok(())
+            }
+            _ => Err("unexpected frame".into()),
+        }
+    }
+}
+/// This node's state, as its peers are told it.
+async fn state(node: &Node) -> Result<wire::State> {
+    match node.handle.call_wire(Request::State).await? {
+        Answer::State(state) => Ok(state),
+        _ => Err("unexpected answer".into()),
+    }
+}
+/// The answer a request expects, or the peer sent something else.
+fn unexpected(what: &str) -> String {
+    format!("invalid peer answer to {what}")
+}
+
+/// What one connection knows of its peer, and what its next round does.
+struct Link {
+    node: Node,
+    address: SocketAddr,
+    /// The address as the chain names this peer.
+    peer: String,
+    source: &'static str,
+    conn: Conn,
+    looking: Arc<AtomicBool>,
+    /// The software the peer's hello named.
+    agent: String,
+    /// The peer's tip, height, work and pool sizes, as it last told them.
+    tip: Hash,
+    height: u64,
+    work: BigUint,
+    pool: (u64, u64),
+    /// Where the next header page starts while a peer's chain spans rounds.
+    next: Option<Hash>,
+    pull: bool,
+    fetch: bool,
+    push: bool,
+    /// The last block the peer took from a push: where the next push starts,
+    /// while it is on this node's branch.
+    pushed: Option<Hash>,
+    swap: bool,
+    asked: u64,
+    marked: u64,
+    connected: u64,
+    delivered: Option<u64>,
+}
+/// What a push reads of this node's own: a block, or a pooled or deferred
+/// transaction.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Own {
+    Block,
+    Transaction,
+}
+impl Link {
+    /// Takes in an announcement: a new tip is followed, a changed pool swapped.
+    fn hear(&mut self, news: wire::Announcement) {
+        if news.tip != self.tip {
+            self.tip = news.tip;
+            self.pull = true;
+            self.fetch = true;
+        }
+        self.height = news.height;
+        self.work = news.work;
+        let pool = (news.pending, news.deferred);
+        if pool != self.pool {
+            self.pool = pool;
+            self.swap = true;
+        }
+    }
+    /// Does what is due; returns whether more is waiting at once.
+    async fn round(&mut self, local: &Event) -> Result<bool> {
+        let mut more = false;
+        if self.pull {
+            self.pull = false;
+            more |= self.headers().await?;
+        }
+        if self.fetch {
+            self.blocks().await?;
+        }
+        if self.push {
+            self.push = false;
+            more |= self.push_blocks(local).await?;
+        }
+        if self.swap {
+            self.swap = false;
+            self.swap_pool().await?;
+        }
+        let interval = if self.looking.load(Ordering::Relaxed) {
+            LOOKING.as_secs()
+        } else {
+            ASK_INTERVAL
+        };
+        if self.node.discovery && crate::now() >= self.asked + interval {
+            self.asked = crate::now();
+            self.addresses().await;
+        }
+        if let Some(error) = &self.conn.broken {
+            return Err(error.clone());
+        }
+        Ok(more)
+    }
+    /// The peer's headers past the best common block, page after page, each
+    /// checked by the chain as it arrives; a chain below the work threshold is
+    /// checked without being kept, and fetched again once it reaches it.
+    /// Returns whether more pages wait.
+    async fn headers(&mut self) -> Result<bool> {
+        let handle = self.node.handle.clone();
+        for _ in 0..PAGES {
+            let locator = match self.next {
+                Some(next) => vec![next],
+                None => state(&self.node).await?.locator,
+            };
+            let page = match self.conn.request(Request::Headers { locator }).await {
+                Ok(Answer::Headers(page)) => page,
+                Ok(_) => return Err(unexpected("headers")),
+                // The peer moved off the header its answer was to follow:
+                // start again from the best common block.
+                Err(e) if e == "no common ancestor" && self.next.is_some() => {
+                    self.next = None;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            if page.is_empty() {
+                self.next = None;
+                return Ok(false);
+            }
+            let full = page.len() == HEADERS_PAGE;
+            let checked = match handle
+                .call_bytes(
+                    "headers_from",
+                    json!({"peer":self.peer}),
+                    Some(page.concat()),
+                )
+                .await
+            {
+                Ok(checked) => checked,
+                Err(e) if is_invalid(&e) => return Err(e),
+                // Ahead of the clock, too far behind, not following, or a
+                // chain fetched again that differs, as after a reorganization
+                // on the peer: the rest waits for the peer's next tip.
+                Err(_) => {
+                    self.next = None;
+                    return Ok(false);
+                }
+            };
+            self.next = match checked["next"].as_str() {
+                Some(next) if full || checked["refetch"] == true => Some(hash_arg(next)?),
+                _ => None,
+            };
+            if self.next.is_none() {
+                return Ok(false);
+            }
+        }
+        self.pull = true;
+        Ok(true)
+    }
+    /// Blocks along the best header's branch, as many as the chain asks of
+    /// this peer; other connections fetch others at the same time.
+    async fn blocks(&mut self) -> Result<()> {
+        let handle = self.node.handle.clone();
+        loop {
+            let wanted = handle
+                .call("blocks_wanted", json!({"peer":self.peer}))
+                .await?;
+            let ids = wanted["ids"].as_array().ok_or("invalid wanted blocks")?;
+            if ids.is_empty() {
+                return Ok(());
+            }
+            let wanted: Vec<(Hash, u64)> = ids
+                .iter()
+                .enumerate()
+                .map(|(k, id)| {
+                    let id = hash_arg(id.as_str().ok_or("invalid wanted blocks")?)?;
+                    let max = wanted["max"][k].as_u64().ok_or("invalid wanted blocks")?;
+                    Ok((id, max))
+                })
+                .collect::<Result<_>>()?;
+            for (id, max) in wanted {
+                let block = match self.fetch_block(&id, max).await {
+                    Ok(block) => block,
+                    // This peer does not have it: the others are asked, and
+                    // this one again once it announces a new tip.
+                    Err(e) if e == "block not found" => {
+                        self.fetch = false;
+                        handle.call("release", json!({"peer":self.peer})).await?;
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                };
+                match handle
+                    .call_bytes("import", json!({"peer":self.peer}), Some(block))
+                    .await
+                {
+                    Ok(imported) => {
+                        if imported["known"] == false {
+                            self.delivered = Some(crate::now());
+                        }
+                    }
+                    Err(e) if is_policy(&e) => return Ok(()),
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    /// Fetches the block `id`, of at most `max` bytes, its data capacity, in
+    /// slices of at most `SLICE_MAX` bytes, within one deadline for the whole
+    /// block. A peer that sends another block, or claims one larger than its
+    /// capacity, sent invalid data.
+    async fn fetch_block(&mut self, id: &Hash, max: u64) -> Result<Vec<u8>> {
+        // The capacity bounds the time until the first slice tells the size.
+        let started = Instant::now();
+        let mut deadline = started + transfer_time(max);
+        let mut bytes = Vec::new();
+        loop {
+            let offset = bytes.len() as u64;
+            let request = Request::Raw {
+                id: *id,
+                offset,
+                length: SLICE_MAX as u32,
+            };
+            let (at, total, part) =
+                match tokio::time::timeout_at(deadline, self.conn.request(request))
+                    .await
+                    .map_err(|_| "block download deadline exceeded")??
+                {
+                    Answer::Slice {
+                        offset,
+                        total,
+                        bytes,
+                    } => (offset, total, bytes),
+                    _ => return Err(unexpected("raw")),
+                };
+            if at != offset || offset.saturating_add(part.len() as u64) > total {
+                return Err("invalid block slice".into());
+            }
+            if total > max {
+                return Err(format!("{INVALID}block: larger than its capacity"));
+            }
+            deadline = started + transfer_time(total);
+            let checked = bytes.len() >= HEADER_LEN;
+            let empty = part.is_empty();
+            bytes.extend(part);
+            if !checked && bytes.len() >= HEADER_LEN {
+                let header = Header::decode(&bytes[..HEADER_LEN])
+                    .map_err(|e| format!("{INVALID}block: {e}"))?;
+                if header.id() != *id {
+                    return Err(format!("{INVALID}block: not the block asked for"));
+                }
+            }
+            if bytes.len() as u64 >= total {
+                return Ok(bytes);
+            }
+            if empty {
+                return Err("empty block slice".into());
+            }
+        }
+    }
+    /// This node's blocks past the best common block, to a peer with less
+    /// work, so that a new tip travels at once, also to a peer that has no
+    /// connection to this node. Returns whether more wait.
+    async fn push_blocks(&mut self, local: &Event) -> Result<bool> {
+        let ours: BigUint = local.work.parse().unwrap_or_default();
+        if ours <= self.work {
+            return Ok(false);
+        }
+        let state = match self.conn.request(Request::State).await? {
+            Answer::State(state) => state,
+            _ => return Err(unexpected("state")),
+        };
+        self.work = state.work;
+        if ours <= self.work {
+            return Ok(false);
+        }
+        // The peer's locator thins out with depth: past a deep fork it may
+        // name no shared block but genesis, and the blocks the peer took
+        // would be offered again each round. The last one it took comes
+        // first, in place of a side branch if the locator is full.
+        let mut locator = state.locator;
+        if let Some(pushed) = self.pushed {
+            if locator.len() >= LOCATOR_MAX {
+                locator.remove(locator.len() - 2);
+            }
+            locator.insert(0, pushed);
+        }
+        let headers = match self.node.readers.wire(Request::Headers { locator }).await? {
+            Answer::Headers(headers) => headers,
+            _ => return Err("invalid local headers".into()),
+        };
+        for header in headers.iter().take(PUSH_MAX) {
+            let id = hash("block", header);
+            let pushed = self.push(Own::Block, id, None).await;
+            match pushed {
+                Ok(_) => self.pushed = Some(id),
+                // The peer does not take it now (its clock is behind it, or it
+                // sits on a branch too far behind the peer's tip), and its
+                // descendants would wait too.
+                Err(e) if is_policy(&e) => return Ok(false),
+                Err(e) => return Err(e),
+            }
+        }
+        let more = headers.len() > PUSH_MAX;
+        self.push |= more;
+        Ok(more)
+    }
+    /// A slice of this node's own block or pooled transaction.
+    async fn own(&self, own: Own, id: Hash, offset: u64) -> Result<(u64, Vec<u8>)> {
+        let length = SLICE_MAX as u32;
+        let answer = match own {
+            Own::Block => {
+                self.node
+                    .readers
+                    .wire(Request::Raw { id, offset, length })
+                    .await?
+            }
+            Own::Transaction => {
+                self.node
+                    .handle
+                    .call_wire(Request::TransactionRaw { id, offset, length })
+                    .await?
+            }
+        };
+        match answer {
+            Answer::Slice {
+                offset: at,
+                total,
+                bytes,
+            } if at == offset => Ok((total, bytes)),
+            _ => Err("invalid local slice".into()),
+        }
+    }
+    /// Pushes this node's own block (`import`) or transaction (`submit`, with
+    /// `not_before` for a deferred one): whole when it fits a slice, else
+    /// slice by slice, the peer's answer to the last, or to one it stops at,
+    /// being the whole push's.
+    async fn push(&mut self, own: Own, id: Hash, not_before: Option<u64>) -> Result<Answer> {
+        let mut offset = 0;
+        loop {
+            let (total, bytes) = self.own(own, id, offset).await?;
+            let end = offset + bytes.len() as u64;
+            let part = Part {
+                offset,
+                total,
+                bytes,
+            };
+            let request = match own {
+                Own::Block => Request::Import(part),
+                Own::Transaction => Request::Submit { part, not_before },
+            };
+            match self.conn.request(request).await? {
+                // Each slice is taken whole, or the push ends.
+                Answer::Received(received) if received == end && end < total => offset = end,
+                Answer::Received(_) => return Err("invalid slice acknowledgement".into()),
+                taken @ Answer::Taken { .. } => return Ok(taken),
+                _ => return Err(unexpected("a push")),
+            }
+        }
+    }
+    /// A transaction listed by its size alone, fetched in slices within its
+    /// transfer time. One larger than the next block's data capacity is not
+    /// fetched.
+    async fn fetch_transaction(&mut self, id: &Hash, total: u64) -> Result<Vec<u8>> {
+        if total > self.node.handle.events().borrow().data {
+            return Err(TOO_LARGE.into());
+        }
+        let deadline = Instant::now() + transfer_time(total);
+        let mut bytes = Vec::new();
+        while (bytes.len() as u64) < total {
+            let offset = bytes.len() as u64;
+            let request = Request::TransactionRaw {
+                id: *id,
+                offset,
+                length: SLICE_MAX as u32,
+            };
+            match tokio::time::timeout_at(deadline, self.conn.request(request))
+                .await
+                .map_err(|_| "transaction download deadline exceeded")??
+            {
+                Answer::Slice {
+                    offset: at,
+                    total: listed,
+                    bytes: part,
+                } if at == offset
+                    && listed == total
+                    && !part.is_empty()
+                    && offset + part.len() as u64 <= total =>
+                {
+                    bytes.extend(part)
+                }
+                Answer::Slice { .. } => return Err("invalid transaction slice".into()),
+                _ => return Err(unexpected("transaction_raw")),
+            }
+        }
+        Ok(bytes)
+    }
+    /// Pooled and deferred transactions both ways, by inventory: the ids each
+    /// side holds are compared, the peer is sent what it lacks, deferred ones
+    /// with their times, and what this node lacks is fetched by id and taken as
+    /// relayed by the peer. A transaction either side refuses is passed over.
+    async fn swap_pool(&mut self) -> Result<()> {
+        let handle = self.node.handle.clone();
+        for deferred in [false, true] {
+            let theirs = self.inventory(deferred).await?;
+            let mut ours = BTreeSet::new();
+            let mut after = None;
+            loop {
+                match handle
+                    .call_wire(Request::Inventory { deferred, after })
+                    .await?
+                {
+                    Answer::Inventory { ids, next } => {
+                        ours.extend(ids);
+                        after = next;
+                    }
+                    _ => return Err("invalid local inventory".into()),
+                }
+                if after.is_none() {
+                    break;
+                }
+            }
+            let missing: Vec<Hash> = ours.difference(&theirs).copied().collect();
+            for chunk in missing.chunks(RELAY_PAGE) {
+                let ids = chunk.to_vec();
+                let request = if deferred {
+                    Request::Deferred { ids }
+                } else {
+                    Request::Pending { ids }
+                };
+                let Answer::Items(items) = handle.call_wire(request).await? else {
+                    return Err("invalid local items".into());
+                };
+                for item in items {
+                    // One larger than a slice, or than the answer had room
+                    // for, travels in slices.
+                    let _ = match item.body {
+                        Body::Whole(bytes) => {
+                            let part = Part {
+                                offset: 0,
+                                total: bytes.len() as u64,
+                                bytes,
+                            };
+                            self.conn
+                                .request(Request::Submit {
+                                    part,
+                                    not_before: item.not_before,
+                                })
+                                .await
+                        }
+                        Body::Total(_) => {
+                            self.push(Own::Transaction, item.id, item.not_before).await
+                        }
+                    };
+                }
+            }
+            let wanted: Vec<Hash> = theirs.difference(&ours).copied().collect();
+            for chunk in wanted.chunks(RELAY_PAGE) {
+                let ids = chunk.to_vec();
+                let request = if deferred {
+                    Request::Deferred { ids }
+                } else {
+                    Request::Pending { ids }
+                };
+                let items = match self.conn.request(request).await? {
+                    Answer::Items(items) => items,
+                    _ => return Err(unexpected("pending")),
+                };
+                if items.len() > chunk.len() {
+                    return Err("relayed items beyond those asked for".into());
+                }
+                for item in items {
+                    if deferred != item.not_before.is_some() {
+                        return Err("invalid relayed item".into());
+                    }
+                    let mut submit =
+                        json!({"relayed":true,"peer":self.peer,"not_before":item.not_before});
+                    // One listed by its size alone is fetched in slices, and
+                    // must be the transaction asked for.
+                    let bytes = match item.body {
+                        Body::Whole(bytes) => bytes,
+                        Body::Total(total) => match self.fetch_transaction(&item.id, total).await {
+                            Ok(bytes) => {
+                                submit["id"] = json!(hex(&item.id));
+                                bytes
+                            }
+                            Err(e) if e == "transaction not found" || e == TOO_LARGE => {
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        },
+                    };
+                    // A peer that sent another transaction than the one it
+                    // listed is not asked again on this connection.
+                    if let Err(e) = handle.call_bytes("submit", submit, Some(bytes)).await
+                        && e == NOT_ASKED
+                    {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    /// The ids of the peer's pooled or deferred transactions, page by page,
+    /// no more than its set can hold.
+    async fn inventory(&mut self, deferred: bool) -> Result<BTreeSet<Hash>> {
+        let most = if deferred { DEFERRED_MAX } else { POOL_MAX };
+        let mut ids = BTreeSet::new();
+        let mut after = None;
+        loop {
+            let (listed, next) = match self
+                .conn
+                .request(Request::Inventory { deferred, after })
+                .await?
+            {
+                Answer::Inventory { ids, next } => (ids, next),
+                _ => return Err(unexpected("inventory")),
+            };
+            if listed.len() > INVENTORY_PAGE {
+                return Err("inventory page limit".into());
+            }
+            ids.extend(listed);
+            if ids.len() > most {
+                return Err("inventory beyond the set's size".into());
+            }
+            after = next;
+            if after.is_none() {
+                return Ok(ids);
+            }
+        }
+    }
+    /// The addresses the peer shares, learned with the limits of the book.
+    async fn addresses(&mut self) {
+        let Ok(Answer::Addresses(shared)) = self.conn.request(Request::Addresses).await else {
+            return;
+        };
+        self.node
+            .book
+            .lock()
+            .unwrap()
+            .learn_shared(&shared, self.address.ip());
+    }
+    /// A completed round: the peer is proven, and its status current.
+    fn report(&mut self) {
+        let now = crate::now();
+        if now >= self.marked + 60 {
+            self.marked = now;
+            self.node.book.lock().unwrap().succeeded(self.address, now);
+        }
+        let status = json!({"address":self.address,"source":self.source,"agent":self.agent,
+            "connected":self.connected,"last_success":now,"height":self.height,
+            "last_block":self.delivered,"error":null});
+        self.node
+            .peers
+            .lock()
+            .unwrap()
+            .insert(self.peer.clone(), status);
+    }
+}
+
+/// One outbound connection, for as long as it lasts: a round at once, then
+/// one whenever this node or the peer changes, or the keepalive is due.
+async fn follow(
+    node: Node,
+    address: SocketAddr,
+    source: &'static str,
+    looking: Arc<AtomicBool>,
+) -> Result<()> {
+    let (conn, hello) = Conn::open(address, &node, true).await?;
+    let mut events = node.handle.events();
+    let mut seen = events.borrow_and_update().clone();
+    let mut link = Link {
+        node: node.clone(),
+        address,
+        peer: address.to_string(),
+        source,
+        conn,
+        looking,
+        agent: hello.agent,
+        tip: hello.tip,
+        height: hello.height,
+        work: hello.work,
+        pool: (0, 0),
+        next: None,
+        pull: true,
+        fetch: true,
+        push: true,
+        pushed: None,
+        swap: true,
+        asked: 0,
+        marked: 0,
+        connected: crate::now(),
+        delivered: None,
+    };
+    let mut last = Instant::now();
+    loop {
+        tokio::time::sleep_until(last + ROUND_GAP).await;
+        last = Instant::now();
+        let more = link.round(&seen).await?;
+        link.report();
+        if !more && link.conn.news.is_none() && !events.has_changed().unwrap_or(true) {
+            let wait = if node.discovery && link.looking.load(Ordering::Relaxed) {
+                LOOKING
+            } else {
+                KEEPALIVE
+            };
+            tokio::select! {
+                changed = events.changed() => {
+                    if changed.is_err() {
+                        return Ok(());
+                    }
+                }
+                announced = link.conn.announced() => announced?,
+                _ = tokio::time::sleep(wait) => {
+                    link.pull = true;
+                    link.fetch = true;
+                    link.swap = true;
+                }
+                _ = node.stopped() => return Ok(()),
+            }
+        }
+        if let Some(news) = link.conn.news.take() {
+            link.hear(news);
+        }
+        let now = events.borrow_and_update().clone();
+        if now.tip != seen.tip {
+            link.push = true;
+        }
+        if (now.pending, now.deferred) != (seen.pending, seen.deferred) {
+            link.swap = true;
+        }
+        seen = now;
+    }
+}
+
+/// A peer sent invalid data: its address range is banned for a day, unless
+/// it holds a configured peer or is this machine (wiki: node/sync). Its
+/// connections end: inbound ones at once, outbound ones at the next check.
+pub fn punish(node: &Node, address: SocketAddr) {
+    let now = crate::now();
+    let mut book = node.book.lock().unwrap();
+    if book.ban(address.ip(), now + BAN) {
+        node.inbound
+            .lock()
+            .unwrap()
+            .end(|ip| book.is_banned(ip, now));
+    }
+}
+
+/// Records how a connection ended, and gives what it was asked to the others.
+async fn ended(node: &Node, address: SocketAddr, source: &str, result: Result<()>) {
+    if let Err(error) = &result {
+        if is_invalid(error) {
+            punish(node, address);
+        }
+        let mut book = node.book.lock().unwrap();
+        let mut peers = node.peers.lock().unwrap();
+        let key = address.to_string();
+        if error == ITSELF {
+            book.forget(&address);
+            peers.remove(&key);
+        } else {
+            book.failed(address);
+            let mut status = peers
+                .remove(&key)
+                .unwrap_or_else(|| json!({"address":address,"source":source,"last_success":null}));
+            status["error"] = json!(error);
+            status["last_attempt"] = json!(crate::now());
+            status["connected"] = Value::Null;
+            peers.insert(key, status);
+        }
+    }
+    let _ = node
+        .handle
+        .call("release", json!({"peer":address.to_string()}))
+        .await;
+}
+
+type Ended = (SocketAddr, Result<()>);
+
+/// Keeps the outbound connections, checking every two seconds.
+pub async fn run(node: Node) {
+    let looking = Arc::new(AtomicBool::new(true));
+    let mut tasks: JoinSet<Ended> = JoinSet::new();
+    let mut links: BTreeMap<SocketAddr, (AbortHandle, &'static str)> = BTreeMap::new();
+    let mut probes: JoinSet<Ended> = JoinSet::new();
+    let mut last_probe = 0;
+    let events = node.handle.events();
+    let (mut tip, mut tip_since) = (events.borrow().tip, crate::now());
+    // Addresses that reached this node itself, configured ones included: not
+    // connected again in this run.
+    let mut itself: BTreeSet<SocketAddr> = BTreeSet::new();
+    loop {
+        // A busy or slow chain thread is waited out, never a reason to stop
+        // keeping the connections.
+        let config =
+            node.handle.call("config", json!({})).await.and_then(|c| {
+                serde_json::from_value::<config::Config>(c).map_err(|e| e.to_string())
+            });
+        let config = match config {
+            Ok(config) => config,
+            Err(_) => {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => continue,
+                    _ = node.stopped() => break,
+                }
+            }
+        };
+        let own = node.info.lock().unwrap().p2p;
+        let configured: Vec<SocketAddr> = config
+            .peers
+            .iter()
+            .copied()
+            .filter(|a| *a != own && !itself.contains(a))
+            .collect();
+        let now = crate::now();
+        node.book.lock().unwrap().configure(&config.peers);
+        while let Some(done) = tasks.try_join_next() {
+            if let Ok((address, result)) = done
+                && let Some((_, source)) = links.remove(&address)
+            {
+                if matches!(&result, Err(e) if e == ITSELF) {
+                    itself.insert(address);
+                }
+                ended(&node, address, source, result).await;
+            }
+        }
+        while let Some(done) = probes.try_join_next() {
+            if let Ok((address, result)) = done {
+                let mut book = node.book.lock().unwrap();
+                match result {
+                    Ok(()) => book.succeeded(address, crate::now()),
+                    Err(e) if e == ITSELF => {
+                        itself.insert(address);
+                        book.forget(&address);
+                    }
+                    Err(_) => book.failed(address),
+                }
+            }
+        }
+        // Peers whose blocks failed once connected sent invalid data too.
+        if let Ok(offenders) = node.handle.call("offenders", json!({})).await {
+            for peer in offenders["peers"].as_array().into_iter().flatten() {
+                if let Some(address) = peer.as_str().and_then(|p| p.parse().ok()) {
+                    punish(&node, address);
+                    if let Some((link, source)) = links.remove(&address) {
+                        link.abort();
+                        let error = format!("{INVALID}block: it failed validation");
+                        ended(&node, address, source, Err(error)).await;
+                    }
+                }
+            }
+        }
+        // Connections that should end: to a banned address, to a configured
+        // peer no longer configured, or one discovered peer too many once the
+        // tip moves again.
+        let current = events.borrow().tip;
+        if current != tip {
+            (tip, tip_since) = (current, now);
+        }
+        let stale = now >= tip_since + STALE_TIP;
+        let want = if node.discovery {
+            (config.max_peers as usize).saturating_sub(configured.len()) + usize::from(stale)
+        } else {
+            0
+        };
+        let mut ending: Vec<SocketAddr> = {
+            let book = node.book.lock().unwrap();
+            links
+                .iter()
+                .filter(|(address, (_, source))| {
+                    book.is_banned(address.ip(), now)
+                        || (*source == "config") != configured.contains(address)
+                })
+                .map(|(address, _)| *address)
+                .collect()
+        };
+        let discovered: Vec<SocketAddr> = links
+            .iter()
+            .filter(|(a, (_, source))| *source == "discovered" && !ending.contains(a))
+            .map(|(a, _)| *a)
+            .collect();
+        if discovered.len() > want {
+            let peers = node.peers.lock().unwrap();
+            let last_block = |a: &SocketAddr| {
+                let status = peers.get(&a.to_string());
+                (
+                    status.and_then(|s| s["last_block"].as_u64()),
+                    std::cmp::Reverse(status.and_then(|s| s["connected"].as_u64())),
+                )
+            };
+            let mut by_block = discovered.clone();
+            by_block.sort_by_key(last_block);
+            ending.extend(by_block.into_iter().take(discovered.len() - want));
+        }
+        for address in ending {
+            if let Some((link, _)) = links.remove(&address) {
+                link.abort();
+                node.peers.lock().unwrap().remove(&address.to_string());
+                let _ = node
+                    .handle
+                    .call("release", json!({"peer":address.to_string()}))
+                    .await;
+            }
+        }
+        // New connections: configured peers not connected, and discovered
+        // ones up to the number wanted, each when due after a failure.
+        let mut start = Vec::new();
+        {
+            let mut book = node.book.lock().unwrap();
+            for address in &configured {
+                if !links.contains_key(address) && book.due(address, now) {
+                    start.push((*address, "config"));
+                }
+            }
+            if node.discovery {
+                let busy: BTreeSet<SocketAddr> = links
+                    .keys()
+                    .copied()
+                    .chain(configured.iter().copied())
+                    .chain([own])
+                    .chain(itself.iter().copied())
+                    .collect();
+                let connected = links.values().filter(|(_, s)| *s == "discovered").count();
+                let missing = want.saturating_sub(connected);
+                for address in book.pick(missing, &busy, now, discovery::seed()) {
+                    start.push((address, "discovered"));
+                }
+                if missing == 0
+                    && probes.is_empty()
+                    && now >= last_probe + PROBE_INTERVAL
+                    && let Some(address) = book.probe(&busy, now, discovery::seed())
+                {
+                    last_probe = now;
+                    book.attempted(address, now);
+                    let node = node.clone();
+                    probes.spawn(async move {
+                        let opened = Conn::open(address, &node, false).await;
+                        (address, opened.map(|_| ()))
+                    });
+                }
+            }
+            for (address, _) in &start {
+                book.attempted(*address, now);
+            }
+        }
+        for (address, source) in start {
+            let (node, looking) = (node.clone(), looking.clone());
+            let link =
+                tasks.spawn(async move { (address, follow(node, address, source, looking).await) });
+            links.insert(address, (link, source));
+        }
+        looking.store(links.len() < config.max_peers as usize, Ordering::Relaxed);
+        node.peers.lock().unwrap().retain(|a, _| {
+            a.parse()
+                .is_ok_and(|a: SocketAddr| configured.contains(&a) || links.contains_key(&a))
+        });
+        if let Err(e) = node.book.lock().unwrap().save() {
+            eprintln!("peer address book: {e}");
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            _ = node.stopped() => break,
+        }
+    }
+    tasks.abort_all();
+    probes.abort_all();
+}

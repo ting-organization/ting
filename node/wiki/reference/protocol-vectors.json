@@ -1,0 +1,390 @@
+{
+  "scope": "Checked design examples; not a complete VM conformance suite or production genesis.",
+  "resource_order": [
+    "C",
+    "S",
+    "D",
+    "G"
+  ],
+  "genesis": {
+    "config_hex": "010000f15365000000003fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff3c00000000a302000400000000e1f50500000000000400000000000000001000000000000000080000000000a086010000000000100000000000000000040000000000000010000000000000",
+    "config_length": 150,
+    "chain_id": "15b2b480e8b3bb449479c1aef1dbf1e5a27c907d49fc876842d4b83332facd53",
+    "genesis_block_id": "2a25002d2674c05cc1e310c81fa3be635c66e6164923041418d47c2ffc84018f",
+    "timestamp": 1700000000,
+    "target_interval": 60,
+    "half_life": 172800,
+    "vote_epoch_length": 4,
+    "initial_limits": [
+      100000000,
+      1024,
+      1048576,
+      524288
+    ],
+    "minimum_limits": [
+      100000,
+      16,
+      1024,
+      4096
+    ]
+  },
+  "hashes": {
+    "H_example_empty": "21c678bddfb0263135de6e3168b0621f197be36fbc38f7b3a30fb455a609960b",
+    "H_example_abc": "43dc070d6e78fd6155ac75b04392584ae0b12e363e93c966a93859fefff0e685",
+    "empty_state_root": "1afb449a10b29cdbe8a0b60a98e26b413a52f8bc35af49a1fc2d4fff669f5889",
+    "empty_transactions_root": "8c2beadecc1824b6e7f88cd39fff6d8ffdc9e8a41e93254d7f7109ba7d218f49",
+    "empty_receipts_root": "de3aa3b4c7df30035eb3ddc2d357d2a54521c27a4742438a9ab4561cb516ee6b",
+    "transactions_three_items_61_62_63": "c73c991b924d14c708aa0a6d1af0a42e0fa62e3c46ddba5a0a6ee6511408747c",
+    "empty_producer_hash": "51976778d26056c36803109ea49beaec0c618c49fc39c63fb1f10e51bf56592c"
+  },
+  "state_tree": {
+    "record_key": "6e8da4c64f0f1b06e6ea4a83dd0d7b433dab12ef7fd69989d9bc092864b6d9f2",
+    "single_present_empty_value_root": "717afdee149ef52559306ebbb15108b95e57029adac9b6cc7b6a822574d83b42",
+    "single_value_61_root": "71950ba2cdfec7177a02eb58da66945aeedd0f2461adeff47370b31a6ed03045",
+    "after_delete_root": "1afb449a10b29cdbe8a0b60a98e26b413a52f8bc35af49a1fc2d4fff669f5889",
+    "key_low": "0000000000000000000000000000000000000000000000000000000000000000",
+    "key_high": "8000000000000000000000000000000000000000000000000000000000000000",
+    "key_last_bit": "0000000000000000000000000000000000000000000000000000000000000001",
+    "values": "61 at key_low, 62 at key_high, 63 at key_last_bit",
+    "low_root": "efdf6ec1a8bd0cad99a761ebf1f57b39364da95205aa24ddda31d5232e08b343",
+    "low_high_root": "8db7a538d8628505f34dd92966cd19f1734ac464dbb6aa3da769900ba9c3b7ae",
+    "low_high_last_bit_root": "66d4bf75e1314a1294da240dc82246cc5ce9ab9a2fd595c4f25e7836a4325717",
+    "after_deleting_high_root": "baf622e0fd1dffab706e79efc2abfa09db476ca951428301e7afdee8abf8752a",
+    "after_deleting_high_and_last_bit_root": "efdf6ec1a8bd0cad99a761ebf1f57b39364da95205aa24ddda31d5232e08b343"
+  },
+  "empty_block": {
+    "header_hex": "010015b2b480e8b3bb449479c1aef1dbf1e5a27c907d49fc876842d4b83332facd5301000000000000002a25002d2674c05cc1e310c81fa3be635c66e6164923041418d47c2ffc84018f3cf15365000000003fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8c2beadecc1824b6e7f88cd39fff6d8ffdc9e8a41e93254d7f7109ba7d218f49de3aa3b4c7df30035eb3ddc2d357d2a54521c27a4742438a9ab4561cb516ee6b1afb449a10b29cdbe8a0b60a98e26b413a52f8bc35af49a1fc2d4fff669f5889000000000000000000000000000000002e0100000000000000000000000000000000000051976778d26056c36803109ea49beaec0c618c49fc39c63fb1f10e51bf56592c01000000000000000000000000000000",
+    "body_hex": "0000000000000000",
+    "block_id": "164bb36e4c90e0e3b1a34bc354f0235706defc68b91edf51cece10385fddb67f",
+    "nonce": 1,
+    "header_length": 294,
+    "block_length": 302,
+    "work": 4,
+    "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "resources_used_C_S_D_G": [
+      0,
+      0,
+      302,
+      0
+    ],
+    "producer_hex": "",
+    "producer_hash": "51976778d26056c36803109ea49beaec0c618c49fc39c63fb1f10e51bf56592c",
+    "transactions_root": "8c2beadecc1824b6e7f88cd39fff6d8ffdc9e8a41e93254d7f7109ba7d218f49",
+    "receipts_root": "de3aa3b4c7df30035eb3ddc2d357d2a54521c27a4742438a9ab4561cb516ee6b",
+    "state_root": "1afb449a10b29cdbe8a0b60a98e26b413a52f8bc35af49a1fc2d4fff669f5889"
+  },
+  "producer_data_block": {
+    "header_hex": "010015b2b480e8b3bb449479c1aef1dbf1e5a27c907d49fc876842d4b83332facd5301000000000000002a25002d2674c05cc1e310c81fa3be635c66e6164923041418d47c2ffc84018f3cf15365000000003fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8c2beadecc1824b6e7f88cd39fff6d8ffdc9e8a41e93254d7f7109ba7d218f49de3aa3b4c7df30035eb3ddc2d357d2a54521c27a4742438a9ab4561cb516ee6b1afb449a10b29cdbe8a0b60a98e26b413a52f8bc35af49a1fc2d4fff669f5889000000000000000000000000000000003b0100000000000000000000000000000000000097bced0aacc880aee219eb67b5c9674d360e04bb395a25d3765ec628da29775600000000000000000000000000000000",
+    "body_hex": "0d00000066697874757265206d696e657200000000",
+    "block_id": "1188a83bd267ae5efa5c40e26be1235e2a663f0fa65c85ff79b830430f5199d7",
+    "nonce": 0,
+    "header_length": 294,
+    "block_length": 315,
+    "work": 4,
+    "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "resources_used_C_S_D_G": [
+      0,
+      0,
+      315,
+      0
+    ],
+    "producer_hex": "66697874757265206d696e6572",
+    "producer_hash": "97bced0aacc880aee219eb67b5c9674d360e04bb395a25d3765ec628da297756",
+    "transactions_root": "8c2beadecc1824b6e7f88cd39fff6d8ffdc9e8a41e93254d7f7109ba7d218f49",
+    "receipts_root": "de3aa3b4c7df30035eb3ddc2d357d2a54521c27a4742438a9ab4561cb516ee6b",
+    "state_root": "1afb449a10b29cdbe8a0b60a98e26b413a52f8bc35af49a1fc2d4fff669f5889"
+  },
+  "missing_program_transaction": {
+    "transaction_hex": "010010270000000000000a0000000000000000040000000000000010000000000000111111111111111111111111111111111111111111111111111111111111111100000000",
+    "transaction_id": "08275246e2db0bf352111ff588594fefaa55ba0668ccafa4aa3899c40462ea93",
+    "receipt_hex": "08275246e2db0bf352111ff588594fefaa55ba0668ccafa4aa3899c40462ea93086d070000000000000100000000000000970000000000000000000000000000000000000000000000",
+    "receipt_status": 8,
+    "transaction_length": 70,
+    "receipt_length": 73,
+    "transaction_usage": [
+      1901,
+      1,
+      151,
+      0
+    ],
+    "block": {
+      "header_hex": "010015b2b480e8b3bb449479c1aef1dbf1e5a27c907d49fc876842d4b83332facd5301000000000000002a25002d2674c05cc1e310c81fa3be635c66e6164923041418d47c2ffc84018f3cf15365000000003fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff879ace121964e83e7b4f99fd2b8ad1319f171abf2b16da307f7499c31840a64327cc27147d5d398d2686c593605cb48dffd1e29e7e8dbf3c5e35ed3745b1af5c1afb449a10b29cdbe8a0b60a98e26b413a52f8bc35af49a1fc2d4fff669f58896d070000000000000100000000000000c50100000000000000000000000000000000000051976778d26056c36803109ea49beaec0c618c49fc39c63fb1f10e51bf56592c02000000000000000000000000000000",
+      "body_hex": "000000000100000046000000010010270000000000000a00000000000000000400000000000000100000000000001111111111111111111111111111111111111111111111111111111111111111000000004900000008275246e2db0bf352111ff588594fefaa55ba0668ccafa4aa3899c40462ea93086d070000000000000100000000000000970000000000000000000000000000000000000000000000",
+      "block_id": "3693a8370e4a8dac6781a556a0af7517d1684133afdce22ed750e6eb8fe23e53",
+      "nonce": 2,
+      "header_length": 294,
+      "block_length": 453,
+      "work": 4,
+      "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "resources_used_C_S_D_G": [
+        1901,
+        1,
+        453,
+        0
+      ],
+      "producer_hex": "",
+      "producer_hash": "51976778d26056c36803109ea49beaec0c618c49fc39c63fb1f10e51bf56592c",
+      "transactions_root": "879ace121964e83e7b4f99fd2b8ad1319f171abf2b16da307f7499c31840a643",
+      "receipts_root": "27cc27147d5d398d2686c593605cb48dffd1e29e7e8dbf3c5e35ed3745b1af5c",
+      "state_root": "1afb449a10b29cdbe8a0b60a98e26b413a52f8bc35af49a1fc2d4fff669f5889"
+    }
+  },
+  "difficulty": {
+    "rule": "ASERT, wiki consensus/difficulty",
+    "cases": [
+      {
+        "anchor_target": 1000,
+        "interval": 60,
+        "half_life": 600,
+        "blocks": 0,
+        "elapsed": 0,
+        "pow_limit": 10000,
+        "new_target": 1000
+      },
+      {
+        "anchor_target": 1000,
+        "interval": 60,
+        "half_life": 600,
+        "blocks": 10,
+        "elapsed": 600,
+        "pow_limit": 10000,
+        "new_target": 1000
+      },
+      {
+        "anchor_target": 1000,
+        "interval": 60,
+        "half_life": 600,
+        "blocks": 10,
+        "elapsed": 1200,
+        "pow_limit": 10000,
+        "new_target": 2000
+      },
+      {
+        "anchor_target": 1000,
+        "interval": 60,
+        "half_life": 600,
+        "blocks": 10,
+        "elapsed": 0,
+        "pow_limit": 10000,
+        "new_target": 500
+      },
+      {
+        "anchor_target": 1000,
+        "interval": 60,
+        "half_life": 600,
+        "blocks": 10,
+        "elapsed": 1800,
+        "pow_limit": 10000,
+        "new_target": 4000
+      },
+      {
+        "anchor_target": 1000,
+        "interval": 60,
+        "half_life": 600,
+        "blocks": 10,
+        "elapsed": 900,
+        "pow_limit": 10000,
+        "new_target": 1414
+      },
+      {
+        "anchor_target": 1000,
+        "interval": 60,
+        "half_life": 600,
+        "blocks": 10,
+        "elapsed": 300,
+        "pow_limit": 10000,
+        "new_target": 707
+      },
+      {
+        "anchor_target": 1000,
+        "interval": 60,
+        "half_life": 600,
+        "blocks": 10,
+        "elapsed": 599,
+        "pow_limit": 10000,
+        "new_target": 998
+      },
+      {
+        "anchor_target": 1000,
+        "interval": 60,
+        "half_life": 600,
+        "blocks": 10,
+        "elapsed": 601,
+        "pow_limit": 10000,
+        "new_target": 1001
+      },
+      {
+        "anchor_target": 1000,
+        "interval": 60,
+        "half_life": 600,
+        "blocks": 10,
+        "elapsed": 100000,
+        "pow_limit": 10000,
+        "new_target": 10000
+      },
+      {
+        "anchor_target": 1000,
+        "interval": 60,
+        "half_life": 600,
+        "blocks": 10,
+        "elapsed": -100000,
+        "pow_limit": 10000,
+        "new_target": 1
+      },
+      {
+        "anchor_target": 1000,
+        "interval": 60,
+        "half_life": 600,
+        "blocks": 1,
+        "elapsed": -59,
+        "pow_limit": 10000,
+        "new_target": 871
+      }
+    ],
+    "rounding_case": {
+      "note": "one second ahead of schedule: the exponent is floor(-65536 / 600) = -110, where truncation would give -109",
+      "anchor_target_hex": "0000000000000100000000000000000000000000000000000000000000000000",
+      "interval": 60,
+      "half_life": 600,
+      "blocks": 1,
+      "elapsed": 59,
+      "pow_limit_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "new_target_hex": "00000000000000ffb40000000000000000000000000000000000000000000000"
+    }
+  },
+  "voting": {
+    "weighted_threshold_example": {
+      "work_and_signal": [
+        [
+          4,
+          1
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          1,
+          0
+        ]
+      ],
+      "direction": 1
+    },
+    "below_threshold_example": {
+      "work_and_signal": [
+        [
+          2,
+          1
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          1,
+          0
+        ]
+      ],
+      "direction": 0
+    },
+    "majority_decrease_example": {
+      "work_and_signal": [
+        [
+          2,
+          2
+        ],
+        [
+          1,
+          1
+        ]
+      ],
+      "direction": 2
+    },
+    "exact_half_holds_example": {
+      "work_and_signal": [
+        [
+          1,
+          2
+        ],
+        [
+          1,
+          0
+        ]
+      ],
+      "direction": 0
+    },
+    "epoch_activation": {
+      "epoch_length": 4,
+      "initial_limit": 100,
+      "minimum": 90,
+      "source_directions": {
+        "0": 1,
+        "1": 0,
+        "2": 2
+      },
+      "epochs": [
+        {
+          "epoch": 0,
+          "first_height": 1,
+          "active_limit": 100
+        },
+        {
+          "epoch": 1,
+          "first_height": 5,
+          "active_limit": 100
+        },
+        {
+          "epoch": 2,
+          "first_height": 9,
+          "active_limit": 100
+        },
+        {
+          "epoch": 3,
+          "first_height": 13,
+          "active_limit": 105
+        },
+        {
+          "epoch": 4,
+          "first_height": 17,
+          "active_limit": 105
+        },
+        {
+          "epoch": 5,
+          "first_height": 21,
+          "active_limit": 95
+        }
+      ]
+    }
+  },
+  "growth": {
+    "operations": [
+      "create empty value",
+      "expand to 2 bytes",
+      "shrink to 1 byte",
+      "delete",
+      "recreate 1 byte"
+    ],
+    "G_debits": [
+      36,
+      2,
+      0,
+      0,
+      37
+    ],
+    "total_G": 75,
+    "final_live_record_allocation": 37,
+    "G_after_enclosing_revert": 75,
+    "live_allocation_after_enclosing_revert": 0
+  },
+  "discarded_output": {
+    "transaction_base_D": 151,
+    "event_payload_len": 100,
+    "event_D": 136,
+    "nested_result_D": 8,
+    "root_revert_result_len": 0,
+    "total_transaction_D": 295,
+    "retained_events": 0,
+    "actual_encoded_block_length": 453,
+    "block_D": 597
+  }
+}

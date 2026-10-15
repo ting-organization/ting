@@ -1,0 +1,50 @@
+[package]
+name = "ting-node"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Ting node, local CLI, optional REST interface and bundled wiki"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ting-organization/ting"
+publish = false
+
+[features]
+# The core's oracle engine, so that the VM harness the node tests include
+# compares engines when the feature is on. Test-only.
+oracle = ["ting-core/oracle"]
+
+[dependencies]
+ting-core = { path = ".." }
+axum = "=0.8.9"
+tower-http = { version = "=0.6.6", features = ["cors"] }
+tokio = { version = "=1.47.1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+clap = { version = "=4.5.48", features = ["derive"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.145"
+getrandom = "=0.3.4"
+pulldown-cmark = "=0.13.0"
+num-bigint = "=0.4.6"
+redb = "=4.3.0"
+sha2 = { version = "=0.10.9", features = ["compress"] }
+
+[dev-dependencies]
+vm-model = { path = "../vm-model" }
+wat = "=1.240.0"
+wasmparser = "=0.240.0"
+wasm-encoder = { version = "=0.240.0", features = ["wasmparser"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[[bin]]
+name = "ting"
+path = "src/main.rs"

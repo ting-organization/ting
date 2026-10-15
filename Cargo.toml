@@ -1,0 +1,55 @@
+[package]
+name = "ting-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Ting reference consensus and deterministic WebAssembly core"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ting-organization/ting"
+publish = false
+
+[workspace]
+members = ["node", "vm-model"]
+resolver = "3"
+
+[features]
+default = []
+# The pinned wasmi engine and the wasmparser-based validator as comparison
+# oracles for the reference interpreter and decoder. Test-only: not part of
+# the consensus build.
+oracle = ["dep:wasmi", "dep:wasmi_core", "dep:wasmparser", "dep:wasm-encoder"]
+
+[dependencies]
+sha2 = "=0.10.9"
+num-bigint = "=0.4.6"
+num-traits = "=0.2.19"
+wasmi = { version = "=2.0.0", optional = true }
+wasmi_core = { version = "=2.0.0", optional = true }
+wasmparser = { version = "=0.240.0", optional = true }
+wasm-encoder = { version = "=0.240.0", features = ["wasmparser"], optional = true }
+
+[dev-dependencies]
+vm-model = { path = "vm-model" }
+serde_json = "=1.0.145"
+wat = "=1.240.0"
+wasmparser = "=0.240.0"
+wasm-encoder = { version = "=0.240.0", features = ["wasmparser"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[[bin]]
+name = "ting-core"
+path = "src/main.rs"
+
+# Hashing dominates many debug-build tests; an optimized SHA-256 changes no
+# result, only how long the tests take.
+[profile.dev.package.sha2]
+opt-level = 3
+
+# Integer overflow stops a release build as it stops a debug one, so the two
+# can never compute different results: arithmetic that is meant to wrap says
+# so (`wrapping_*`), and an overflow nobody foresaw halts the node instead of
+# silently charging or storing something the rules do not say.
+[profile.release]
+overflow-checks = true
