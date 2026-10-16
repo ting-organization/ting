@@ -318,6 +318,7 @@ async fn daemon_cli_rest_wiki_sync_and_restart_work_together() {
         "/v1/events",
         "/v1/events?contract=0000000000000000000000000000000000000000000000000000000000000000&topic=abababababababababababababababababababababababababababababababab&from=1&limit=5",
         "/v1/mempool",
+        "/v1/votes",
         "/blocks",
         "/mempool",
         "/assets/site.css",
@@ -988,6 +989,15 @@ async fn a_new_node_syncs_a_long_chain_and_carries_on_after_a_restart() {
 async fn built_in_miner_starts_stops_and_mines_through_templates() {
     let n = Node::start(false, "miner");
     assert_eq!(n.call("miner", json!({})).await["running"], false);
+    // Votes set on the running node go into every block it builds next.
+    let set = n
+        .call("miner", json!({"action":"votes","votes":[0, 1, 0, 0]}))
+        .await;
+    assert_eq!(set["votes"], json!([0, 1, 0, 0]));
+    assert_eq!(
+        n.call("miner", json!({})).await["votes"],
+        json!([0, 1, 0, 0])
+    );
     let started = n
         .call("miner", json!({"action":"start","threads":1,"spacing":0}))
         .await;
@@ -1006,6 +1016,12 @@ async fn built_in_miner_starts_stops_and_mines_through_templates() {
     }
     let stopped = n.call("miner", json!({"action":"stop"})).await;
     assert_eq!(stopped["running"], false);
+    let voting = n.call("votes", json!({})).await;
+    assert_eq!(voting["votes"], json!([0, 1, 0, 0]));
+    assert_eq!(
+        voting["this_epoch"]["increase_percent"],
+        json!([0.0, 100.0, 0.0, 0.0])
+    );
     let height = n.height().await;
     assert!(height >= 2, "height {height}");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1251,6 +1267,18 @@ async fn the_cli_edits_a_stopped_node_and_reports_what_it_cannot_do() {
     assert_eq!(load().producer_hex.as_deref(), Some("00ff"));
     command(&dir.0, &["miner", "producer"]);
     assert_eq!(load().producer_hex, None);
+    command(
+        &dir.0,
+        &["miner", "votes", "increase", "hold", "hold", "decrease"],
+    );
+    assert_eq!(load().votes, [1, 0, 0, 2]);
+    for bad in [
+        &["miner", "votes", "up", "hold", "hold", "hold"][..],
+        &["miner", "votes", "hold", "hold", "hold"],
+    ] {
+        assert!(!cli(&dir.0, bad).status.success(), "{bad:?}");
+    }
+    assert_eq!(load().votes, [1, 0, 0, 2]);
     command(&dir.0, &["api", "enable", "--cors"]);
     assert!(load().api_enabled && load().api_cors);
     command(&dir.0, &["api", "disable"]);

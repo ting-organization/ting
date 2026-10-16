@@ -62,6 +62,7 @@ pub fn router(node: Node, cors: bool) -> Router {
             post(submit).layer(DefaultBodyLimit::disable()),
         )
         .route("/v1/mempool", get(mempool))
+        .route("/v1/votes", get(votes))
         .route("/v1/events", get(events))
         .route("/v1/contracts/{id}", get(contract))
         .route("/v1/contracts/{id}/storage/{key}", get(storage))
@@ -275,6 +276,11 @@ async fn transaction(
     };
     respond(lookup.await)
 }
+/// Where capacity voting stands, from the chain thread, which counts it once
+/// per tip.
+async fn votes(State(s): State<ApiState>) -> Response {
+    respond(s.node.handle.call_rest("votes", json!({})).await)
+}
 async fn blocks(State(s): State<ApiState>, Query(p): Query<Page>) -> Response {
     respond(read(&s, "blocks", json!({"from":p.from,"limit":p.limit})).await)
 }
@@ -406,6 +412,11 @@ pub fn openapi() -> Value {
             "TransactionLookup",
         ),
         ("/v1/mempool", "Pending transaction inventory", "Mempool"),
+        (
+            "/v1/votes",
+            "Capacity voting: this epoch's votes so far and the capacities decided",
+            "Voting",
+        ),
         (
             "/v1/events",
             "Events by canonical block, of every program or of one",

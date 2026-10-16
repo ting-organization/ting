@@ -134,6 +134,12 @@ impl Node {
                 Ok(status)
             }
             "miner" => self.miner(params).await,
+            "votes" => {
+                let config = self.handle.call("config", json!({})).await?;
+                let mut voting = self.handle.call("votes", json!({})).await?;
+                voting["votes"] = config["votes"].clone();
+                Ok(voting)
+            }
             "mine" => self.mine(params).await,
             "peers" => {
                 let config = self.handle.call("config", json!({})).await?;
@@ -256,11 +262,23 @@ impl Node {
                     )
                     .await
             }
-            _ => Ok(self.miner.lock().unwrap().as_ref().map_or(
-                json!({"running":false,"threads":config.miner_threads,"spacing":config.miner_spacing,
-                    "producer_hex":ting_core::hash::hex(&config.producer())}),
-                Miner::status,
-            )),
+            "votes" => {
+                self.handle
+                    .call(
+                        "miner_config",
+                        json!({"enabled":config.miner_enabled,"votes":params["votes"]}),
+                    )
+                    .await
+            }
+            _ => {
+                let mut status = self.miner.lock().unwrap().as_ref().map_or(
+                    json!({"running":false,"threads":config.miner_threads,"spacing":config.miner_spacing}),
+                    Miner::status,
+                );
+                status["producer_hex"] = json!(ting_core::hash::hex(&config.producer()));
+                status["votes"] = json!(config.votes);
+                Ok(status)
+            }
         }
     }
     /// Joins the miner thread off the async runtime; it stops within a slice.

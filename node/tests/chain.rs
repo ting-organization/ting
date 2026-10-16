@@ -3422,3 +3422,98 @@ fn events_are_read_by_program_and_topic_on_the_canonical_chain() {
     let mut chain = open(&dir);
     check(&mut chain);
 }
+#[test]
+fn voting_shows_this_epochs_votes_and_the_capacities_already_decided() {
+    // The experimental profile: epochs of four blocks. The node votes to
+    // increase compute.
+    let dir = Directory::new();
+    let g = Genesis::experimental();
+    let path = dir.0.join("genesis.src");
+    fs::write(&path, g.encode()).unwrap();
+    let c = config::Config {
+        name: "voter".into(),
+        control: "127.0.0.1:0".parse().unwrap(),
+        p2p: "127.0.0.1:0".parse().unwrap(),
+        api: "127.0.0.1:0".parse().unwrap(),
+        votes: [1, 0, 0, 0],
+        ..Default::default()
+    };
+    config::initialize(&dir.0, &c, Some(&path)).unwrap();
+    let mut chain = open(&dir);
+    let votes = |chain: &mut Chain| chain.request("votes", json!({})).unwrap();
+    let start = votes(&mut chain);
+    assert_eq!(
+        (&start["epoch"], &start["next_epoch_from"]),
+        (&json!(0), &json!(5))
+    );
+    assert_eq!(start["this_epoch"]["blocks"], 0);
+    assert_eq!(
+        start["this_epoch"]["outcome_so_far"],
+        json!(["hold", "hold", "hold", "hold"])
+    );
+    // Epoch 0, all four blocks for an increase, decides epoch 3.
+    chain.mine(4, 100_000).unwrap();
+    let mut raised = g.initial;
+    raised.0[0] += raised.0[0] / 20;
+    let four = votes(&mut chain);
+    assert_eq!(four["epoch"], 1);
+    assert_eq!(
+        four["capacities"],
+        json!([
+            {"epoch":1,"from":5,"limits":g.initial.0},
+            {"epoch":2,"from":9,"limits":g.initial.0},
+            {"epoch":3,"from":13,"limits":raised.0},
+        ])
+    );
+    // The running node takes new votes at once: decrease compute, increase
+    // growth. Anything but four of 0, 1 or 2 is refused.
+    for bad in [json!([3, 0, 0, 0]), json!([0, 0, 0]), json!("increase")] {
+        assert!(
+            chain
+                .request("miner_config", json!({"enabled":false,"votes":bad}))
+                .is_err()
+        );
+    }
+    let set = chain
+        .request(
+            "miner_config",
+            json!({"enabled":false,"votes":[2, 0, 0, 1]}),
+        )
+        .unwrap();
+    assert_eq!(set["votes"], json!([2, 0, 0, 1]));
+    assert_eq!(config::Config::load(&dir.0).unwrap().votes, [2, 0, 0, 1]);
+    chain.mine(2, 100_000).unwrap();
+    assert_eq!(
+        chain.request("block", json!({"id":"6"})).unwrap()["votes"],
+        json!([2, 0, 0, 1])
+    );
+    let six = votes(&mut chain);
+    let this = &six["this_epoch"];
+    assert_eq!((&six["epoch"], &this["blocks"]), (&json!(1), &json!(2)));
+    assert_eq!(this["decrease_percent"], json!([100.0, 0.0, 0.0, 0.0]));
+    assert_eq!(this["increase_percent"], json!([0.0, 0.0, 0.0, 100.0]));
+    assert_eq!(
+        this["outcome_so_far"],
+        json!(["decrease", "hold", "hold", "increase"])
+    );
+    assert_eq!(this["takes_effect_from"], 17);
+    // Once epoch 1 is complete, epoch 4's capacities are decided: less
+    // compute than epoch 3, more growth.
+    chain.mine(2, 100_000).unwrap();
+    let decided = votes(&mut chain)["capacities"][2].clone();
+    assert_eq!(
+        (&decided["epoch"], &decided["from"]),
+        (&json!(4), &json!(17))
+    );
+    let limits: Vec<u64> = serde_json::from_value(decided["limits"].clone()).unwrap();
+    assert!(limits[0] < raised.0[0] && limits[3] > g.initial.0[3]);
+    assert_eq!(limits[1..3], g.initial.0[1..3]);
+    // And they are what the chain applies when epoch 4 begins.
+    chain.mine(8, 100_000).unwrap();
+    let status = chain.request("status", json!({})).unwrap();
+    assert_eq!(
+        (&status["height"], &status["limits"]),
+        (&json!(16), &decided["limits"])
+    );
+    assert_eq!(votes(&mut chain)["capacities"][0], decided);
+}

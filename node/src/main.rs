@@ -73,9 +73,13 @@ enum Action {
         #[arg(long, default_value_t = 1_000_000)]
         attempts: u64,
     },
-    /// The built-in CPU miner: start, stop or inspect it.
+    /// The built-in CPU miner: start, stop or inspect it, and what the blocks
+    /// this node builds carry.
     #[command(subcommand)]
     Miner(MinerCommand),
+    /// Show where capacity voting stands: the share of this epoch's work voting
+    /// each way so far, the capacities already decided, and this node's votes.
+    Votes,
     /// Print a block template: a candidate block whose header lacks only the nonce.
     Template {
         /// Include exactly these pooled transactions, in this order (default: first in).
@@ -128,6 +132,18 @@ enum MinerCommand {
     Producer {
         hex: Option<String>,
     },
+    /// Set the capacity votes of the blocks this node builds: compute, state
+    /// access, data and growth, each hold, increase or decrease.
+    Votes {
+        #[arg(num_args = 4, required = true, value_names = ["COMPUTE", "STATE", "DATA", "GROWTH"])]
+        votes: Vec<Vote>,
+    },
+}
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Vote {
+    Hold,
+    Increase,
+    Decrease,
 }
 #[derive(Subcommand)]
 enum ApiCommand {
@@ -160,6 +176,9 @@ async fn edit(dir: &Path, method: &str, params: Value) -> Result<Value> {
                 .as_str()
                 .filter(|p| !p.is_empty())
                 .map(str::to_owned);
+        }
+        "miner" if params["action"] == "votes" => {
+            c.votes = serde_json::from_value(params["votes"].clone()).map_err(|e| e.to_string())?;
         }
         "miner" => {
             c.miner_enabled = params["action"] == "start";
@@ -396,6 +415,18 @@ async fn execute(cli: Cli) -> Result<Option<Value>> {
         Action::Miner(MinerCommand::Status) => {
             rpc(dir, "miner", json!({"action":"status"})).await?
         }
+        Action::Miner(MinerCommand::Votes { votes }) => {
+            let votes: Vec<u8> = votes
+                .iter()
+                .map(|vote| match vote {
+                    Vote::Hold => 0,
+                    Vote::Increase => 1,
+                    Vote::Decrease => 2,
+                })
+                .collect();
+            edit(dir, "miner", json!({"action":"votes","votes":votes})).await?
+        }
+        Action::Votes => rpc(dir, "votes", json!({})).await?,
         Action::Miner(MinerCommand::Producer { hex }) => {
             edit(
                 dir,

@@ -43,6 +43,9 @@ pub const LOCATOR_MAX: usize = 32;
 /// not validity, so the same block is accepted later.
 pub const CLOCK_SLACK: u64 = 7_200;
 pub const AHEAD_OF_CLOCK: &str = "timestamp ahead of the clock";
+/// The answer to capacity votes that are not four of 0 (hold), 1 (increase)
+/// and 2 (decrease).
+const VOTES: &str = "votes are four of 0 (hold), 1 (increase) or 2 (decrease), in C, S, D, G order";
 /// Refusals that are this node's policy rather than a peer's fault; a peer
 /// connection carries on past them (wiki: node/sync).
 pub const POOL_FULL: &str = "mempool is full";
@@ -366,6 +369,8 @@ pub struct Chain {
     activating: Option<bool>,
     /// The limits after a vote boundary, by the parent before it.
     boundaries: std::cell::RefCell<BTreeMap<Hash, Resources>>,
+    /// Where capacity voting stood at a tip, as last asked.
+    voting: std::cell::RefCell<Option<(Hash, Value)>>,
     /// The transaction last served in slices, so that its next slice is not
     /// encoded again.
     served_transaction: Option<(Hash, std::rc::Rc<Vec<u8>>)>,
@@ -452,6 +457,7 @@ impl Chain {
             step_time: None,
             activating: None,
             boundaries: Default::default(),
+            voting: Default::default(),
             served_transaction: None,
             in_flight: BTreeMap::new(),
             expired: BTreeMap::new(),
@@ -845,6 +851,69 @@ impl Chain {
     }
     fn tip_limits(&self) -> Result<Resources> {
         self.limits_after(self.tip())
+    }
+    /// Where capacity voting stands at the tip (wiki:
+    /// consensus/capacity-voting): the epoch the next block belongs to, the
+    /// share of the work of its blocks so far that votes each way and what
+    /// that would decide, and the capacities of this epoch and the next two,
+    /// which the votes of earlier epochs already decided. Counted once per tip.
+    fn voting(&self) -> Result<Value> {
+        let tip = self.tip();
+        if let Some((at, answer)) = &*self.voting.borrow()
+            && *at == tip
+        {
+            return Ok(answer.clone());
+        }
+        let e = u64::from(self.genesis.vote_epoch);
+        let height = self.height() as u64;
+        let epoch = height / e;
+        // The votes of this epoch so far and of the two before it, along the
+        // canonical chain.
+        let lowest = epoch.saturating_sub(2) * e + 1;
+        let mut tallies: BTreeMap<u64, consensus::Tally> = BTreeMap::new();
+        let mut id = tip;
+        while id != self.genesis.block_id() {
+            let b = self.entry(&id);
+            if b.header.height < lowest {
+                break;
+            }
+            tallies
+                .entry((b.header.height - 1) / e)
+                .or_default()
+                .add(&b.header);
+            id = b.header.parent;
+        }
+        let mut limits = self.tip_limits()?;
+        let mut capacities = vec![json!({"epoch":epoch,"from":epoch * e + 1,"limits":limits.0})];
+        for next in epoch + 1..=epoch + 2 {
+            if next >= 3 {
+                let source = tallies.get(&(next - 3)).cloned().unwrap_or_default();
+                limits = consensus::next_limits_tally(&self.genesis, limits, &source);
+            }
+            capacities.push(json!({"epoch":next,"from":next * e + 1,"limits":limits.0}));
+        }
+        let current = tallies.remove(&epoch).unwrap_or_default();
+        let percent = |part: &BigUint| -> f64 {
+            if current.total.bits() == 0 {
+                return 0.0;
+            }
+            let basis = u64::try_from(&(part * 10_000u32 / &current.total)).unwrap_or(10_000);
+            basis as f64 / 100.0
+        };
+        let outcome = |i: usize| match current.direction(i) {
+            1 => "increase",
+            2 => "decrease",
+            _ => "hold",
+        };
+        let answer = json!({"height":height,"epoch":epoch,"epoch_blocks":e,"next_epoch_from":(epoch + 1) * e + 1,
+            "this_epoch":{"blocks":height - epoch * e,
+                "increase_percent":current.up.iter().map(percent).collect::<Vec<_>>(),
+                "decrease_percent":current.down.iter().map(percent).collect::<Vec<_>>(),
+                "outcome_so_far":(0..4).map(outcome).collect::<Vec<_>>(),
+                "takes_effect_from":(epoch + 3) * e + 1},
+            "capacities":capacities});
+        *self.voting.borrow_mut() = Some((tip, answer.clone()));
+        Ok(answer)
     }
     /// The work a header chain needs before it is indexed: within
     /// `THRESHOLD_BLOCKS` of the tip's work.
@@ -2714,6 +2783,7 @@ impl Chain {
                 )
             }
             "config" => serde_json::to_value(&self.config).map_err(|e| e.to_string()),
+            "votes" => self.voting(),
             // Operator overrides, from the control channel only.
             "invalidate" => self.mark_invalid(self.named(str_param(&p, "id")?)?),
             "reconsider" => self.reconsider(self.named(str_param(&p, "id")?)?),
@@ -2875,12 +2945,25 @@ impl Chain {
                     Value::String(producer) => c.producer_hex = Some(producer.clone()),
                     _ => return Err("expected producer hex".into()),
                 }
+                match &p["votes"] {
+                    Value::Null => {}
+                    Value::Array(votes) if votes.len() == 4 => {
+                        for (vote, value) in c.votes.iter_mut().zip(votes) {
+                            *vote = value
+                                .as_u64()
+                                .and_then(|v| u8::try_from(v).ok())
+                                .filter(|v| *v <= 2)
+                                .ok_or(VOTES)?;
+                        }
+                    }
+                    _ => return Err(VOTES.into()),
+                }
                 c.save(&self.directory)?;
                 self.config = c;
                 self.templates.clear();
                 Ok(
                     json!({"enabled":self.config.miner_enabled,"threads":self.config.miner_threads,"spacing":self.config.miner_spacing,
-                    "producer_hex":hex(&self.config.producer()),"selection":self.selector.describe()}),
+                    "producer_hex":hex(&self.config.producer()),"votes":self.config.votes,"selection":self.selector.describe()}),
                 )
             }
             "block" | "blocks" | "events" | "contract" | "storage" | "storage_batch" | "raw" => {

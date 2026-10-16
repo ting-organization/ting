@@ -45,6 +45,7 @@ D, G order.
 | GET | `/v1/transactions/{id}?from=0&limit=20` | Pending or deferred status, the pending envelope, and a page of canonical occurrences with their receipts |
 | POST | `/v1/transactions` | Submit `{"hex": "…"}`, a canonical transaction; with `"not_before"`, deferred |
 | GET | `/v1/mempool` | Pending ids, sizes and budgets, the pool's total bytes, and the deferred set |
+| GET | `/v1/votes` | Where capacity voting stands at the tip: the epoch, the share of its work so far voting each way, and the capacities already decided ([capacity votes](/wiki/node/mining#capacity-votes)) |
 | GET | `/v1/events?from=1&limit=20` | Events grouped by canonical block, each block with its height, id and timestamp, each event with its transaction's position and its own place among that transaction's events |
 | GET | `/v1/events?contract={id}&topic={topic}&from=1&limit=20` | The same for one program's events only, and with `topic` only those whose payload begins with those 32 bytes ([events](/wiki/programs/conventions#events)): blocks without any are left out |
 | GET | `/v1/contracts/{id}` | The immutable manifest: code hash, code size and code price |

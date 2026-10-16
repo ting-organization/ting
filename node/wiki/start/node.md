@@ -79,7 +79,8 @@ tries every pending transaction in arrival order and includes each one the block
 still has room for.
 
 The protocol pays no reward. Programs that pay block producers read the block's
-producer data, which `ting miner producer HEX` sets. Templates for external mining
+producer data, which `ting miner producer HEX` sets. Each block also carries its
+miner's capacity votes, which `ting miner votes` sets and `ting votes` follows. Templates for external mining
 software, producer data and capacity votes are covered in
 [Mining and voting](/wiki/node/mining).
 
@@ -105,6 +106,8 @@ listens, and then any messages the node writes. A command that fails prints
 | `ting submit FILE [--not-before TIME]` | Submits a binary canonical transaction, deferred until a Unix time |
 | `ting miner start [--threads N] [--spacing S]`, `ting miner stop`, `ting miner status` | Controls the built-in miner |
 | `ting miner producer [HEX]` | Sets the producer data of the blocks this node builds, or clears it |
+| `ting miner votes C S D G` | Sets the capacity votes of the blocks this node builds, each `hold`, `increase` or `decrease` ([capacity votes](/wiki/node/mining#capacity-votes)) |
+| `ting votes` | Where capacity voting stands: this epoch's votes so far, the capacities already decided and this node's votes |
 | `ting mine [--count N] [--attempts A]` | On a [development chain](#a-development-chain): mines up to N blocks (1 to 100, default 1), trying at most A nonces each (default 1,000,000) |
 | `ting invalidate BLOCK`, `ting reconsider BLOCK` | Marks a block invalid, by id or height, or clears invalid marks ([overriding validity](/wiki/node/storage#overriding-validity)) |
 | `ting template [--tx ID]…` | Prints a block template; each `--tx` names a pooled transaction, and the template then holds exactly those, in order |

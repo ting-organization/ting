@@ -97,7 +97,7 @@ about to be replaced would be lost; its status shows how far behind.
 - `ting miner stop` stops it.
 - `ting miner status` reports whether it runs, the search in use, the spacing, when
   it started, templates fetched, nonces tried, blocks found, the height it works on
-  and its last error.
+  and its last error, and the producer data and capacity votes its blocks carry.
 
 Its state is kept in the configuration (`miner_enabled`, `miner_threads`,
 `miner_spacing`), so a restarted node resumes mining if it was.
@@ -127,15 +127,30 @@ destination of its payments from there. It proves nothing about who mined.
 
 ## Capacity votes
 
-The node signals the votes in the `votes` field of `config.json`: four numbers in
-C, S, D, G order, each 0 for hold, 1 for increase or 2 for decrease.
+Every block the node builds, by its own miner or as a template, carries its votes,
+one for each resource in C, S, D, G order: compute, state access, data and growth.
+`ting miner votes` sets them, each `hold`, `increase` or `decrease`:
 
-```json
-"votes": [1, 0, 0, 0]
+```text
+ting miner votes increase hold hold hold
 ```
 
-Edit the file while the node is stopped; the votes apply to every block it builds
-after the next start. How votes are counted is covered in
+A running node takes them at once, from its next template on, and keeps them in the
+`votes` field of `config.json`, as numbers: 0 for hold, 1 for increase, 2 for
+decrease. A stopped node's file is edited in place. They hold until changed.
+
+`ting votes` shows where voting stands at the tip, as `GET /v1/votes` does over REST
+([the REST API](/wiki/start/explore#the-rest-api)):
+
+| Field | Content |
+|---|---|
+| `epoch`, `epoch_blocks`, `next_epoch_from` | The epoch the next block belongs to, the blocks in an epoch, and the height the next epoch begins at |
+| `this_epoch` | Its blocks so far; for each resource the share of their work that votes increase and decrease, in percent rounded down; what those votes would decide if the epoch ended now; and `takes_effect_from`, the height from which this epoch's decision applies, three epochs on |
+| `capacities` | The capacities of this epoch and the next two, which earlier epochs' votes already decided, each with the epoch and the height it begins at |
+| `votes` | `ting votes` only: this node's own votes |
+
+The node counts this once per tip, from the block headers of the last three epochs,
+which it holds in memory. How votes are counted is covered in
 [Capacity voting](/wiki/consensus/capacity-voting).
 
 ## The mempool

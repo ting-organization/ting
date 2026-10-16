@@ -361,6 +361,7 @@ pub async fn control_server(listener: TcpListener, node: Node) {
                     | "template"
                     | "solution"
                     | "miner"
+                    | "votes"
                     | "submit"
                     | "api"
                     | "invalidate"

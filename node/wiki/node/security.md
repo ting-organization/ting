@@ -40,7 +40,8 @@ or `{"ok": false, "error": …}`, with `unauthorized` for a wrong proof and
 | `peers` | Configured and discovered peers with their last success or error, and the size of the address book | `ting peers` |
 | `add_peer`, `remove_peer` | Change the peer list | `ting add node`, `ting remove node` |
 | `api` | Enable or disable REST, with or without CORS | `ting api enable`, `ting api disable` |
-| `miner` | Start, stop or describe the built-in miner; set producer data | `ting miner …` |
+| `miner` | Start, stop or describe the built-in miner; set producer data and capacity votes | `ting miner …` |
+| `votes` | Where capacity voting stands, with this node's votes | `ting votes` |
 | `template`, `solution` | The node's half of [mining](/wiki/node/mining) | `ting template`, `ting solution` |
 | `mine` | Template, search and solution in one bounded request | `ting mine` |
 | `submit` | Submit a transaction, deferred with `not_before` | `ting submit` |
