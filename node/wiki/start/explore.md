@@ -45,7 +45,8 @@ D, G order.
 | GET | `/v1/transactions/{id}?from=0&limit=20` | Pending or deferred status, the pending envelope, and a page of canonical occurrences with their receipts |
 | POST | `/v1/transactions` | Submit `{"hex": "…"}`, a canonical transaction; with `"not_before"`, deferred |
 | GET | `/v1/mempool` | Pending ids, sizes and budgets, the pool's total bytes, and the deferred set |
-| GET | `/v1/events?from=1&limit=20` | Events grouped by canonical block, each block with its height, id and timestamp |
+| GET | `/v1/events?from=1&limit=20` | Events grouped by canonical block, each block with its height, id and timestamp, each event with its transaction's position and its own place among that transaction's events |
+| GET | `/v1/events?contract={id}&topic={topic}&from=1&limit=20` | The same for one program's events only, and with `topic` only those whose payload begins with those 32 bytes ([events](/wiki/programs/conventions#events)): blocks without any are left out |
 | GET | `/v1/contracts/{id}` | The immutable manifest: code hash, code size and code price |
 | GET | `/v1/contracts/{id}/storage/{key}?proof=false` | The current canonical record, `null` if absent, with the state root and tip it was read at; with `proof=true` also its Merkle proof |
 | POST | `/v1/storage` | Many records from one state: `{"reads": [{"contract": "…", "key": "…"}, …]}`, 1 to 1,024 of them, answered in that order with the state root and canonical tip they were all read at; with `"proof": true` each with its Merkle proof |
@@ -71,6 +72,10 @@ no REST surface; it runs over the [control channel](/wiki/node/security#the-cont
   `from`, default 1; occurrence pages start at offset `from`, default 0, and say with
   `has_more` whether another page follows. These pages and `/raw` refuse any other
   query parameter with `400`; the other endpoints ignore query parameters.
+- Block and event pages give the canonical `height` they were read at. An event page
+  with `contract` holds up to `limit` blocks that have such events, and its `next` is
+  the height to continue from: past `height` once nothing more is there. A `topic`
+  needs its `contract`.
 - A JSON page stops before 16 MiB, so it may hold fewer entries than `limit`; follow
   `next` to continue. An entry too large for any page is refused with an error that
   points to the raw block.

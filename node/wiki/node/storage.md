@@ -54,6 +54,8 @@ on a node with memory to spare. Its tables hold:
 | `block_redo`, `redo_blocks` | The resulting values of the records a disconnected block changed, and which blocks have them, by height |
 | `value_parts` | The parts of values larger than 1 MiB in `records`, `block_changes` and `block_redo` |
 | `transaction_occurrences` | Every transaction occurrence, by transaction id, height, block id and position |
+| `program_events` | Every event of an executed block, by the emitting program's ContractId, height, block id, its transaction's position and its own place among that transaction's events |
+| `program_event_topics` | The same for every event whose payload has a topic, its first 32 bytes, with the topic after the ContractId |
 
 Hashes, record values and encodings keep their protocol meaning. An empty value is a
 present record, and absence is encoded separately. A value of up to 1 MiB is kept in
@@ -147,8 +149,8 @@ above, with a moment's reading from the database first.
 A side branch whose blocks all lie at or below the settled height, some 42 days or
 more behind the tip on the production network, is forgotten as blocks settle and when
 the node opens: it leaves the index, and what is stored of its blocks leaves the
-database, their location and header, the occurrences of their transactions and any
-undo and redo data. Their frames stay in the block files, unreferenced, as the files
+database, their location and header, the occurrences of their transactions and their
+events, and any undo and redo data. Their frames stay in the block files, unreferenced, as the files
 are only ever appended to. Should such a branch ever be extended past the tip, it is
 fetched again like any other branch. The node's status shows
 `settled_height`, the height at or below which canonical blocks are settled, and
@@ -274,8 +276,9 @@ On restart the node opens its stored validated state and loads the metadata of t
 blocks its index holds in memory: the canonical blocks above the settled height, and
 the side blocks `side_blocks` lists. It reads no settled block, no historical block
 body and no transaction, so a restart takes as long however long the chain. A
-database from before `side_blocks` fills it once, from every stored header. Before it serves
-anything it checks that:
+database from before `side_blocks` fills it once, from every stored header, and one
+from before the event tables fills them once, from every executed block, a thousand
+blocks to a commit. Before it serves anything it checks that:
 
 - every header it loads hashes to its block id, carries this ChainId and has a block
   location;
@@ -316,6 +319,14 @@ is rejected, never reset.
 Block bodies are read from disk on demand. Transaction lookups use the occurrence
 index and keep only occurrences on the canonical chain, so a transaction id that
 appears in several blocks lists every occurrence, page by page.
+
+A program's events are read the same way: the event tables give, in order of height,
+the blocks with events of that program, or of one of its topics, and only those that
+are canonical count; the page then reads each such block once for the events'
+transactions and payloads. An executed block's rows are written in the commit that
+stores its execution, and a reorganization changes none of them, so reading events
+costs in proportion to the events found and the blocks they lie in, never to the
+length of the chain.
 
 The mempool is not stored; deferred transactions are, in `deferred.json`, as described
 in [Mining and voting](/wiki/node/mining#deferred-transactions). A `deferred.json`

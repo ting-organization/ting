@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use ting_core::{
     hash::{Hash, hex},
-    protocol::{Encode, HEADER_LEN, Receipt, Transaction},
+    protocol::{Encode, Event, HEADER_LEN, Receipt, Transaction},
     state::{End, manifest_key, prove, record_key},
 };
 use tokio::sync::Semaphore;
@@ -90,6 +90,7 @@ pub fn answer_wire(view: &View, request: &wire::Request) -> Result<wire::Answer>
 pub fn answer(view: &View, method: &str, p: &Value) -> Result<Value> {
     match method {
         "block" => block_json(view, block_id(view, str_param(p, "id")?)?),
+        "events" if !p["contract"].is_null() => program_events(view, p),
         "blocks" | "events" => page(view, method, p),
         "raw" => raw(view, p),
         "headers" => headers(view, p),
@@ -145,6 +146,9 @@ fn block_json(view: &View, id: Hash) -> Result<Value> {
 }
 /// A page of canonical blocks, or of their events, from height `from`.
 fn page(view: &View, method: &str, p: &Value) -> Result<Value> {
+    if !p["topic"].is_null() {
+        return Err("a topic is read with its program: give contract too".into());
+    }
     let from = u64_param(p, "from")?.unwrap_or(1).max(1);
     let limit = u64_param(p, "limit")?.unwrap_or(20);
     if limit > 100 {
@@ -160,16 +164,67 @@ fn page(view: &View, method: &str, p: &Value) -> Result<Value> {
             block_json(view, id)?
         } else {
             let b = view.block(&id)?;
-            json!({"block":hex(&id),"height":b.header.height,"timestamp":b.header.timestamp,"events":b.receipts.iter().enumerate().flat_map(|(i,r)|
-                r.events.iter().map(move |e| json!({"transaction_index":i,"transaction":hex(&r.transaction),"contract":hex(&e.contract),"payload_hex":hex(&e.payload)}))).collect::<Vec<_>>()})
+            let events = b.receipts.iter().enumerate().flat_map(|(t, r)| {
+                r.events
+                    .iter()
+                    .enumerate()
+                    .map(move |(e, event)| event_json(t, r, e, event))
+            });
+            json!({"block":hex(&id),"height":b.header.height,"timestamp":b.header.timestamp,"events":events.collect::<Vec<_>>()})
         };
         if !push_bounded(&mut items, item, &mut size)? {
             break;
         }
     }
     Ok(
-        json!({"items":items,"from":from,"next":from.saturating_add(items.len() as u64),"tip":hex(&view.tip()?)}),
+        json!({"items":items,"from":from,"next":from.saturating_add(items.len() as u64),"tip":hex(&view.tip()?),"height":view.height()?}),
     )
+}
+/// A page of the events of one program, or of those with one topic, by
+/// canonical block from height `from`: blocks without any are left out, and
+/// `next` is the height to continue from, past the tip once nothing more is
+/// there (wiki: start/explore).
+fn program_events(view: &View, p: &Value) -> Result<Value> {
+    let contract = hash_arg(str_param(p, "contract")?)?;
+    let topic = match &p["topic"] {
+        Value::Null => None,
+        Value::String(topic) => Some(hash_arg(topic)?),
+        _ => return Err("expected topic".into()),
+    };
+    let from = u64_param(p, "from")?.unwrap_or(1).max(1);
+    let limit = u64_param(p, "limit")?.unwrap_or(20);
+    if limit > 100 {
+        return Err("pagination limit is 100".into());
+    }
+    let height = view.height()?;
+    let (found, more) = view.events_of(&contract, topic.as_ref(), from, limit as usize)?;
+    let mut items = Vec::new();
+    let mut size = 0;
+    let mut next = None;
+    for found in &found {
+        let block = view.block(&found.id)?;
+        let mut events = Vec::with_capacity(found.events.len());
+        for &(t, e) in &found.events {
+            let receipt = block.receipts.get(t).ok_or("stored event out of place")?;
+            let event = receipt.events.get(e).ok_or("stored event out of place")?;
+            events.push(event_json(t, receipt, e, event));
+        }
+        let item = json!({"block":hex(&found.id),"height":found.height,"timestamp":block.header.timestamp,"events":events});
+        if !push_bounded(&mut items, item, &mut size)? {
+            next = Some(found.height);
+            break;
+        }
+    }
+    let next = next.unwrap_or(match found.last() {
+        Some(last) if more => last.height + 1,
+        None if more => from,
+        _ => from.max(height + 1),
+    });
+    Ok(json!({"items":items,"from":from,"next":next,"tip":hex(&view.tip()?),"height":height}))
+}
+/// An event as pages give it, with its place in its block.
+fn event_json(transaction: usize, receipt: &Receipt, index: usize, event: &Event) -> Value {
+    json!({"transaction_index":transaction,"transaction":hex(&receipt.transaction),"event_index":index,"contract":hex(&event.contract),"payload_hex":hex(&event.payload)})
 }
 /// A slice of a block this node has executed. Others it holds, stored but not
 /// executed or failed, are not served: a peer is banned for sending a block

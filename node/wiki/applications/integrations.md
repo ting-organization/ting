@@ -7,8 +7,11 @@ REST API. A few properties of Ting shape how they should do it.
 
 Every transaction occurrence has a receipt with its status, the resources it used and
 its result bytes. Successful invocations can emit events: the emitting ContractId plus
-program-defined bytes, in order. Events suit an indexer that follows the whole chain;
-results suit a client that wants the answer to one transaction.
+program-defined bytes, in order. Events suit an indexer that follows the whole chain,
+and a client that wants one program's events, or those of one of its topics, asks a
+node for just those ([the REST API](/wiki/start/explore#the-rest-api)), at a cost that
+grows with the events found, not with the chain. Results suit a client that wants the
+answer to one transaction.
 
 ## Expect reorganizations
 

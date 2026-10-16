@@ -3240,3 +3240,185 @@ fn a_budget_larger_than_a_block_is_taken_and_mined_when_its_use_fits() {
     assert_eq!(block["transactions"], json!([hex(&call.id(chain_id))]));
     assert_eq!(block["receipts"][0]["status_name"], "Success");
 }
+/// A program that emits its input, up to 64 bytes, as an event: its
+/// deployment emits the empty input.
+fn emitter() -> ting_core::protocol::Transaction {
+    ting_core::protocol::Transaction {
+        budget: ting_core::meter::Resources([1_000_000, 128, 16_384, 16_384]),
+        payload: ting_core::protocol::Payload::Deploy {
+            code: wat::parse_str(
+                r#"(module
+  (import "ting" "input" (func (param i32 i32) (result i32)))
+  (import "ting" "emit" (func (param i32 i32)))
+  (memory (export "memory") 1 1)
+  (func (export "invoke") (call 1 (i32.const 0) (call 0 (i32.const 0) (i32.const 64)))))"#,
+            )
+            .unwrap(),
+            input: vec![],
+        },
+    }
+}
+/// A page's events as height, transaction, place and payload.
+fn events_in(page: &serde_json::Value) -> Vec<(u64, u64, u64, String)> {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| {
+            let height = item["height"].as_u64().unwrap();
+            item["events"].as_array().unwrap().iter().map(move |e| {
+                (
+                    height,
+                    e["transaction_index"].as_u64().unwrap(),
+                    e["event_index"].as_u64().unwrap(),
+                    e["payload_hex"].as_str().unwrap().to_string(),
+                )
+            })
+        })
+        .collect()
+}
+#[test]
+fn events_are_read_by_program_and_topic_on_the_canonical_chain() {
+    use redb::TableDefinition;
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let deploy = emitter();
+    let mut bytes = g.chain_id().to_vec();
+    bytes.extend(deploy.id(g.chain_id()));
+    bytes.extend(0u64.to_le_bytes());
+    let program = hex(&ting_core::hash::hash("contract", &bytes));
+    let (a, b) = ([0xaa; 32], [0xbb; 32]);
+    let said = |topic: [u8; 32], word: &[u8]| [&topic[..], word].concat();
+    // Block 1: the deployment's own event, then A, B and A again; block 2
+    // has none; block 3 has A once more.
+    chain.submit(&deploy.encode()).unwrap();
+    for payload in [said(a, b"1"), said(b, b"2"), said(a, b"3")] {
+        chain.submit(&call(&program, payload).encode()).unwrap();
+    }
+    chain.mine(1, 100_000).unwrap();
+    chain.mine(1, 100_000).unwrap();
+    chain
+        .submit(&call(&program, said(a, b"4")).encode())
+        .unwrap();
+    chain.mine(1, 100_000).unwrap();
+    let all = chain
+        .request("events", json!({"contract":program}))
+        .unwrap();
+    assert_eq!(
+        events_in(&all),
+        vec![
+            (1, 0, 0, String::new()),
+            (1, 1, 0, hex(&said(a, b"1"))),
+            (1, 2, 0, hex(&said(b, b"2"))),
+            (1, 3, 0, hex(&said(a, b"3"))),
+            (3, 0, 0, hex(&said(a, b"4"))),
+        ]
+    );
+    assert_eq!((&all["next"], &all["height"]), (&json!(4), &json!(3)));
+    let topic = |chain: &mut Chain, topic: [u8; 32], more: serde_json::Value| {
+        let mut query = json!({"contract":program,"topic":hex(&topic)});
+        for (key, value) in more.as_object().unwrap() {
+            query[key] = value.clone();
+        }
+        chain.request("events", query)
+    };
+    let of_a = topic(&mut chain, a, json!({})).unwrap();
+    assert_eq!(
+        events_in(&of_a)
+            .iter()
+            .map(|e| (e.0, e.1))
+            .collect::<Vec<_>>(),
+        vec![(1, 1), (1, 3), (3, 0)]
+    );
+    let of_b = topic(&mut chain, b, json!({})).unwrap();
+    assert_eq!(events_in(&of_b), vec![(1, 2, 0, hex(&said(b, b"2")))]);
+    // Pages hold whole blocks; next skips the blocks without any.
+    let first = topic(&mut chain, a, json!({"limit":1})).unwrap();
+    assert_eq!((events_in(&first).len(), &first["next"]), (2, &json!(2)));
+    let second = topic(&mut chain, a, json!({"limit":1,"from":2})).unwrap();
+    assert_eq!(events_in(&second), vec![(3, 0, 0, hex(&said(a, b"4")))]);
+    assert_eq!(second["next"], 4);
+    let beyond = topic(&mut chain, a, json!({"from":9})).unwrap();
+    assert_eq!((events_in(&beyond).len(), &beyond["next"]), (0, &json!(9)));
+    let unknown = chain
+        .request("events", json!({"contract":hex(&[7; 32])}))
+        .unwrap();
+    assert_eq!(
+        (events_in(&unknown).len(), &unknown["next"]),
+        (0, &json!(4))
+    );
+    // Every event page gives each event's place and the height read at.
+    let page = chain.request("events", json!({"from":1})).unwrap();
+    assert_eq!(page["items"][0]["events"][3]["event_index"], 0);
+    assert_eq!(page["height"], 3);
+    for (query, error) in [
+        (
+            json!({"topic":hex(&a)}),
+            "a topic is read with its program: give contract too",
+        ),
+        (json!({"contract":"zz"}), "hex must be lowercase"),
+        (json!({"contract":program,"topic":7}), "expected topic"),
+        (
+            json!({"contract":program,"limit":101}),
+            "pagination limit is 100",
+        ),
+    ] {
+        let found = chain.request("events", query.clone()).unwrap_err();
+        assert!(found.contains(error), "{query}: {found}");
+    }
+    // A heavier branch from genesis deploys the same program and says B
+    // once: the events of the branch left behind are no longer read.
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = vec![];
+    let mut x = vec![mine(
+        &runtime,
+        &g,
+        &mut history,
+        vec![deploy.clone(), call(&program, said(b, b"x"))],
+        "X",
+    )];
+    for _ in 0..3 {
+        x.push(mine(&runtime, &g, &mut history, vec![], "X"));
+    }
+    for block in &x {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    assert_eq!(chain.tip(), x[3].header.id());
+    let check = |chain: &mut Chain| {
+        assert_eq!(events_in(&topic(chain, a, json!({})).unwrap()), vec![]);
+        let of_b = topic(chain, b, json!({})).unwrap();
+        assert_eq!(events_in(&of_b), vec![(1, 1, 0, hex(&said(b, b"x")))]);
+        assert_eq!(of_b["items"][0]["block"], hex(&x[0].header.id()));
+        assert_eq!((&of_b["next"], &of_b["height"]), (&json!(5), &json!(4)));
+        let all = chain
+            .request("events", json!({"contract":program}))
+            .unwrap();
+        assert_eq!(events_in(&all).len(), 2);
+    };
+    check(&mut chain);
+    // So after a restart, and after a database from before the event
+    // tables fills them as the node opens.
+    drop(chain);
+    let mut chain = open(&dir);
+    check(&mut chain);
+    drop(chain);
+    {
+        let db = redb::Database::open(dir.0.join("chain.redb")).unwrap();
+        let tx = db.begin_write().unwrap();
+        for table in ["program_events", "program_event_topics"] {
+            tx.delete_table(TableDefinition::<&[u8], &[u8]>::new(table))
+                .unwrap();
+        }
+        let meta: TableDefinition<&[u8], &[u8]> = TableDefinition::new("metadata");
+        tx.open_table(meta)
+            .unwrap()
+            .remove(b"events".as_slice())
+            .unwrap()
+            .unwrap();
+        tx.commit().unwrap();
+    }
+    let mut chain = open(&dir);
+    check(&mut chain);
+}

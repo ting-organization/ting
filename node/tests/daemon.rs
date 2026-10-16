@@ -316,6 +316,7 @@ async fn daemon_cli_rest_wiki_sync_and_restart_work_together() {
         "/v1/status",
         "/v1/metrics",
         "/v1/events",
+        "/v1/events?contract=0000000000000000000000000000000000000000000000000000000000000000&topic=abababababababababababababababababababababababababababababababab&from=1&limit=5",
         "/v1/mempool",
         "/blocks",
         "/mempool",
@@ -1089,6 +1090,9 @@ async fn rest_answers_with_the_documented_statuses_headers_and_cors() {
         "/v1/contracts/abc".to_owned(),
         "/v1/blocks?from=x".to_owned(),
         "/v1/events?page=2".to_owned(),
+        "/v1/events?topic=abababababababababababababababababababababababababababababababab"
+            .to_owned(),
+        "/v1/events?contract=zz".to_owned(),
         "/v1/transactions/{missing}?limit=101".replace("{missing}", &missing),
         format!("/v1/contracts/{missing}/storage/zz"),
     ] {

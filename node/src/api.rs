@@ -278,8 +278,25 @@ async fn transaction(
 async fn blocks(State(s): State<ApiState>, Query(p): Query<Page>) -> Response {
     respond(read(&s, "blocks", json!({"from":p.from,"limit":p.limit})).await)
 }
-async fn events(State(s): State<ApiState>, Query(p): Query<Page>) -> Response {
-    respond(read(&s, "events", json!({"from":p.from,"limit":p.limit})).await)
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventQuery {
+    from: Option<u64>,
+    limit: Option<u64>,
+    /// Only the events of this program.
+    contract: Option<String>,
+    /// Only those whose payload begins with this topic.
+    topic: Option<String>,
+}
+async fn events(State(s): State<ApiState>, Query(p): Query<EventQuery>) -> Response {
+    respond(
+        read(
+            &s,
+            "events",
+            json!({"from":p.from,"limit":p.limit,"contract":p.contract,"topic":p.topic}),
+        )
+        .await,
+    )
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -389,7 +406,11 @@ pub fn openapi() -> Value {
             "TransactionLookup",
         ),
         ("/v1/mempool", "Pending transaction inventory", "Mempool"),
-        ("/v1/events", "Events by canonical block", "EventPage"),
+        (
+            "/v1/events",
+            "Events by canonical block, of every program or of one",
+            "EventPage",
+        ),
         ("/v1/contracts/{id}", "Immutable code manifest", "Manifest"),
         (
             "/v1/contracts/{id}/storage/{key}",
@@ -415,6 +436,10 @@ pub fn openapi() -> Value {
         if path == "/v1/blocks" || path == "/v1/events" || path == "/v1/transactions/{id}" {
             parameters.push(json!({"name":"from","in":"query","schema":{"type":"integer","minimum":if path.contains("transactions") {0} else {1},"default":if path.contains("transactions") {0} else {1}}}));
             parameters.push(json!({"name":"limit","in":"query","schema":{"type":"integer","minimum":0,"maximum":100,"default":20}}));
+        }
+        if path == "/v1/events" {
+            parameters.push(json!({"name":"contract","in":"query","description":"Only the events of this program, and only the blocks that have any; next then continues past them","schema":{"$ref":"#/components/schemas/Hash"}}));
+            parameters.push(json!({"name":"topic","in":"query","description":"With contract: only the events whose payload begins with these 32 bytes, the program's topic","schema":{"$ref":"#/components/schemas/Hash"}}));
         }
         let tag = if path.contains("blocks") {
             "Blocks"

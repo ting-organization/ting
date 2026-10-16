@@ -63,6 +63,19 @@ const REDO_ROWS: Rows = Rows {
     tag: b'd',
 };
 pub const OCCURRENCES: Blob = TableDefinition::new("transaction_occurrences");
+/// Every executed block's events by the program that emitted them, key-only
+/// (wiki: node/storage): the program's ContractId, the block's height
+/// (big-endian) and id, and the event's transaction and place among that
+/// transaction's events (big-endian `u32`s). `EVENT_TOPICS` holds the same
+/// with the event's topic, the first 32 bytes of its payload, after the
+/// program, for every event that has one. Like the transaction occurrences,
+/// a block's rows stay while the block is stored; reads take only the
+/// canonical block at each height.
+pub const EVENTS: Blob = TableDefinition::new("program_events");
+pub const EVENT_TOPICS: Blob = TableDefinition::new("program_event_topics");
+/// The executed blocks whose events one commit indexes, when an older
+/// database fills the event tables.
+const EVENT_FILL: usize = 1_000;
 pub const CANONICAL: TableDefinition<u64, &'static [u8]> = TableDefinition::new("canonical");
 /// Blocks this node's operator marked invalid, by id (wiki: node/storage).
 pub const MARKS: Blob = TableDefinition::new("operator_marks");
@@ -201,6 +214,14 @@ impl Recent {
             self.bytes -= gone.len();
         }
     }
+}
+/// A canonical block with events a read asked for: its height and id, and
+/// each event's place, as its transaction and its place among that
+/// transaction's events.
+pub struct EventBlock {
+    pub height: u64,
+    pub id: Hash,
+    pub events: Vec<(usize, usize)>,
 }
 /// One consistent view of what is stored: everything read through it comes
 /// from the same commit, however the chain moves meanwhile.
@@ -505,6 +526,8 @@ impl Store {
             REDO_BLOCKS,
             PARTS,
             OCCURRENCES,
+            EVENTS,
+            EVENT_TOPICS,
             MARKS,
             LIMITS,
         ] {
@@ -565,8 +588,39 @@ impl Store {
             drop(table);
             put(&tx, META, b"side_blocks", &[1])?;
         }
+        let events = get(&tx, META, b"events")?.is_some();
         tx.commit().map_err(err)?;
+        if !events {
+            store.fill_events()?;
+        }
         Ok(store)
+    }
+    /// Fills the event tables of a database from before them, from every
+    /// executed block, a part at a time.
+    fn fill_events(&self) -> Result<()> {
+        let executed = {
+            let tx = self.db.begin_read().map_err(err)?;
+            let headers = tx.open_table(HEADERS).map_err(err)?;
+            let mut executed = Vec::new();
+            for row in headers.iter().map_err(err)? {
+                let (id, value) = row.map_err(err)?;
+                let id = hash_bytes(id.value())?;
+                if decode_stored(id, value.value(), self.chain)?.kept == Kept::Valid {
+                    executed.push(id);
+                }
+            }
+            executed
+        };
+        for part in executed.chunks(EVENT_FILL) {
+            let tx = self.begin()?;
+            for id in part {
+                Self::put_events(&tx, &self.block(id)?)?;
+            }
+            tx.commit().map_err(err)?;
+        }
+        let tx = self.begin()?;
+        put(&tx, META, b"events", &[1])?;
+        tx.commit().map_err(err)
     }
     /// A reader of this store for other threads.
     pub fn reader(&self) -> Reader {
@@ -995,8 +1049,8 @@ impl Store {
     }
     /// Deletes everything stored of a side-branch block the node no longer
     /// keeps (wiki: node/storage): its location and header, the occurrences of
-    /// its transactions, and any undo and redo data. Its frame stays in its
-    /// file, unreferenced.
+    /// its transactions and its events, and any undo and redo data. Its frame
+    /// stays in its file, unreferenced.
     pub fn forget_side(&self, tx: &WriteTransaction, id: &Hash) -> Result<()> {
         if let Ok(block) = self.block(id) {
             let mut table = tx.open_table(OCCURRENCES).map_err(err)?;
@@ -1006,6 +1060,14 @@ impl Store {
                 key.extend(id);
                 key.extend((index as u32).to_be_bytes());
                 table.remove(key.as_slice()).map_err(err)?;
+            }
+            let mut events = tx.open_table(EVENTS).map_err(err)?;
+            let mut topics = tx.open_table(EVENT_TOPICS).map_err(err)?;
+            for (by_program, by_topic) in event_rows(&block)? {
+                events.remove(by_program.as_slice()).map_err(err)?;
+                if let Some(key) = by_topic {
+                    topics.remove(key.as_slice()).map_err(err)?;
+                }
             }
         }
         Self::drop_rows(tx, UNDO_ROWS, *id)?;
@@ -1076,6 +1138,7 @@ impl Store {
     ) -> Result<()> {
         let id = block.header.id();
         Self::put_header(tx, &block.header, work, Kept::Valid)?;
+        Self::put_events(tx, block)?;
         let undo: Vec<(Hash, Option<Vec<u8>>)> = changes
             .records
             .iter()
@@ -1088,6 +1151,20 @@ impl Store {
             key.extend(id);
             key.extend((index as u32).to_be_bytes());
             put(tx, OCCURRENCES, &key, &[])?;
+        }
+        Ok(())
+    }
+    /// An executed block's rows in the event tables.
+    fn put_events(tx: &WriteTransaction, block: &Block) -> Result<()> {
+        let mut events = tx.open_table(EVENTS).map_err(err)?;
+        let mut topics = tx.open_table(EVENT_TOPICS).map_err(err)?;
+        for (by_program, by_topic) in event_rows(block)? {
+            events
+                .insert(by_program.as_slice(), [].as_slice())
+                .map_err(err)?;
+            if let Some(key) = by_topic {
+                topics.insert(key.as_slice(), [].as_slice()).map_err(err)?;
+            }
         }
         Ok(())
     }
@@ -1471,6 +1548,75 @@ impl View<'_> {
             .map(|id| hash_bytes(id.value()))
             .transpose()
     }
+    /// The canonical height: the tip's.
+    pub fn height(&self) -> Result<u64> {
+        self.tx
+            .open_table(CANONICAL)
+            .map_err(err)?
+            .len()
+            .map_err(err)
+    }
+    /// The canonical blocks from height `from` with events of the program
+    /// `contract`, or only those whose topic is `topic`: each block's height,
+    /// id and the events' places, as transaction and event, in order. At most
+    /// `blocks` blocks, and whether any more follow.
+    pub fn events_of(
+        &self,
+        contract: &Hash,
+        topic: Option<&Hash>,
+        from: u64,
+        blocks: usize,
+    ) -> Result<(Vec<EventBlock>, bool)> {
+        let (table, prefix) = match topic {
+            Some(topic) => (EVENT_TOPICS, [&contract[..], topic].concat()),
+            None => (EVENTS, contract.to_vec()),
+        };
+        let table = self.tx.open_table(table).map_err(err)?;
+        let canonical = self.tx.open_table(CANONICAL).map_err(err)?;
+        let low = [&prefix[..], &from.to_be_bytes(), &[0; 40]].concat();
+        let high = [&prefix[..], &[255; 48]].concat();
+        let mut found: Vec<EventBlock> = Vec::new();
+        // The last block met, and whether it is canonical.
+        let mut last: Option<(u64, Hash, bool)> = None;
+        for row in table.range(low.as_slice()..=high.as_slice()).map_err(err)? {
+            let (key, _) = row.map_err(err)?;
+            let place = key
+                .value()
+                .get(prefix.len()..)
+                .filter(|place| place.len() == 48)
+                .ok_or("invalid event key")?;
+            let height = u64::from_be_bytes(place[..8].try_into().unwrap());
+            let block = hash_bytes(&place[8..40])?;
+            let transaction = u32::from_be_bytes(place[40..44].try_into().unwrap()) as usize;
+            let index = u32::from_be_bytes(place[44..].try_into().unwrap()) as usize;
+            let on = match last {
+                Some((h, b, on)) if (h, b) == (height, block) => on,
+                _ => {
+                    let on = canonical
+                        .get(height)
+                        .map_err(err)?
+                        .is_some_and(|c| c.value() == block);
+                    last = Some((height, block, on));
+                    on
+                }
+            };
+            if !on {
+                continue;
+            }
+            if let Some(b) = found.last_mut().filter(|b| b.height == height) {
+                b.events.push((transaction, index));
+            } else if found.len() == blocks {
+                return Ok((found, true));
+            } else {
+                found.push(EventBlock {
+                    height,
+                    id: block,
+                    events: vec![(transaction, index)],
+                });
+            }
+        }
+        Ok((found, false))
+    }
     /// A stored block's header, with its status and accumulated work.
     pub fn stored(&self, id: &Hash) -> Result<Option<Stored>> {
         self.tx
@@ -1702,6 +1848,28 @@ impl View<'_> {
             .take(limit)
             .collect()
     }
+}
+/// An event's key in `EVENTS`, and in `EVENT_TOPICS` if its payload has a
+/// topic.
+type EventRow = (Vec<u8>, Option<Vec<u8>>);
+/// A block's keys in the event tables.
+fn event_rows(block: &Block) -> Result<Vec<EventRow>> {
+    let id = block.header.id();
+    let height = block.header.height.to_be_bytes();
+    let mut rows = Vec::new();
+    for (transaction, receipt) in block.receipts.iter().enumerate() {
+        let transaction = u32::try_from(transaction).map_err(err)?.to_be_bytes();
+        for (index, event) in receipt.events.iter().enumerate() {
+            let index = u32::try_from(index).map_err(err)?.to_be_bytes();
+            let place = [&height[..], &id, &transaction, &index].concat();
+            let by_topic = event
+                .payload
+                .get(..32)
+                .map(|topic| [&event.contract[..], topic, &place].concat());
+            rows.push(([&event.contract[..], &place].concat(), by_topic));
+        }
+    }
+    Ok(rows)
 }
 /// The rows of one block in an undo or redo table, by record key.
 fn rows(
