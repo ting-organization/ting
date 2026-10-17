@@ -247,9 +247,12 @@ main { flex: 1; padding-top: 28px; overflow-wrap: anywhere; }
 .hash-link { white-space: nowrap; }
 .table-scroll .num { text-align: right; }
 .table-scroll .nowrap { white-space: nowrap; }
-.usage { display: inline-flex; align-items: baseline; justify-content: flex-end; gap: 6px; white-space: nowrap; }
-.usage-value { font: 12px/1.4 var(--mono); }
-.usage-share { min-width: 3.4em; color: var(--muted); font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; }
+/* An amount and its share, each right-aligned in a box of fixed width, so
+   that every row's figures line up under the column's heading. */
+.usage { display: inline-grid; grid-template-columns: 6ch 5ch; column-gap: 1ch; align-items: baseline; font: 12px/1.4 var(--mono); white-space: nowrap; }
+.usage-value, .usage-share { text-align: right; }
+.usage:has(> :only-child) { grid-template-columns: 6ch; }
+.usage-share { color: var(--muted); }
 .usage-list { display: grid; grid-template-columns: auto minmax(0, max-content) auto; align-items: center; gap: 4px 12px; }
 .usage-row { display: contents; }
 .usage-symbol { color: var(--muted); font-size: 12px; font-weight: 600; }
