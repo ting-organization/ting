@@ -900,10 +900,7 @@ fn a_fork_replaces_selection_and_search_and_names_its_producer_data() {
         sync::atomic::{AtomicU64, Ordering},
         time::{Duration, Instant},
     };
-    use ting_core::{
-        protocol::{Payload, Transaction},
-        vm::Candidate,
-    };
+    use ting_core::{protocol::Payload, vm::Candidate};
     use ting_node::{
         chain::Handle,
         mining::{self, Miner, Search, Selector},
@@ -911,9 +908,9 @@ fn a_fork_replaces_selection_and_search_and_names_its_producer_data() {
     // A fork's selection: the pool in reverse, each kept only if it succeeds.
     struct LastIn;
     impl Selector for LastIn {
-        fn select(&mut self, pool: &[Transaction], block: &mut Candidate<'_>) {
-            for tx in pool.iter().rev() {
-                if let Ok(Some(receipt)) = block.add(tx)
+        fn select(&mut self, pool: &[mining::Pending<'_>], block: &mut Candidate<'_>) {
+            for pending in pool.iter().rev() {
+                if let Ok(Some(receipt)) = block.add(pending.tx)
                     && receipt.status != ting_core::protocol::Status::Success
                 {
                     block.undo();
@@ -1014,7 +1011,7 @@ async fn reads_go_on_beside_a_busy_chain_thread_and_rest_cannot_crowd_out_peers(
         },
         time::Duration,
     };
-    use ting_core::{protocol::Transaction, vm::Candidate};
+    use ting_core::vm::Candidate;
     use ting_node::{
         chain::Handle,
         mining::{self, Selector},
@@ -1028,13 +1025,13 @@ async fn reads_go_on_beside_a_busy_chain_thread_and_rest_cannot_crowd_out_peers(
         release: Receiver<()>,
     }
     impl Selector for Held {
-        fn select(&mut self, pool: &[Transaction], block: &mut Candidate<'_>) {
+        fn select(&mut self, pool: &[mining::Pending<'_>], block: &mut Candidate<'_>) {
             if self.armed.load(Ordering::Relaxed) {
                 let _ = self.entered.send(());
                 let _ = self.release.recv();
             }
-            for tx in pool {
-                let _ = block.add(tx);
+            for pending in pool {
+                let _ = block.add(pending.tx);
             }
         }
         fn describe(&self) -> serde_json::Value {
@@ -1463,8 +1460,12 @@ fn submissions_answer_known_deferred_or_refused_and_the_pool_is_bounded() {
 #[test]
 fn the_pool_shares_its_room_by_address() {
     use std::net::IpAddr;
+    // A pool of eight, as an operator may configure it.
     let dir = Directory::new();
     dir.config(false, "test");
+    let mut c = config::Config::load(&dir.0).unwrap();
+    c.mempool_transactions = 8;
+    c.save(&dir.0).unwrap();
     let mut chain = open(&dir);
     let address = |n: u8| -> IpAddr { format!("10.0.0.{n}").parse().unwrap() };
     let tx = |source: u8, i: u16| {
@@ -1472,50 +1473,112 @@ fn the_pool_shares_its_room_by_address() {
         input.push(source);
         variant(input)
     };
-    // One address holds at most 64 of the pool's transactions.
-    for i in 0..64 {
+    let id = |tx: &ting_core::protocol::Transaction| {
+        hex(&tx.id(config::genesis(&dir.0).unwrap().chain_id()))
+    };
+    let pooled = |chain: &mut Chain, tx: &ting_core::protocol::Transaction| {
+        chain.request("transaction", json!({"id":id(tx)})).is_ok()
+    };
+    let count =
+        |chain: &mut Chain| chain.request("status", json!({})).unwrap()["mempool_count"].clone();
+    // One address alone may fill it: no share is held back.
+    for i in 0..8 {
         chain
             .submit_from(&tx(1, i).encode(), Some(address(1)))
             .unwrap();
     }
+    assert_eq!(count(&mut chain), 8);
+    // Full: a newcomer takes the place of the most recent transaction of the
+    // address holding the most, as long as that holds more than its own.
+    for i in 0..4 {
+        chain
+            .submit_from(&tx(2, i).encode(), Some(address(2)))
+            .unwrap();
+        assert!(!pooled(&mut chain, &tx(1, 7 - i)));
+    }
     assert_eq!(
         chain
-            .submit_from(&tx(1, 64).encode(), Some(address(1)))
+            .submit_from(&tx(2, 4).encode(), Some(address(2)))
             .unwrap_err(),
         ting_node::chain::POOL_FULL
     );
-    // Fill it: fifteen more addresses with 63 each, a sixteenth with 15.
-    for source in 2..=16u8 {
-        for i in 0..63 {
-            chain
-                .submit_from(&tx(source, i).encode(), Some(address(source)))
-                .unwrap();
+    // A third address takes a place from one of the two holding four.
+    chain
+        .submit_from(&tx(3, 0).encode(), Some(address(3)))
+        .unwrap();
+    assert_eq!(count(&mut chain), 8);
+    // One submitted directly counts against no address and takes a place too,
+    // and never gives up its own.
+    chain.submit(&variant(vec![7; 7]).encode()).unwrap();
+    assert_eq!(count(&mut chain), 8);
+    assert!(pooled(&mut chain, &variant(vec![7; 7])));
+    // The byte bound is the configured MiB or four blocks' data, the larger.
+    let status = chain.request("status", json!({})).unwrap();
+    assert!(status["mempool_bytes"].as_u64().unwrap() < 4 * 1_048_576);
+}
+#[test]
+fn a_fork_chooses_what_gives_way_in_a_full_pool() {
+    use ting_core::vm::Candidate;
+    use ting_node::{
+        chain::Handle,
+        mining::{self, Selector},
+    };
+    // A fork's policy: the oldest pooled transaction gives way, unless the
+    // newcomer's input starts with 0, which is refused.
+    struct OldestOut;
+    impl Selector for OldestOut {
+        fn select(&mut self, pool: &[mining::Pending<'_>], block: &mut Candidate<'_>) {
+            for pending in pool {
+                let _ = block.add(pending.tx);
+            }
+        }
+        fn describe(&self) -> serde_json::Value {
+            json!({"kind":"oldest-out"})
+        }
+        fn give_way(
+            &mut self,
+            pool: &[mining::Pending<'_>],
+            incoming: &mining::Pending<'_>,
+            _block: &mut Candidate<'_>,
+        ) -> Option<usize> {
+            let ting_core::protocol::Payload::Deploy { input, .. } = &incoming.tx.payload else {
+                return None;
+            };
+            (input.first() != Some(&0) && !pool.is_empty()).then_some(0)
         }
     }
-    for i in 0..15 {
-        chain
-            .submit_from(&tx(17, i).encode(), Some(address(17)))
+    let dir = Directory::new();
+    dir.config(false, "fork");
+    let mut c = config::Config::load(&dir.0).unwrap();
+    c.mempool_transactions = 3;
+    c.save(&dir.0).unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let (handle, worker) =
+        Handle::spawn_with(dir.0.clone(), shutdown.clone(), Box::new(OldestOut)).unwrap();
+    let chain_id = config::genesis(&dir.0).unwrap().chain_id();
+    let txs: Vec<_> = (1..=4u8).map(|i| variant(vec![i])).collect();
+    for tx in &txs {
+        handle
+            .call_blocking("submit", json!({"hex":hex(&tx.encode())}))
             .unwrap();
     }
-    let count =
-        |chain: &mut Chain| chain.request("status", json!({})).unwrap()["mempool_count"].clone();
-    assert_eq!(count(&mut chain), 1_024);
-    // Full: a newcomer takes the place of the most recent transaction of the
-    // address holding the most, address 1.
-    let newest = hex(&tx(1, 63).id(chain.genesis.chain_id()));
-    chain
-        .submit_from(&tx(18, 0).encode(), Some(address(18)))
-        .unwrap();
-    assert_eq!(count(&mut chain), 1_024);
+    let pooled = |tx: &ting_core::protocol::Transaction| {
+        handle
+            .call_blocking("transaction", json!({"id":hex(&tx.id(chain_id))}))
+            .is_ok()
+    };
+    // The fourth took the first's place; one the policy refuses is refused.
+    assert!(!pooled(&txs[0]));
+    assert!(txs[1..].iter().all(pooled));
     assert_eq!(
-        chain
-            .request("transaction", json!({"id":newest}))
+        handle
+            .call_blocking("submit", json!({"hex":hex(&variant(vec![0]).encode())}))
             .unwrap_err(),
-        "transaction not found"
+        ting_node::chain::POOL_FULL
     );
-    // One submitted directly counts against no address and takes a place too.
-    chain.submit(&variant(vec![7; 7]).encode()).unwrap();
-    assert_eq!(count(&mut chain), 1_024);
+    shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(handle);
+    worker.join().unwrap();
 }
 #[test]
 fn inventories_and_relay_pages_list_the_pool_and_the_deferred_set_by_id() {

@@ -2142,17 +2142,65 @@ impl Chain {
         // Any declared budget is taken, as consensus takes it: only what a
         // transaction uses has to fit a block (wiki: resources/capacity), and
         // a template keeps a transaction only when its use fits.
-        if !self.pool.make_room(bytes, source, self.held_bytes()) {
-            return Err(POOL_FULL.into());
-        }
-        self.pool.push(Pooled {
+        let pooled = Pooled {
             tx,
             id,
             bytes,
             arrived: now(),
             source,
-        });
+        };
+        if !self.make_room(&pooled)? {
+            return Err(POOL_FULL.into());
+        }
+        self.pool.push(pooled);
         Ok(())
+    }
+    /// Room in the pool for `incoming`: room that is free, or in a full pool
+    /// the room the selection policy makes, a transaction at a time
+    /// (`mining::Selector::give_way`, wiki: node/mining). Whether there is room.
+    fn make_room(&mut self, incoming: &Pooled) -> Result<bool> {
+        let (count, most) = (self.config.mempool_transactions, self.held_bytes());
+        if incoming.bytes > most {
+            return Ok(false);
+        }
+        if self.pool.fits(incoming.bytes, count, most) {
+            return Ok(true);
+        }
+        let ancestry = self.ancestry(self.tip())?;
+        let limits = self.tip_limits()?;
+        let timestamp = self.next_timestamp(&ancestry)?;
+        let room = {
+            let mut candidate = self
+                .runtime
+                .candidate(
+                    &self.genesis,
+                    &ancestry,
+                    limits,
+                    timestamp,
+                    self.config.votes,
+                    self.config.producer(),
+                )
+                .map_err(|e| e.to_string())?;
+            loop {
+                let pending = self.pool.pending();
+                let gives = self
+                    .selector
+                    .give_way(&pending, &incoming.pending(), &mut candidate)
+                    .filter(|at| *at < pending.len());
+                drop(pending);
+                let Some(at) = gives else {
+                    break false;
+                };
+                self.pool.remove_at(at);
+                if self.pool.fits(incoming.bytes, count, most) {
+                    break true;
+                }
+            }
+        };
+        if let Some(error) = self.runtime.storage_error() {
+            return Err(error);
+        }
+        Ok(room)
     }
     /// Whether a block with this node's producer data and nothing else fits
     /// the transaction's whole budget.
@@ -2267,14 +2315,16 @@ impl Chain {
         self.deferred.values().map(|d| d.bytes).sum()
     }
     /// The most bytes of encoded transactions the pool holds, and the deferred
-    /// set as well (wiki: node/mining): 16 MiB, or the data of four blocks at
-    /// the next block's capacity when that is more, so that a transaction of
-    /// any size a block can hold always fits.
+    /// set as well (wiki: node/mining): `mempool_mib`, or the data of four
+    /// blocks at the next block's capacity when that is more, so that a
+    /// transaction of any size a block can hold always fits.
     fn held_bytes(&self) -> usize {
         let capacity = self.tip_limits().map_or(0, |limits| limits.0[2]);
+        let configured =
+            usize::try_from(self.config.mempool_mib.saturating_mul(1 << 20)).unwrap_or(usize::MAX);
         usize::try_from(capacity.saturating_mul(4))
             .unwrap_or(usize::MAX)
-            .max(crate::FRAME_MAX)
+            .max(configured)
     }
     /// The deferred set changed: `tick` writes it within `DEFERRED_SAVE`
     /// seconds, and closing the chain writes it at once.
@@ -2445,14 +2495,17 @@ impl Chain {
                 let bytes = self.deferred[&id].bytes;
                 let outcome = self.trial(&tx)?;
                 let source = self.deferred[&id].source;
-                if outcome.is_ok() && self.pool.make_room(bytes, source, self.held_bytes()) {
-                    self.pool.push(Pooled {
+                if outcome.is_ok() {
+                    let pooled = Pooled {
                         tx,
                         id,
                         bytes,
                         arrived: current,
                         source,
-                    });
+                    };
+                    if self.make_room(&pooled)? {
+                        self.pool.push(pooled);
+                    }
                 }
                 let entry = self
                     .deferred
@@ -2511,8 +2564,7 @@ impl Chain {
                 .map_err(|e| e.to_string())?;
             match selection {
                 Selection::Policy => {
-                    let pool: Vec<Transaction> = self.pool.iter().map(|p| p.tx.clone()).collect();
-                    self.selector.select(&pool, &mut candidate);
+                    self.selector.select(&self.pool.pending(), &mut candidate);
                 }
                 Selection::Explicit(ids) => {
                     for id in ids {

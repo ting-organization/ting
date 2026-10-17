@@ -77,6 +77,19 @@ pub struct Config {
     /// The database's page cache, in MiB (wiki: node/storage).
     #[serde(default = "cache_mib")]
     pub db_cache_mib: u64,
+    /// Most transactions the pool holds (wiki: node/mining).
+    #[serde(default = "pool_transactions")]
+    pub mempool_transactions: usize,
+    /// Most MiB of encoded transactions the pool holds; at least the data of
+    /// four blocks at the next block's capacity, whatever this says.
+    #[serde(default = "pool_mib")]
+    pub mempool_mib: u64,
+}
+fn pool_transactions() -> usize {
+    1_024
+}
+fn pool_mib() -> u64 {
+    16
 }
 fn thirty_days() -> u64 {
     43_200
@@ -115,6 +128,8 @@ impl Default for Config {
             producer_hex: None,
             undo_window: thirty_days(),
             db_cache_mib: cache_mib(),
+            mempool_transactions: pool_transactions(),
+            mempool_mib: pool_mib(),
         }
     }
 }
@@ -128,9 +143,11 @@ impl Config {
             || self.votes.iter().any(|v| *v > 2)
             || !(1..=64).contains(&self.miner_threads)
             || self.db_cache_mib == 0
+            || self.mempool_transactions == 0
+            || self.mempool_mib == 0
         {
             return Err(
-                "invalid configuration (control must be loopback, maximum 32 peers, max_peers 1..64, votes 0..2, miner threads 1..64, db_cache_mib at least 1)"
+                "invalid configuration (control must be loopback, maximum 32 peers, max_peers 1..64, votes 0..2, miner threads 1..64, db_cache_mib, mempool_transactions and mempool_mib at least 1)"
                     .into(),
             );
         }

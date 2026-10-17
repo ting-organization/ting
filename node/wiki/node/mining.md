@@ -65,14 +65,17 @@ A miner runs a fork of this node and replaces two pieces. Each is a trait in the
 own to `daemon::run_with` and keeps everything else — assembly, validation, storage,
 synchronization and relay.
 
-- **Selection** (`Selector`): which pending transactions a template includes. The
-  selector is handed the candidate block: it adds a transaction and gets back its
+- **Selection** (`Selector`): which pending transactions a template includes, and
+  which pooled transaction gives way when the pool is full. The selector is handed
+  the pooled transactions, each with its id, size, arrival and the address that
+  relayed it, and a candidate block: it adds a transaction and gets back its
   receipt, with its events, or nothing when the block would not fit it, and it can
   take the last one back out. So it can judge transactions by anything a receipt
-  shows, such as what the programs it knows pay the producer. The reference
-  `FirstIn` tries every pooled transaction first in, first served, and keeps each
-  one the block fits. The node itself knows nothing about fees or rewards; those
-  belong to programs.
+  shows, such as what the programs it knows pay the producer, and remember what it
+  learned of each by its id. The reference `FirstIn` tries every pooled transaction
+  first in, first served, and keeps each one the block fits; when the pool is full,
+  it makes room by the address rule below. The node itself knows nothing about
+  fees or rewards; those belong to programs.
 - **Search** (`Search`): finding the nonce for a header within a bounded number of
   attempts. The reference `Cpu` hashes the header up to its nonce once, then each
   nonce from that SHA-256 midstate, on the configured threads over disjoint nonce
@@ -164,18 +167,22 @@ Mempool rules are local policy, not consensus:
   fit a block ([declared versus actual](/wiki/resources/capacity#declared-versus-actual)):
   a template keeps a transaction only when its use fits. Nothing executes until a
   block is assembled or validated;
-- at most 1,024 transactions, and 16 MiB of encoded transactions or the data of
-  four blocks at the next block's capacity, whichever is more, so that a
-  transaction of any size a block can hold fits. A template runs
-  each pooled transaction against what is left of its block, so the compute pooled
-  transactions declare does not bound the pool: one that cannot fit is refused at
-  its first charge past the block's room;
-- a transaction a peer relays counts against the peer's IP address, and at most 64
-  of one address's are pooled at once. When the pool is full, a submission takes the
-  place of the most recent transaction of the address holding the most, if that
-  address holds more than the submitter's; transactions submitted through the API
-  or the CLI count against no address, so they can take such a place and never give
-  up theirs. Otherwise the submission is refused with `mempool is full`;
+- at most `mempool_transactions` transactions, 1,024 unless `config.json` says
+  otherwise, and `mempool_mib` MiB of encoded transactions, 16 unless it says
+  otherwise, or the data of four blocks at the next block's capacity when that is
+  more, so that a transaction of any size a block can hold fits. Both are read when
+  the node starts. A template runs each pooled transaction against what is left of
+  its block, so the compute pooled transactions declare does not bound the pool: one
+  that cannot fit is refused at its first charge past the block's room;
+- a transaction a peer relays counts against the peer's IP address. Any address may
+  fill a pool that has room. When the pool is full, a submission takes the place of
+  the most recent transaction of the address holding the most, if that address
+  holds more than the submitter's, so every address keeps an equal share against
+  the others once the pool is contended; transactions submitted through the API or
+  the CLI count against no address, so they can take such a place and never give up
+  theirs. Otherwise the submission is refused with `mempool is full`. A
+  [mining fork](#what-a-mining-fork-replaces) may make room by its own rule, such as
+  what transactions pay it;
 - first in, first out, and a transaction whose id is already pooled is not added
   again;
 - a transaction a peer relays is refused with `transaction already included` when

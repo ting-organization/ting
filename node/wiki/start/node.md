@@ -122,7 +122,7 @@ stopped; the CLI then edits `config.json` itself. Details are on
 
 | File | Purpose |
 |---|---|
-| `config.json` | Name, listener addresses, peers, REST and miner settings, producer data and capacity votes |
+| `config.json` | Name, listener addresses, peers, REST and miner settings, producer data and capacity votes, the database cache and the mempool's bounds |
 | `genesis.bin` | The canonical genesis configuration, which defines the network |
 | `control.token` | Secret for the CLI's control channel; keep it private |
 | `blocks/` | Append-only block files |

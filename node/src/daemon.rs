@@ -38,6 +38,8 @@ pub struct Node {
     /// Addresses of other nodes, and whether to discover more (read at start).
     pub book: Arc<Mutex<AddressBook>>,
     pub discovery: bool,
+    /// Most transactions the pool holds (read at start).
+    pub mempool: usize,
     /// Open inbound connections, for bans to end.
     pub inbound: Arc<Mutex<Inbound>>,
     /// This run's identity in the peer protocol.
@@ -424,6 +426,7 @@ pub async fn run_with(dir: &Path, mining: Mining) -> Result<()> {
         peers: Arc::new(Mutex::new(BTreeMap::new())),
         book: Arc::new(Mutex::new(book)),
         discovery: c.discovery,
+        mempool: c.mempool_transactions,
         inbound: Arc::new(Mutex::new(Inbound::default())),
         nonce: discovery::seed(),
         miner: Arc::new(Mutex::new(None)),

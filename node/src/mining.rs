@@ -7,9 +7,11 @@
 //! implementing a trait and passing its own implementation to
 //! [`crate::daemon::run_with`]:
 //!
-//! - [`Selector`], which transactions a template includes. The reference
-//!   [`FirstIn`] takes them in arrival order; a fork that knows what the
-//!   programs it cares about pay can build candidates and read their receipts.
+//! - [`Selector`], which transactions a template includes, and which pooled
+//!   transaction gives way when the pool is full. The reference [`FirstIn`]
+//!   takes them in arrival order and makes room by [`fair_share`]; a fork that
+//!   knows what the programs it cares about pay can build candidates and read
+//!   their receipts.
 //! - [`Search`], finding the nonce. The reference [`Cpu`] runs the plain
 //!   loop on a few threads, hashing each attempt from a SHA-256 midstate; a
 //!   fork drives a GPU or an ASIC.
@@ -28,6 +30,8 @@ use crate::{Result, chain::Handle, now};
 pub const EXPIRED: &str = "unknown or expired template";
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
+    net::IpAddr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -36,7 +40,7 @@ use std::{
     time::Duration,
 };
 use ting_core::{
-    hash::hex,
+    hash::{Hash, hex},
     protocol::{Encode, HEADER_LEN, Header, Transaction, target_bytes},
     vm::Candidate,
 };
@@ -61,8 +65,55 @@ const SLICE: u64 = 1 << 24;
 /// receipts and events, such as what the programs it knows pay the producer.
 /// The node itself knows nothing of fees or rewards.
 pub trait Selector: Send {
-    fn select(&mut self, pool: &[Transaction], block: &mut Candidate<'_>);
+    fn select(&mut self, pool: &[Pending<'_>], block: &mut Candidate<'_>);
     fn describe(&self) -> Value;
+    /// The pool is full and `incoming` is offered: the place in `pool` of the
+    /// transaction that gives way, or none, and `incoming` is refused. Asked
+    /// again until there is room. `block` is a candidate on the tip to try
+    /// transactions in, as for `select`. By default, [`fair_share`].
+    fn give_way(
+        &mut self,
+        pool: &[Pending<'_>],
+        incoming: &Pending<'_>,
+        block: &mut Candidate<'_>,
+    ) -> Option<usize> {
+        let _ = block;
+        fair_share(pool, incoming)
+    }
+}
+/// A pooled transaction as a policy sees it: its id and envelope, the
+/// envelope's size, when it arrived, and the address of the peer that relayed
+/// it, none for the node's own API, CLI and deferred set. The pool lists them
+/// in arrival order.
+pub struct Pending<'a> {
+    pub id: Hash,
+    pub tx: &'a Transaction,
+    pub bytes: usize,
+    pub arrived: u64,
+    pub source: Option<IpAddr>,
+}
+/// The reference node's way of making room in a full pool (wiki:
+/// node/mining): the most recent transaction of the address holding the most
+/// gives way, if that address holds more than the newcomer's. One address can
+/// fill an empty pool, and gives way to every other as they arrive, down to
+/// an equal share; the node's own submissions count against no address and
+/// never give way.
+pub fn fair_share(pool: &[Pending<'_>], incoming: &Pending<'_>) -> Option<usize> {
+    let mut held: BTreeMap<IpAddr, usize> = BTreeMap::new();
+    for pending in pool {
+        if let Some(source) = pending.source {
+            *held.entry(source).or_default() += 1;
+        }
+    }
+    let own = incoming
+        .source
+        .and_then(|source| held.get(&source).copied())
+        .unwrap_or(0);
+    let (&largest, &count) = held.iter().max_by_key(|(_, count)| **count)?;
+    if count <= own {
+        return None;
+    }
+    pool.iter().rposition(|p| p.source == Some(largest))
 }
 
 /// The reference policy: first in, first served. Each transaction in arrival
@@ -71,10 +122,10 @@ pub trait Selector: Send {
 #[derive(Default)]
 pub struct FirstIn;
 impl Selector for FirstIn {
-    fn select(&mut self, pool: &[Transaction], block: &mut Candidate<'_>) {
-        for tx in pool {
+    fn select(&mut self, pool: &[Pending<'_>], block: &mut Candidate<'_>) {
+        for pending in pool {
             // A transaction the block does not fit is left out.
-            let _ = block.add(tx);
+            let _ = block.add(pending.tx);
         }
     }
     fn describe(&self) -> Value {

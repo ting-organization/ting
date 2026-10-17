@@ -1,17 +1,13 @@
-//! The transaction pool: what this node offers its miner, in arrival order,
-//! within fixed bounds (wiki: node/mining). Policy, not consensus.
+//! The transaction pool: what this node offers its miner, in arrival order
+//! (wiki: node/mining). Its bounds are the node's configuration, and which
+//! transaction gives way when it is full is the selection policy's
+//! (`mining::Selector`). Policy, not consensus.
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeSet, VecDeque},
     net::IpAddr,
 };
 use ting_core::{hash::Hash, protocol::Transaction};
 
-/// Most transactions the pool holds; its bytes are bounded by the chain, by
-/// the data capacity. A template runs each pooled transaction against what is
-/// left of its block, so the compute they declare needs no bound of its own.
-pub const POOL_MAX: usize = 1024;
-/// Most transactions one peer address's relaying may hold in the pool.
-pub const POOL_PER_SOURCE: usize = 64;
 /// How long a transaction stays without being included.
 pub const POOL_AGE: u64 = 86_400;
 
@@ -30,7 +26,6 @@ pub struct Pool {
     items: VecDeque<Pooled>,
     ids: BTreeSet<Hash>,
     bytes: usize,
-    sources: BTreeMap<IpAddr, usize>,
 }
 
 impl Pool {
@@ -61,52 +56,20 @@ impl Pool {
         }
         self.items.iter().find(|p| p.id == *id).map(|p| &p.tx)
     }
-    fn count_of(&self, source: Option<IpAddr>) -> usize {
-        source.map_or(0, |s| self.sources.get(&s).copied().unwrap_or(0))
+    /// Whether a transaction of `bytes` fits beside the rest, within `count`
+    /// transactions and `most` bytes.
+    pub fn fits(&self, bytes: usize, count: usize, most: usize) -> bool {
+        self.items.len() < count && self.bytes.saturating_add(bytes) <= most
     }
-    /// Makes room for a transaction of `bytes` from `source` in a pool of at
-    /// most `most` bytes, if the rules allow (wiki: node/mining): under its
-    /// source's share, and when the pool is full, in place of the most recent
-    /// transaction of the address holding the most, if that address holds
-    /// more than `source`.
-    pub fn make_room(&mut self, bytes: usize, source: Option<IpAddr>, most: usize) -> bool {
-        if self.count_of(source) >= POOL_PER_SOURCE || bytes > most {
-            return false;
-        }
-        while self.items.len() >= POOL_MAX || self.bytes.saturating_add(bytes) > most {
-            let Some((&largest, &held)) = self.sources.iter().max_by_key(|(_, n)| **n) else {
-                return false;
-            };
-            if held <= self.count_of(source) {
-                return false;
-            }
-            let at = self
-                .items
-                .iter()
-                .rposition(|p| p.source == Some(largest))
-                .expect("counted sources hold transactions");
-            let gone = self.items.remove(at).expect("found above");
-            self.forget(&gone);
-        }
-        true
-    }
-    fn forget(&mut self, gone: &Pooled) {
+    /// Takes out the transaction at `at`, in arrival order.
+    pub fn remove_at(&mut self, at: usize) -> Option<Pooled> {
+        let gone = self.items.remove(at)?;
         self.ids.remove(&gone.id);
         self.bytes -= gone.bytes;
-        if let Some(source) = gone.source
-            && let Some(n) = self.sources.get_mut(&source)
-        {
-            *n -= 1;
-            if *n == 0 {
-                self.sources.remove(&source);
-            }
-        }
+        Some(gone)
     }
     pub fn push(&mut self, item: Pooled) {
         self.bytes += item.bytes;
-        if let Some(source) = item.source {
-            *self.sources.entry(source).or_default() += 1;
-        }
         self.ids.insert(item.id);
         self.items.push_back(item);
     }
@@ -114,9 +77,20 @@ impl Pool {
         self.items.retain(|p| keep(p));
         self.ids = self.items.iter().map(|p| p.id).collect();
         self.bytes = self.items.iter().map(|p| p.bytes).sum();
-        self.sources.clear();
-        for source in self.items.iter().filter_map(|p| p.source) {
-            *self.sources.entry(source).or_default() += 1;
+    }
+    /// The pool as a selection policy sees it, in arrival order.
+    pub fn pending(&self) -> Vec<crate::mining::Pending<'_>> {
+        self.items.iter().map(Pooled::pending).collect()
+    }
+}
+impl Pooled {
+    pub fn pending(&self) -> crate::mining::Pending<'_> {
+        crate::mining::Pending {
+            id: self.id,
+            tx: &self.tx,
+            bytes: self.bytes,
+            arrived: self.arrived,
+            source: self.source,
         }
     }
 }

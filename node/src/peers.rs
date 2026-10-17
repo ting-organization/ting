@@ -16,7 +16,6 @@ use crate::{
     daemon::Node,
     discovery::{self, BAN},
     hash_arg,
-    pool::POOL_MAX,
     transport::{self, ITSELF},
     wire::{self, Answer, Body, Part, Request},
 };
@@ -790,7 +789,11 @@ impl Link {
     /// The ids of the peer's pooled or deferred transactions, page by page,
     /// no more than its set can hold.
     async fn inventory(&mut self, deferred: bool) -> Result<BTreeSet<Hash>> {
-        let most = if deferred { DEFERRED_MAX } else { POOL_MAX };
+        let most = if deferred {
+            DEFERRED_MAX
+        } else {
+            self.node.mempool
+        };
         let mut ids = BTreeSet::new();
         let mut after = None;
         loop {
