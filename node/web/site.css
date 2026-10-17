@@ -247,9 +247,9 @@ main { flex: 1; padding-top: 28px; overflow-wrap: anywhere; }
 .hash-link { white-space: nowrap; }
 .table-scroll .num { text-align: right; }
 .table-scroll .nowrap { white-space: nowrap; }
-.usage { display: inline-grid; justify-items: end; gap: 3px; font-variant-numeric: tabular-nums; }
-.usage-value { font: 12px/1.4 var(--mono); white-space: nowrap; }
-.usage-share { color: var(--muted); font-size: 11px; line-height: 1.3; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.usage { display: inline-flex; align-items: baseline; justify-content: flex-end; gap: 6px; white-space: nowrap; }
+.usage-value { font: 12px/1.4 var(--mono); }
+.usage-share { min-width: 3.4em; color: var(--muted); font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; }
 .usage-list { display: grid; grid-template-columns: auto minmax(0, max-content) auto; align-items: center; gap: 4px 12px; }
 .usage-row { display: contents; }
 .usage-symbol { color: var(--muted); font-size: 12px; font-weight: 600; }

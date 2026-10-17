@@ -11,6 +11,29 @@ const link = (text, href, cls) => { const a = node('a', text, cls); a.href = hre
 const hashLink = (hash, kind, text) => { const a = link(text || short(hash), '/' + kind + '/' + encodeURIComponent(hash), 'mono hash-link'); a.title = hash; return a; };
 const count = value => { try { return BigInt(value).toLocaleString('en-US'); } catch { return String(value); } };
 const resources = value => Array.isArray(value) ? value.map(count).join(' / ') : '—';
+// A count in at most three figures and an SI prefix (1.42M for 1,422,091),
+// cut rather than rounded so that it never shows more than there is; below
+// ten thousand, the count itself.
+const PREFIXES = ['', 'k', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y', 'R', 'Q'];
+function compact(value) {
+  let digits;
+  try { digits = BigInt(value).toString(); } catch { return String(value); }
+  if (digits.startsWith('-') || digits.length <= 4) return count(value);
+  const prefix = Math.floor((digits.length - 1) / 3);
+  if (prefix >= PREFIXES.length) {
+    const tail = digits.slice(1, 3).replace(/0+$/, '');
+    return digits[0] + (tail ? '.' + tail : '') + 'e' + (digits.length - 1);
+  }
+  const whole = digits.length - prefix * 3;
+  const fraction = digits.slice(whole, 3).replace(/0+$/, '');
+  return digits.slice(0, whole) + (fraction ? '.' + fraction : '') + PREFIXES[prefix];
+}
+// A compact count with the full one on hover.
+function compactNode(value, cls) {
+  const element = node('span', compact(value), cls);
+  if (element.textContent !== count(value)) element.title = count(value);
+  return element;
+}
 // A count that, too long for its line, breaks only after a group separator.
 function grouped(value, cls) {
   const element = node('span', undefined, cls), parts = count(value).split(',');
@@ -30,14 +53,13 @@ const share = (used, limit) => {
 };
 const percentText = percent => percent === 0 ? '0%' : percent < 0.1 ? '<0.1%' :
   (percent < 10 ? (Math.floor(percent * 10) / 10).toFixed(1) : String(Math.floor(percent))) + '%';
-// One resource's use: the amount, and below it the share of the block's capacity.
+// One resource's use, compact, beside its share of the block's capacity; the
+// full amounts on hover.
 function usageCell(used, limit) {
-  const cell = node('div', undefined, 'usage'), percent = share(used, limit);
-  cell.append(node('span', count(used), 'usage-value'));
-  if (percent !== null) {
-    cell.append(node('span', percentText(percent), 'usage-share'));
-    cell.title = count(used) + ' of ' + count(limit);
-  }
+  const cell = node('span', undefined, 'usage'), percent = share(used, limit);
+  cell.append(node('span', compact(used), 'usage-value'));
+  if (percent !== null) cell.append(node('span', percentText(percent), 'usage-share'));
+  cell.title = count(used) + (percent === null ? '' : ' of ' + count(limit));
   return cell;
 }
 // A block's use of each resource against its capacity.
@@ -128,20 +150,22 @@ function errorView(error) { const box = node('div', undefined, 'error'); box.app
 function stats(status) {
   const grid = node('section', undefined, 'stats-grid'); grid.setAttribute('aria-label', 'Chain summary');
   // A card shows a count, or any other element as it is.
+  // A card shows a figure, or any other element as it is.
   const card = (label, value, note) => {
     const article = node('article', undefined, 'stat'); article.append(node('p', label, 'stat-label'));
-    if (value instanceof Node) article.append(value);
-    else { const figure = node('p', undefined, 'stat-value'); figure.append(grouped(value)); article.append(figure); }
+    if (value instanceof Element && value.tagName !== 'SPAN') article.append(value);
+    else { const figure = node('p', undefined, 'stat-value'); figure.append(value); article.append(figure); }
     if (note) article.append(node('p', note, 'stat-note')); return article;
   };
   const limits = node('dl', undefined, 'capacity');
   RESOURCES.forEach(([symbol, name], index) => {
     const item = node('div'), value = node('dd'); item.title = name;
-    value.append(Array.isArray(status.limits) ? grouped(status.limits[index]) : '—');
+    value.append(Array.isArray(status.limits) ? compactNode(status.limits[index]) : '—');
     item.append(node('dt', symbol), value); limits.append(item);
   });
-  grid.append(card('Height', status.height), card('Chain work', status.work),
-    card('Pending', status.mempool_count, count(status.mempool_bytes) + ' bytes'), card('Block capacity', limits));
+  const pendingBytes = compactNode(status.mempool_bytes); pendingBytes.append(' bytes');
+  grid.append(card('Height', grouped(status.height)), card('Chain work', compactNode(status.work)),
+    card('Pending', grouped(status.mempool_count), pendingBytes), card('Block capacity', limits));
   return grid;
 }
 function blockTable(blocks, emptyText) {
