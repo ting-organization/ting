@@ -568,6 +568,7 @@ impl Chain {
         // start of a node that held every block, and old side branches go.
         while chain.settle()? {}
         chain.forget_old_branches()?;
+        chain.fill_limits()?;
         // What that moved is on disk before the node serves anyone.
         chain.store.flush()?;
         chain.load_deferred()?;
@@ -1014,6 +1015,27 @@ impl Chain {
     /// Settles canonical blocks below the held heights, at least `STEP` at a
     /// time and at most `SETTLE_MAX` (wiki: node/storage): their limits and
     /// the floor are written, and they leave memory. Returns whether any did.
+    /// Stores the limits of every executed block the index holds, once, for a
+    /// database from before every executed block kept them: settled blocks'
+    /// are there already.
+    fn fill_limits(&mut self) -> Result<()> {
+        if self.store.limits_filled()? {
+            return Ok(());
+        }
+        let limits: Vec<(Hash, Resources)> = self
+            .index
+            .held_entries()
+            .filter(|(_, entry)| entry.status == Kept::Valid)
+            .map(|(id, entry)| (*id, entry.limits))
+            .collect();
+        let tx = self.store.begin()?;
+        Store::put_limits(&tx, &limits)?;
+        Store::set_limits_filled(&tx)?;
+        if let Err(error) = self.store.commit_state(tx) {
+            return Err(self.fail(format!("database commit failed; restart required: {error}")));
+        }
+        Ok(())
+    }
     fn settle(&mut self) -> Result<bool> {
         if self.recovery.is_some() || self.activating.is_some() {
             return Ok(false);
@@ -1553,7 +1575,8 @@ impl Chain {
             let changes = validator.state_changes()?;
             drop(validator);
             Store::apply(&tx, &changes)?;
-            self.store.save_valid(&tx, &block, &work, &changes)?;
+            self.store
+                .save_valid(&tx, &block, &work, &changes, limits)?;
             connected.push(*id);
             break;
         }

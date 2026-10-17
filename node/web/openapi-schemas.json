@@ -31,6 +31,7 @@
   "Block": {
     "type":"object","required":["id","height","parent","timestamp","canonical","transactions","receipts","used","state_root"],
     "properties":{
+      "limits":{"type":["array","null"],"items":{"type":"integer","minimum":0},"minItems":4,"maxItems":4,"description":"The active capacity the block had to fit, C/S/D/G, against which used is measured; null for a block not executed"},
       "id":{"$ref":"#/components/schemas/Hash"},"height":{"type":"integer","minimum":1},"parent":{"$ref":"#/components/schemas/Hash"},"timestamp":{"type":"integer","minimum":0,"description":"Unix timestamp in seconds"},
       "target":{"$ref":"#/components/schemas/Hash"},"work":{"type":"string","pattern":"^[0-9]+$","description":"Accumulated work through this block"},"nonce":{"type":"string","pattern":"^[0-9]+$"},
       "state_root":{"$ref":"#/components/schemas/Hash"},"transactions_root":{"$ref":"#/components/schemas/Hash"},"receipts_root":{"$ref":"#/components/schemas/Hash"},

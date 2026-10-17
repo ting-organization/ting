@@ -16,8 +16,10 @@ navigation.
 
 - **Overview** shows the height, accumulated work, pending transactions, the active
   capacity for each counter, recent blocks, the ChainId and the current state root.
-- **Blocks** lists the canonical chain. A block page shows its header, its
-  transactions with their receipts and resource use, and their events.
+- **Blocks** lists the canonical chain, with each block's use of every counter and
+  its share of the capacity the block had. A block page shows its header, its use
+  against its capacity, its transactions with their receipts and resource use, and
+  their events.
 - **Pending transactions** lists what the node holds in its mempool.
 - A **transaction** page shows every canonical occurrence of that ID, with a summary
   of its envelope, since the same transaction can be included more than once; while
@@ -40,7 +42,7 @@ D, G order.
 | GET | `/health` | `ready`, with the height and tip, once the node answers |
 | GET | `/v1/status` | Name, version, network (`production`, `development` or `other`), ChainId, genesis block, height, tip, accumulated work, state root, active capacities, pool and deferred counts, producer data, stored blocks, state records and uptime |
 | GET | `/v1/blocks?from=1&limit=20` | Canonical blocks from height `from` |
-| GET | `/v1/blocks/{height-or-hash}` | Block summary: header fields, accumulated work, whether canonical, producer data, size, transaction ids and receipts |
+| GET | `/v1/blocks/{height-or-hash}` | Block summary: header fields, accumulated work, whether canonical, producer data, size, transaction ids and receipts, and `limits`, the capacity the block had to fit, which its `used` is measured against (`null` for a block not executed) |
 | GET | `/v1/blocks/{height-or-hash}/raw?offset=0&length=1048576` | The bytes of a block the node has executed, canonical or on a side branch, as hex, whole or sliced, with `offset` and the block's `total` length |
 | GET | `/v1/transactions/{id}?from=0&limit=20` | Pending or deferred status, the pending envelope, and a page of canonical occurrences with their receipts |
 | POST | `/v1/transactions` | Submit `{"hex": "…"}`, a canonical transaction; with `"not_before"`, deferred |

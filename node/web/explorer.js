@@ -9,11 +9,57 @@ const node = (tag, text, cls) => {
 const short = hash => hash.length > 24 ? hash.slice(0, 14) + '…' + hash.slice(-8) : hash;
 const link = (text, href, cls) => { const a = node('a', text, cls); a.href = href; return a; };
 const hashLink = (hash, kind, text) => { const a = link(text || short(hash), '/' + kind + '/' + encodeURIComponent(hash), 'mono hash-link'); a.title = hash; return a; };
-const resources = value => Array.isArray(value) ? value.join(' / ') : '—';
 const count = value => { try { return BigInt(value).toLocaleString('en-US'); } catch { return String(value); } };
+const resources = value => Array.isArray(value) ? value.map(count).join(' / ') : '—';
+// A count that, too long for its line, breaks only after a group separator.
+function grouped(value, cls) {
+  const element = node('span', undefined, cls), parts = count(value).split(',');
+  parts.forEach((part, index) => {
+    element.append(index < parts.length - 1 ? part + ',' : part);
+    if (index < parts.length - 1) element.append(document.createElement('wbr'));
+  });
+  return element;
+}
+// A share of a capacity, rounded down so that only a full block shows 100%.
+const share = (used, limit) => {
+  const total = Number(limit);
+  if (!(total > 0)) return null;
+  const percent = Number(used) / total * 100;
+  if (percent === 0) return 0;
+  return Math.min(percent, 100);
+};
+const percentText = percent => percent === 0 ? '0%' : percent < 0.1 ? '<0.1%' :
+  (percent < 10 ? (Math.floor(percent * 10) / 10).toFixed(1) : String(Math.floor(percent))) + '%';
+// One resource's use: the amount, and below it the share of the block's capacity.
+function usageCell(used, limit) {
+  const cell = node('div', undefined, 'usage'), percent = share(used, limit);
+  cell.append(node('span', count(used), 'usage-value'));
+  if (percent !== null) {
+    cell.append(node('span', percentText(percent), 'usage-share'));
+    cell.title = count(used) + ' of ' + count(limit);
+  }
+  return cell;
+}
+// A block's use of each resource against its capacity.
+function usageList(used, limits) {
+  if (!Array.isArray(used)) return node('span', '—');
+  const list = node('div', undefined, 'usage-list');
+  RESOURCES.forEach(([symbol, name], index) => {
+    const percent = Array.isArray(limits) ? share(used[index], limits[index]) : null;
+    const row = node('div', undefined, 'usage-row'); row.title = name;
+    row.append(node('span', symbol, 'usage-symbol'),
+      node('span', count(used[index]) + (percent === null ? '' : ' of ' + count(limits[index])), 'mono'));
+    if (percent !== null) row.append(node('span', percentText(percent), 'usage-share'));
+    list.append(row);
+  });
+  return list;
+}
 const pill = (text, tone) => node('span', text, 'badge' + (tone ? ' ' + tone : ''));
 const badge = receipt => pill(receipt.status_name, receipt.status === 0 ? 'success' : 'failed');
 const RESOURCES = [['C', 'Compute'], ['S', 'State access'], ['D', 'Data'], ['G', 'Growth']];
+// The resource columns of a block table, each a share of the block's capacity.
+const RESOURCE_COLUMNS = [['Compute', 'Compute'], ['State', 'State access'], ['Data', 'Data'], ['Growth', 'Growth']]
+  .map(([label, name]) => ({label, cls: 'num', title: name + ' used, and its share of the block\u2019s capacity'}));
 const timestamp = seconds => {
   const date = new Date(Number(seconds) * 1000);
   return Number.isNaN(date.getTime()) ? String(seconds) : date.toISOString().replace('T', ' ').replace('.000Z', '');
@@ -39,14 +85,20 @@ function setTitle(text, label) {
   byId('page-badge').replaceChildren(...(label ? [label] : []));
   document.title = text + ' · Ting';
 }
+// A table; a header is its label, or {label, cls, title} with a class its
+// column's cells take too.
 function table(headers, rows) {
   const wrapper = node('div', undefined, 'table-scroll');
   const grid = node('table'), head = node('thead'), heading = node('tr'), body = node('tbody');
-  for (const label of headers) heading.append(node('th', label));
+  const columns = headers.map(header => typeof header === 'string' ? {label: header} : header);
+  for (const column of columns) { const th = node('th', column.label, column.cls); if (column.title) th.title = column.title; heading.append(th); }
   head.append(heading);
   for (const values of rows) {
     const row = node('tr');
-    for (const value of values) { const cell = node('td'); cell.append(value instanceof Node ? value : node('span', value)); row.append(cell); }
+    values.forEach((value, index) => {
+      const cell = node('td', undefined, columns[index] && columns[index].cls);
+      cell.append(value instanceof Node ? value : node('span', value)); row.append(cell);
+    });
     body.append(row);
   }
   grid.append(head, body); wrapper.append(grid); return wrapper;
@@ -75,24 +127,29 @@ function empty(text) { return node('p', text, 'empty'); }
 function errorView(error) { const box = node('div', undefined, 'error'); box.append(node('h2', 'Unable to load this view'), node('p', error.message), link('Return to the overview', '/')); return box; }
 function stats(status) {
   const grid = node('section', undefined, 'stats-grid'); grid.setAttribute('aria-label', 'Chain summary');
+  // A card shows a count, or any other element as it is.
   const card = (label, value, note) => {
-    const article = node('article', undefined, 'stat'); article.append(node('p', label, 'stat-label'), value instanceof Node ? value : node('p', value, 'stat-value'));
+    const article = node('article', undefined, 'stat'); article.append(node('p', label, 'stat-label'));
+    if (value instanceof Node) article.append(value);
+    else { const figure = node('p', undefined, 'stat-value'); figure.append(grouped(value)); article.append(figure); }
     if (note) article.append(node('p', note, 'stat-note')); return article;
   };
   const limits = node('dl', undefined, 'capacity');
   RESOURCES.forEach(([symbol, name], index) => {
-    const item = node('div'); item.title = name;
-    item.append(node('dt', symbol), node('dd', Array.isArray(status.limits) ? count(status.limits[index]) : '—')); limits.append(item);
+    const item = node('div'), value = node('dd'); item.title = name;
+    value.append(Array.isArray(status.limits) ? grouped(status.limits[index]) : '—');
+    item.append(node('dt', symbol), value); limits.append(item);
   });
-  grid.append(card('Height', count(status.height)), card('Chain work', count(status.work)),
-    card('Pending', count(status.mempool_count), count(status.mempool_bytes) + ' bytes'), card('Block capacity', limits));
+  grid.append(card('Height', status.height), card('Chain work', status.work),
+    card('Pending', status.mempool_count, count(status.mempool_bytes) + ' bytes'), card('Block capacity', limits));
   return grid;
 }
 function blockTable(blocks, emptyText) {
   if (!blocks.length) return empty(emptyText);
-  return table(['Height', 'Block hash', 'Time (UTC)', 'Transactions', 'Used C / S / D / G'], blocks.slice().reverse().map(block => [
-    link(block.height, '/blocks/' + block.height), hashLink(block.id, 'blocks'),
-    timestamp(block.timestamp), block.transactions.length, node('span', resources(block.used), 'mono')
+  return table(['Height', 'Block hash', {label: 'Time (UTC)', cls: 'nowrap'}, {label: 'Transactions', cls: 'num'}, ...RESOURCE_COLUMNS], blocks.slice().reverse().map(block => [
+    link(count(block.height), '/blocks/' + block.height), hashLink(block.id, 'blocks'),
+    timestamp(block.timestamp), count(block.transactions.length),
+    ...RESOURCES.map((_, index) => usageCell(block.used[index], Array.isArray(block.limits) ? block.limits[index] : undefined))
   ]));
 }
 function staleNote(container, observed, status) {
@@ -111,9 +168,9 @@ function eventsView(receipts) {
 }
 function envelope(summary) {
   if (!summary) return node('p', 'Envelope summary unavailable.', 'muted');
-  const entries = [['Kind', summary.kind], ['Budget C / S / D / G', resources(summary.budget), true], ['Envelope bytes', summary.encoded_bytes], ['Input bytes', summary.input_bytes]];
+  const entries = [['Kind', summary.kind], ['Budget C / S / D / G', resources(summary.budget), true], ['Envelope bytes', count(summary.encoded_bytes)], ['Input bytes', count(summary.input_bytes)]];
   if (summary.target) entries.push(['Target contract', hashLink(summary.target, 'contracts')]);
-  if (summary.code_bytes !== null) entries.push(['Original code bytes', summary.code_bytes]);
+  if (summary.code_bytes !== null) entries.push(['Original code bytes', count(summary.code_bytes)]);
   return details(entries);
 }
 async function overviewView(status) {
@@ -138,7 +195,7 @@ async function blocksView(status) {
   const container = node('div'), pagination = node('nav', undefined, 'pagination');
   pagination.setAttribute('aria-label', 'Block pages');
   pagination.append(from > 1 ? link('← Older', '/blocks?from=' + Math.max(1, from - 20)) : node('span', 'Beginning of chain', 'muted'));
-  pagination.append(node('span', 'Heights ' + from + '–' + Math.max(from, page.next - 1), 'muted'));
+  pagination.append(node('span', 'Heights ' + count(from) + '–' + count(Math.max(from, page.next - 1)), 'muted'));
   pagination.append(page.next <= status.height ? link('Newer →', '/blocks?from=' + page.next) : link('Latest', '/blocks'));
   container.append(blockTable(page.items, 'No mined blocks in this range.'), pagination);
   staleNote(container, page.tip, status);
@@ -146,19 +203,19 @@ async function blocksView(status) {
 }
 async function blockView(id) {
   const block = await json('/v1/blocks/' + encodeURIComponent(id));
-  setTitle('Block ' + block.height, block.canonical ? pill('Canonical') : pill('Side branch', 'warn'));
+  setTitle('Block ' + count(block.height), block.canonical ? pill('Canonical') : pill('Side branch', 'warn'));
   const container = node('div');
   container.append(details([
     ['Block hash', block.id, true], ['Parent', block.height === 1 ? link('Genesis anchor', '/') : hashLink(block.parent, 'blocks')],
-    ['Timestamp (UTC)', timestamp(block.timestamp)], ['Branch work', block.work, true], ['Used C / S / D / G', resources(block.used), true],
-    ['Serialized bytes', block.bytes], ['Nonce', block.nonce, true], ['Difficulty target', block.target, true],
+    ['Timestamp (UTC)', timestamp(block.timestamp)], ['Branch work', count(block.work), true], ['Capacity used', usageList(block.used, block.limits)],
+    ['Serialized bytes', count(block.bytes)], ['Nonce', block.nonce, true], ['Difficulty target', block.target, true],
     ['Votes C / S / D / G', resources(block.votes), true], ['State root', block.state_root, true],
     ['Transactions root', block.transactions_root, true], ['Receipts root', block.receipts_root, true]
   ]));
   container.append(heading('Transactions (' + block.transactions.length + ')'));
   if (block.transactions.length) {
-    container.append(table(['Index', 'Transaction ID', 'Outcome', 'Used C / S / D / G', 'Result bytes'], block.transactions.slice(0, 200).map((tx, index) => {
-      const receipt = block.receipts[index]; return [index, hashLink(tx, 'transactions'), badge(receipt), node('span', resources(receipt.used), 'mono'), receipt.result_hex.length / 2];
+    container.append(table(['Index', 'Transaction ID', 'Outcome', 'Used C / S / D / G', {label: 'Result bytes', cls: 'num'}], block.transactions.slice(0, 200).map((tx, index) => {
+      const receipt = block.receipts[index]; return [count(index), hashLink(tx, 'transactions'), badge(receipt), node('span', resources(receipt.used), 'mono'), count(receipt.result_hex.length / 2)];
     })));
     if (block.transactions.length > 200) container.append(node('p', 'Showing the first 200 transactions. The API provides the complete block data.', 'muted'));
   } else container.append(empty('No transactions.'));
@@ -178,8 +235,8 @@ async function transactionView(id, status) {
   if (!tx.occurrences.length) container.append(empty(tx.pending ? 'Awaiting block inclusion.' : 'No occurrences in this page.'));
   for (const occurrence of tx.occurrences) {
     const receipt = occurrence.receipt, item = node('section', undefined, 'occurrence');
-    item.append(heading('Height ' + occurrence.height + ' · transaction ' + occurrence.index, badge(receipt), 'h3'), details([
-      ['Block', hashLink(occurrence.block, 'blocks')], ['Used C / S / D / G', resources(receipt.used), true], ['Result bytes', receipt.result_hex.length / 2]
+    item.append(heading('Height ' + count(occurrence.height) + ' · transaction ' + count(occurrence.index), badge(receipt), 'h3'), details([
+      ['Block', hashLink(occurrence.block, 'blocks')], ['Used C / S / D / G', resources(receipt.used), true], ['Result bytes', count(receipt.result_hex.length / 2)]
     ]), envelope(occurrence.transaction));
     if (receipt.status === 0 && occurrence.transaction && occurrence.transaction.kind === 'deploy' && receipt.result_hex.length === 64) {
       item.append(details([['Deployed contract', hashLink(receipt.result_hex, 'contracts')]]));
@@ -195,13 +252,13 @@ async function poolView() {
   setTitle('Pending transactions');
   const pool = await json('/v1/mempool'), container = node('div');
   container.append(node('p', count(pool.items.length) + ' transactions · ' + count(pool.bytes) + ' bytes', 'muted lead'));
-  container.append(pool.items.length ? table(['Transaction ID', 'Envelope bytes', 'Budget C / S / D / G'], pool.items.map(tx => [hashLink(tx.id, 'transactions'), tx.bytes, node('span', resources(tx.budget), 'mono')])) : empty('The transaction pool is empty.'));
+  container.append(pool.items.length ? table(['Transaction ID', {label: 'Envelope bytes', cls: 'num'}, 'Budget C / S / D / G'], pool.items.map(tx => [hashLink(tx.id, 'transactions'), count(tx.bytes), node('span', resources(tx.budget), 'mono')])) : empty('The transaction pool is empty.'));
   return container;
 }
 async function contractView(id) {
   const contract = await json('/v1/contracts/' + encodeURIComponent(id)), container = node('div');
   setTitle('Contract');
-  container.append(details([['Contract ID', contract.id, true], ['Original code hash', contract.code_hash, true], ['Code bytes', contract.code_bytes], ['Current state root', contract.state_root, true]]));
+  container.append(details([['Contract ID', contract.id, true], ['Original code hash', contract.code_hash, true], ['Code bytes', count(contract.code_bytes)], ['Current state root', contract.state_root, true]]));
   container.append(heading('Storage'));
   const form = node('form', undefined, 'storage-form'), input = node('input'), button = node('button', 'Read record');
   input.id = 'storage-key'; input.placeholder = '32-byte storage key (64 hex characters)'; input.required = true; input.pattern = '[0-9a-fA-F]{64}'; input.spellcheck = false; input.autocomplete = 'off'; input.setAttribute('aria-label', 'Storage key');

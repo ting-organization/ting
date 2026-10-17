@@ -44,7 +44,7 @@ on a node with memory to spare. Its tables hold:
 | `block_locations` | Where each stored block's frame is |
 | `headers` | Every stored block's header, its status (stored, valid, or failed) and its accumulated work |
 | `operator_marks` | The blocks the operator marked invalid ([overriding validity](#overriding-validity)) |
-| `block_limits` | The active limits of each settled block ([the block index](#the-block-index)) |
+| `block_limits` | The active limits of each executed block: what the index reads of a settled block ([the block index](#the-block-index)), and what a block's summary measures its use against |
 | `side_blocks` | Every stored block off the canonical chain, with its height |
 | `canonical` | Block id by canonical height |
 | `records` | The current logical state records |
@@ -278,7 +278,9 @@ the side blocks `side_blocks` lists. It reads no settled block, no historical bl
 body and no transaction, so a restart takes as long however long the chain. A
 database from before `side_blocks` fills it once, from every stored header, and one
 from before the event tables fills them once, from every executed block, a thousand
-blocks to a commit. Before it serves anything it checks that:
+blocks to a commit. One from before every executed block kept its limits stores
+those of the blocks its index holds, once; settled blocks' are there already.
+Before it serves anything it checks that:
 
 - every header it loads hashes to its block id, carries this ChainId and has a block
   location;

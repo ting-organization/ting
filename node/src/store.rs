@@ -79,8 +79,9 @@ const EVENT_FILL: usize = 1_000;
 pub const CANONICAL: TableDefinition<u64, &'static [u8]> = TableDefinition::new("canonical");
 /// Blocks this node's operator marked invalid, by id (wiki: node/storage).
 pub const MARKS: Blob = TableDefinition::new("operator_marks");
-/// The active limits of each settled canonical block, by id: what the block
-/// index needs of a block it no longer holds in memory (wiki: node/storage).
+/// The active limits of each executed block, by id: what the block index needs
+/// of a block it no longer holds in memory, and what a block's summary shows
+/// its use against (wiki: node/storage).
 pub const LIMITS: Blob = TableDefinition::new("block_limits");
 /// Every stored block off the canonical chain, by id, with its height: with
 /// the canonical blocks above the settled height, what a restart indexes.
@@ -770,13 +771,31 @@ impl Store {
     /// every canonical block is settled. A lower floor unsettles the blocks
     /// above it.
     pub fn settle(tx: &WriteTransaction, limits: &[(Hash, Resources)], floor: u64) -> Result<()> {
+        Self::put_limits(tx, limits)?;
+        put(tx, META, b"index_floor", &floor.to_le_bytes())
+    }
+    /// Blocks' active limits.
+    pub fn put_limits(tx: &WriteTransaction, limits: &[(Hash, Resources)]) -> Result<()> {
         let mut table = tx.open_table(LIMITS).map_err(err)?;
         for (id, limits) in limits {
             let bytes: Vec<u8> = limits.0.iter().flat_map(|v| v.to_le_bytes()).collect();
             table.insert(id.as_slice(), bytes.as_slice()).map_err(err)?;
         }
-        drop(table);
-        put(tx, META, b"index_floor", &floor.to_le_bytes())
+        Ok(())
+    }
+    /// Whether every executed block's limits are stored: in a database from
+    /// before they were, only settled blocks' are, until the node fills in
+    /// the rest once.
+    pub fn limits_filled(&self) -> Result<bool> {
+        let tx = self.db.begin_read().map_err(err)?;
+        let table = tx.open_table(META).map_err(err)?;
+        Ok(table
+            .get(b"block_limits".as_slice())
+            .map_err(err)?
+            .is_some())
+    }
+    pub fn set_limits_filled(tx: &WriteTransaction) -> Result<()> {
+        put(tx, META, b"block_limits", &[1])
     }
     pub fn snapshot(&self) -> Result<State> {
         let tx = self.db.begin_read().map_err(err)?;
@@ -1048,9 +1067,9 @@ impl Store {
         Ok(())
     }
     /// Deletes everything stored of a side-branch block the node no longer
-    /// keeps (wiki: node/storage): its location and header, the occurrences of
-    /// its transactions and its events, and any undo and redo data. Its frame
-    /// stays in its file, unreferenced.
+    /// keeps (wiki: node/storage): its location, header and limits, the
+    /// occurrences of its transactions and its events, and any undo and redo
+    /// data. Its frame stays in its file, unreferenced.
     pub fn forget_side(&self, tx: &WriteTransaction, id: &Hash) -> Result<()> {
         if let Ok(block) = self.block(id) {
             let mut table = tx.open_table(OCCURRENCES).map_err(err)?;
@@ -1072,6 +1091,10 @@ impl Store {
         }
         Self::drop_rows(tx, UNDO_ROWS, *id)?;
         Self::drop_rows(tx, REDO_ROWS, *id)?;
+        tx.open_table(LIMITS)
+            .map_err(err)?
+            .remove(id.as_slice())
+            .map_err(err)?;
         tx.open_table(REDO_BLOCKS)
             .map_err(err)?
             .remove(id.as_slice())
@@ -1127,17 +1150,19 @@ impl Store {
             .bytes(),
         )
     }
-    /// A stored block executed and valid: its record changes and the
-    /// occurrences of its transactions.
+    /// A stored block executed and valid: its record changes, its active
+    /// limits, and the occurrences of its transactions and its events.
     pub fn save_valid(
         &self,
         tx: &WriteTransaction,
         block: &Block,
         work: &BigUint,
         changes: &Changes,
+        limits: Resources,
     ) -> Result<()> {
         let id = block.header.id();
         Self::put_header(tx, &block.header, work, Kept::Valid)?;
+        Self::put_limits(tx, &[(id, limits)])?;
         Self::put_events(tx, block)?;
         let undo: Vec<(Hash, Option<Vec<u8>>)> = changes
             .records

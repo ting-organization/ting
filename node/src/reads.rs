@@ -138,7 +138,7 @@ fn block_json(view: &View, id: Hash) -> Result<Value> {
         "timestamp":b.header.timestamp,"target":hex(&ting_core::protocol::target_bytes(&b.header.target)),
         "work":stored.work.to_string(),"canonical":canonical,"state_root":hex(&b.header.state_root),
         "transactions_root":hex(&b.header.transactions_root),"receipts_root":hex(&b.header.receipts_root),
-        "used":b.header.used.0,"votes":b.header.votes,"producer_hex":hex(&b.producer),"producer_hash":hex(&b.header.producer_hash),
+        "used":b.header.used.0,"limits":view.limits(&id)?.map(|l| l.0),"votes":b.header.votes,"producer_hex":hex(&b.producer),"producer_hash":hex(&b.header.producer_hash),
         "nonce":b.header.nonce.to_string(),"bytes":b.encode().len(),
         "transactions":b.transactions.iter().map(|tx| hex(&tx.id(view.chain()))).collect::<Vec<_>>(),
         "receipts":b.receipts.iter().map(receipt_json).collect::<Vec<_>>()}),

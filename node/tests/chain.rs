@@ -3516,4 +3516,31 @@ fn voting_shows_this_epochs_votes_and_the_capacities_already_decided() {
         (&json!(16), &decided["limits"])
     );
     assert_eq!(votes(&mut chain)["capacities"][0], decided);
+    // Each block's summary gives the capacity it had to fit, so its use reads
+    // against that, and so after a database from before every executed block
+    // kept its limits fills them in as the node opens.
+    let check = |chain: &mut Chain| {
+        let limits = |chain: &mut Chain, id: &str| {
+            chain.request("block", json!({"id":id})).unwrap()["limits"].clone()
+        };
+        assert_eq!(limits(chain, "12"), json!(g.initial.0));
+        assert_eq!(limits(chain, "13"), json!(raised.0));
+    };
+    check(&mut chain);
+    drop(chain);
+    {
+        use redb::{ReadableTable, TableDefinition};
+        let db = redb::Database::open(dir.0.join("chain.redb")).unwrap();
+        let tx = db.begin_write().unwrap();
+        tx.delete_table(TableDefinition::<&[u8], &[u8]>::new("block_limits"))
+            .unwrap();
+        let meta: TableDefinition<&[u8], &[u8]> = TableDefinition::new("metadata");
+        let mut table = tx.open_table(meta).unwrap();
+        assert!(table.get(b"block_limits".as_slice()).unwrap().is_some());
+        table.remove(b"block_limits".as_slice()).unwrap();
+        drop(table);
+        tx.commit().unwrap();
+    }
+    let mut chain = open(&dir);
+    check(&mut chain);
 }

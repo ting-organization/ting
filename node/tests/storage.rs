@@ -282,7 +282,9 @@ fn crash_writer() {
     let location = store.append(&block.encode()).unwrap();
     let work = consensus::work(&block.header.target);
     Store::save_data(&tx, &block.header, &work, location).unwrap();
-    store.save_valid(&tx, &block, &work, &changes).unwrap();
+    store
+        .save_valid(&tx, &block, &work, &changes, g.initial)
+        .unwrap();
     Store::canonical(&tx, 0, &[block.header.id()], block.header.id()).unwrap();
     drop(staged);
     if std::env::var_os("TING_CRASH_AFTER_COMMIT").is_some() {
