@@ -183,15 +183,21 @@ async fn write_bytes<S: AsyncWrite + Unpin>(
     if bytes.is_empty() || bytes.len() > max || u32::try_from(bytes.len()).is_err() {
         return Err("frame size limit".into());
     }
-    tokio::time::timeout(FRAME_DEADLINE, async {
-        stream
-            .write_u32_le(bytes.len() as u32)
-            .await
-            .map_err(|e| e.to_string())?;
-        stream.write_all(bytes).await.map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|_| "write deadline exceeded")?
+    // The length and the frame in one write: written apart, the frame would
+    // wait for the peer to acknowledge the length, a round trip each time.
+    let mut frame = Vec::with_capacity(4 + bytes.len());
+    frame.extend((bytes.len() as u32).to_le_bytes());
+    frame.extend(bytes);
+    tokio::time::timeout(FRAME_DEADLINE, stream.write_all(&frame))
+        .await
+        .map_err(|_| "write deadline exceeded")?
+        .map_err(|e| e.to_string())
+}
+/// A connection sends each frame as soon as it is written: requests and
+/// answers are small and wait for each other, so holding one back for more
+/// data (Nagle's algorithm) only adds round trips.
+fn prompt(stream: &TcpStream) {
+    let _ = stream.set_nodelay(true);
 }
 fn reply(result: Result<Value>) -> Value {
     match result {
@@ -200,10 +206,12 @@ fn reply(result: Result<Value>) -> Value {
     }
 }
 pub async fn connect(address: SocketAddr) -> Result<TcpStream> {
-    tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(address))
+    let stream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(address))
         .await
         .map_err(|_| "connect deadline exceeded")?
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    prompt(&stream);
+    Ok(stream)
 }
 pub async fn control_call(
     address: SocketAddr,
@@ -340,6 +348,7 @@ pub async fn control_server(listener: TcpListener, node: Node) {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
+        prompt(&stream);
         let Ok(permit) = slots.clone().try_acquire_owned() else {
             continue;
         };
@@ -448,6 +457,7 @@ pub async fn peer_server(listener: TcpListener, node: Node) {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
+        prompt(&stream);
         let remote = SocketAddr::new(remote.ip().to_canonical(), remote.port());
         if node
             .book
