@@ -32,6 +32,13 @@ it, so no block is too large to store. A block's location in the database is a `
 file number, a `u64` byte offset and a `u64` block length, and the database's file
 cursor marks the end of the last indexed frame.
 
+The node keeps the file it appends to open, and up to 16 files open for reading,
+whose frames it reads by position: opening a file costs more than the frame, notably
+where a scanner inspects every opening. The blocks it stored last, and blocks larger
+than a slice it served last, it keeps in memory, up to 4,096 of them and 64 MiB: a
+block is connected right after it is stored, and a large one crosses to a peer in
+slices, so either is read from disk once at most.
+
 ## The database
 
 `chain.redb` uses a bounded page cache, 256 MiB unless `"db_cache_mib"` in
@@ -318,7 +325,8 @@ is rejected, never reset.
 
 ## Reading history
 
-Block bodies are read from disk on demand. Transaction lookups use the occurrence
+Block bodies are read from disk on demand, or from the blocks kept in memory.
+Transaction lookups use the occurrence
 index and keep only occurrences on the canonical chain, so a transaction id that
 appears in several blocks lists every occurrence, page by page.
 

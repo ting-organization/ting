@@ -6,8 +6,8 @@ use redb::{
     ReadableTableMetadata, Table, TableDefinition, WriteTransaction,
 };
 use std::{
-    cell::Cell,
-    collections::VecDeque,
+    cell::{Cell, RefCell},
+    collections::{HashMap, VecDeque},
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -183,37 +183,71 @@ pub struct Reader {
     chain: Hash,
     genesis: Hash,
     recent: Arc<Mutex<Recent>>,
+    /// Block files open for reading frames by position, by segment: opening
+    /// a file is what a read costs most, notably where a scanner inspects
+    /// every opening.
+    files: Arc<Mutex<HashMap<u32, Arc<std::fs::File>>>>,
 }
-/// The blocks larger than one slice last read for serving, up to
-/// `RECENT_BYTES` in all and always the last one: such a block crosses to a
-/// peer in slices, and is read from disk once rather than once a slice.
+/// The most block files a reader keeps open.
+const OPEN_FILES: usize = 16;
+/// Blocks just stored, and blocks larger than one slice last read for
+/// serving, up to `RECENT_BYTES` and `RECENT_BLOCKS` in all and always the
+/// last one: a block just stored is connected at once, and one larger than a
+/// slice crosses to a peer in slices; either is read from disk once at most.
 #[derive(Default)]
 struct Recent {
-    blocks: VecDeque<(Hash, Arc<Vec<u8>>)>,
+    blocks: HashMap<Hash, Arc<Vec<u8>>>,
+    order: VecDeque<Hash>,
     bytes: usize,
 }
+const RECENT_BLOCKS: usize = 4_096;
 const RECENT_BYTES: usize = 64 * 1024 * 1024;
 impl Recent {
     fn get(&self, id: &Hash) -> Option<Arc<Vec<u8>>> {
-        self.blocks
-            .iter()
-            .find(|(held, _)| held == id)
-            .map(|(_, bytes)| bytes.clone())
+        self.blocks.get(id).cloned()
     }
     fn keep(&mut self, id: Hash, bytes: Arc<Vec<u8>>) {
         self.forget(&id);
         self.bytes = self.bytes.saturating_add(bytes.len());
-        self.blocks.push_back((id, bytes));
-        while self.bytes > RECENT_BYTES && self.blocks.len() > 1 {
-            let (_, gone) = self.blocks.pop_front().expect("more than one");
-            self.bytes -= gone.len();
+        self.blocks.insert(id, bytes);
+        self.order.push_back(id);
+        while (self.bytes > RECENT_BYTES || self.blocks.len() > RECENT_BLOCKS)
+            && self.blocks.len() > 1
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(gone) = self.blocks.remove(&oldest) {
+                self.bytes -= gone.len();
+            }
         }
     }
     fn forget(&mut self, id: &Hash) {
-        if let Some(at) = self.blocks.iter().position(|(held, _)| held == id) {
-            let (_, gone) = self.blocks.remove(at).expect("found above");
+        if let Some(gone) = self.blocks.remove(id) {
             self.bytes -= gone.len();
+            self.order.retain(|held| held != id);
         }
+    }
+}
+/// Reads exactly `buf.len()` bytes of `file` from `offset`, leaving any other
+/// reader of the same file undisturbed.
+fn read_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.read_exact_at(buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        let mut done = 0;
+        while done < buf.len() {
+            match file.seek_read(&mut buf[done..], offset + done as u64)? {
+                0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                read => done += read,
+            }
+        }
+        Ok(())
     }
 }
 /// A canonical block with events a read asked for: its height and id, and
@@ -242,6 +276,8 @@ pub struct Store {
     lazy: Cell<bool>,
     /// A frame was appended and no commit has indexed it yet.
     unindexed: Cell<bool>,
+    /// The block file appends go to, kept open, and its length.
+    appending: RefCell<Option<(u32, std::fs::File, u64)>>,
 }
 fn err(e: impl std::fmt::Display) -> String {
     format!("storage: {e}")
@@ -509,11 +545,13 @@ impl Store {
                 chain: g.chain_id(),
                 genesis: g.block_id(),
                 recent: Arc::default(),
+                files: Arc::default(),
             },
             forced_at: Cell::new(None),
             forced_segment: Cell::new(None),
             lazy: Cell::new(false),
             unindexed: Cell::new(false),
+            appending: RefCell::new(None),
         };
         let tx = store.begin()?;
         for table in [
@@ -1345,20 +1383,62 @@ impl Store {
         if !frame_length_ok(bytes.len() as u64) {
             return Err("block shorter than any block".into());
         }
-        fs::create_dir_all(self.directory.join("blocks")).map_err(err)?;
         let mut cursor = self.cursor()?;
         if !frame_fits(cursor.offset, bytes.len() as u64) {
             cursor.segment = cursor.segment.checked_add(1).ok_or("segment overflow")?;
             cursor.offset = 40;
         }
+        // The file stays open from one block to the next: opening it is what
+        // an append costs most, notably where a scanner inspects every opening.
+        let mut appending = self.appending.borrow_mut();
+        if appending
+            .as_ref()
+            .is_none_or(|(segment, _, _)| *segment != cursor.segment)
+        {
+            *appending = None;
+            *appending = Some(self.open_segment(cursor.segment)?);
+        }
+        let Some((_, file, length)) = appending.as_mut() else {
+            unreachable!("opened above");
+        };
+        if *length != cursor.offset {
+            *appending = None;
+            return Err("unindexed block tail: reopen node for recovery".into());
+        }
+        let mut frame = Vec::with_capacity(bytes.len() + FRAME_EXTRA as usize);
+        frame.extend((bytes.len() as u64).to_le_bytes());
+        frame.extend(bytes);
+        frame.extend(hash("node-block", bytes));
+        let result = file
+            .seek(SeekFrom::Start(cursor.offset))
+            .and_then(|_| file.write_all(&frame))
+            .and_then(|()| file.sync_all());
+        if let Err(e) = result {
+            let repaired = file.set_len(cursor.offset).and_then(|()| file.sync_all());
+            *appending = None;
+            repaired.map_err(|r| format!("block append failed: {e}; repair failed: {r}"))?;
+            return Err(err(e));
+        }
+        *length = cursor.offset + frame.len() as u64;
+        self.unindexed.set(true);
+        Ok(Location {
+            length: bytes.len() as u64,
+            ..cursor
+        })
+    }
+    /// The block file `segment`, open for appending, and its length: a new
+    /// one begins with the magic and the ChainId, durably, with its directory
+    /// entry.
+    fn open_segment(&self, segment: u32) -> Result<(u32, std::fs::File, u64)> {
+        fs::create_dir_all(self.directory.join("blocks")).map_err(err)?;
         #[cfg(unix)]
-        let new_segment = !self.segment(cursor.segment).exists();
+        let new_segment = !self.segment(segment).exists();
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(self.segment(cursor.segment))
+            .open(self.segment(segment))
             .map_err(err)?;
         if file.metadata().map_err(err)?.len() == 0 {
             let mut magic = MAGIC.to_vec();
@@ -1368,21 +1448,6 @@ impl Store {
                 .map_err(err)?;
         }
         self.check_magic(&mut file)?;
-        if file.metadata().map_err(err)?.len() != cursor.offset {
-            return Err("unindexed block tail: reopen node for recovery".into());
-        }
-        file.seek(SeekFrom::Start(cursor.offset)).map_err(err)?;
-        let result = file
-            .write_all(&(bytes.len() as u64).to_le_bytes())
-            .and_then(|()| file.write_all(bytes))
-            .and_then(|()| file.write_all(&hash("node-block", bytes)))
-            .and_then(|()| file.sync_all());
-        if let Err(e) = result {
-            file.set_len(cursor.offset)
-                .and_then(|()| file.sync_all())
-                .map_err(|r| format!("block append failed: {e}; repair failed: {r}"))?;
-            return Err(err(e));
-        }
         #[cfg(unix)]
         if new_segment {
             std::fs::File::open(self.directory.join("blocks"))
@@ -1392,11 +1457,17 @@ impl Store {
                 .and_then(|dir| dir.sync_all())
                 .map_err(err)?;
         }
-        self.unindexed.set(true);
-        Ok(Location {
-            length: bytes.len() as u64,
-            ..cursor
-        })
+        let length = file.metadata().map_err(err)?.len();
+        Ok((segment, file, length))
+    }
+    /// Keeps a block just stored among the recent ones, so that connecting
+    /// it reads no file.
+    pub fn keep_recent(&self, id: Hash, bytes: &[u8]) {
+        self.reader
+            .recent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keep(id, Arc::new(bytes.to_vec()));
     }
     pub fn pending(&self) -> Result<Option<(Vec<u8>, Location)>> {
         let mut cursor = self.cursor()?;
@@ -1474,6 +1545,24 @@ impl Reader {
         self.directory
             .join("blocks")
             .join(format!("{number:08}.dat"))
+    }
+    /// The block file `segment`, open for reading by position.
+    fn segment_file(&self, segment: u32) -> Result<Arc<std::fs::File>> {
+        let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(file) = files.get(&segment) {
+            return Ok(file.clone());
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(self.segment(segment))
+            .map_err(err)?;
+        self.check_magic(&mut file)?;
+        if files.len() >= OPEN_FILES {
+            files.clear();
+        }
+        let file = Arc::new(file);
+        files.insert(segment, file.clone());
+        Ok(file)
     }
     fn check_magic(&self, file: &mut std::fs::File) -> Result<()> {
         file.seek(SeekFrom::Start(0)).map_err(err)?;
@@ -1772,25 +1861,32 @@ impl View<'_> {
         Ok(block)
     }
     /// A stored block's bytes, checked against their checksum and their
-    /// header against the id, without decoding the body.
+    /// header against the id, without decoding the body; a block just stored
+    /// or served comes from memory.
     pub fn block_bytes(&self, id: &Hash) -> Result<Vec<u8>> {
         let location = self.location(id)?.ok_or("block not found")?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .open(self.reader.segment(location.segment))
-            .map_err(err)?;
-        self.reader.check_magic(&mut file)?;
-        file.seek(SeekFrom::Start(location.offset)).map_err(err)?;
-        let mut length = [0; 8];
-        file.read_exact(&mut length).map_err(err)?;
-        if u64::from_le_bytes(length) != location.length || !frame_length_ok(location.length) {
+        let recent = self
+            .reader
+            .recent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id);
+        if let Some(bytes) = recent {
+            return Ok(bytes.to_vec());
+        }
+        if !frame_length_ok(location.length) {
             return Err("stored block length mismatch".into());
         }
-        let mut bytes = vec![0; usize::try_from(location.length).map_err(err)?];
-        let mut checksum = [0; 32];
-        file.read_exact(&mut bytes)
-            .and_then(|()| file.read_exact(&mut checksum))
-            .map_err(err)?;
+        let length = usize::try_from(location.length).map_err(err)?;
+        let file = self.reader.segment_file(location.segment)?;
+        let mut frame = vec![0; length + FRAME_EXTRA as usize];
+        read_at(&file, &mut frame, location.offset).map_err(err)?;
+        if frame[..8] != location.length.to_le_bytes() {
+            return Err("stored block length mismatch".into());
+        }
+        let checksum = frame.split_off(8 + length);
+        frame.drain(..8);
+        let bytes = frame;
         if checksum != hash("node-block", &bytes) {
             return Err("corrupt block checksum".into());
         }

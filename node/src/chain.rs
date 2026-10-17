@@ -1320,6 +1320,8 @@ impl Chain {
         if let Err(error) = self.store.commit_block(tx, location) {
             return Err(self.fail(format!("database commit failed; restart required: {error}")));
         }
+        // Connecting it next reads it from memory.
+        self.store.keep_recent(id, bytes);
         self.index.set_data(&id);
         self.in_flight.remove(&id);
         self.advance_frontier();

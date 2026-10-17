@@ -2883,7 +2883,11 @@ fn a_stored_block_that_cannot_be_read_is_forgotten_and_taken_again() {
         .expect("the frame is in the file");
     bytes[at + body.len() / 2] ^= 1;
     fs::write(&path, &bytes).unwrap();
-    // Connecting reaches it: it is forgotten and the tip stays on the first.
+    // A block just stored is kept in memory; after a restart it is read from
+    // its file. Connecting reaches it: it is forgotten and the tip stays on
+    // the first.
+    drop(chain);
+    let mut chain = open(&dir);
     chain.import(&a[0].encode(), true).unwrap();
     assert_eq!(chain.tip(), a[0].header.id());
     // Sent again, it is stored and connected, with the third.
