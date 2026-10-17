@@ -120,7 +120,7 @@ pub const HEADERS_PAGE: usize = 2_000;
 /// one peer for its `transfer_time`, and one that lapsed is not asked of that
 /// peer again for `LAPSED_WAIT` seconds.
 const WINDOW: usize = 1_024;
-const PER_PEER: usize = 16;
+const PER_PEER: usize = 64;
 const LAPSED_WAIT: u64 = 120;
 /// The time a peer has to deliver a block or transaction of up to `bytes`, in
 /// slices (wiki: node/sync): a minute, and ten seconds more for every slice,

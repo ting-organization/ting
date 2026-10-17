@@ -9,7 +9,7 @@
 use crate::{
     FRAME_MAX, Result,
     chain::{
-        DEFERRED_MAX, Event, HEADERS_PAGE, INVALID, INVENTORY_PAGE, LOCATOR_MAX, NOT_ASKED,
+        DEFERRED_MAX, Event, HEADERS_PAGE, Handle, INVALID, INVENTORY_PAGE, LOCATOR_MAX, NOT_ASKED,
         RELAY_PAGE, SLICE_MAX, TOO_LARGE, is_invalid, is_policy, transfer_time,
     },
     config,
@@ -23,7 +23,7 @@ use crate::{
 use num_bigint::BigUint;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     net::SocketAddr,
     sync::{
         Arc,
@@ -48,6 +48,13 @@ const PUSH_MAX: usize = 32;
 const PAGES: usize = 8;
 /// The time a peer has to answer a request.
 const REPLY_DEADLINE: Duration = Duration::from_secs(30);
+/// Block slices asked of one peer before their answers come (wiki:
+/// node/sync#blocks): the peer answers in order, so one round trip carries
+/// many blocks.
+const PIPELINE: usize = 64;
+/// The most bytes a connection holds of blocks whose other slices are still
+/// on their way; beyond it, no further block is begun until they arrive.
+const PARTS_MAX: usize = 32 << 20;
 /// A connection with nothing to do asks for headers this often, so that it
 /// stays open and misses no tip; while the node looks for more peers, as
 /// often as `LOOKING`, asking for addresses too.
@@ -65,9 +72,10 @@ const PROBE_INTERVAL: u64 = 120;
 /// connected until it moves.
 const STALE_TIP: u64 = 600;
 
-/// One outbound connection's transport: requests go out one at a time, and
-/// frames come back through a reader task, so that the announcements a peer
-/// sends between answers are noticed while the connection is idle.
+/// One outbound connection's transport: requests go out, one at a time or
+/// several before their answers, and frames come back through a reader task,
+/// so that the announcements a peer sends between answers are noticed while
+/// the connection is idle.
 struct Conn {
     writer: OwnedWriteHalf,
     frames: mpsc::Receiver<Result<wire::Frame>>,
@@ -131,10 +139,28 @@ impl Conn {
     /// A request's answer; an error answer is the peer's, and the connection
     /// stays usable.
     async fn request(&mut self, request: Request) -> Result<Answer> {
+        self.send(request).await?;
+        self.next_answer().await
+    }
+    /// Sends a request whose answer `next_answer` reads later: answers come
+    /// in the order the requests went out, so several can be on their way.
+    async fn send(&mut self, request: Request) -> Result<()> {
         if let Some(error) = &self.broken {
             return Err(error.clone());
         }
-        match self.answer(request).await {
+        let sent = transport::write_wire(&mut self.writer, &wire::Frame::Request(request)).await;
+        if let Err(error) = &sent {
+            self.broken = Some(error.clone());
+        }
+        sent
+    }
+    /// The answer to the oldest request sent and not yet answered; an error
+    /// answer is the peer's, and the connection stays usable.
+    async fn next_answer(&mut self) -> Result<Answer> {
+        if let Some(error) = &self.broken {
+            return Err(error.clone());
+        }
+        match self.answer().await {
             Ok(answer) => answer,
             Err(error) => {
                 self.broken = Some(error.clone());
@@ -142,8 +168,7 @@ impl Conn {
             }
         }
     }
-    async fn answer(&mut self, request: Request) -> Result<Result<Answer>> {
-        transport::write_wire(&mut self.writer, &wire::Frame::Request(request)).await?;
+    async fn answer(&mut self) -> Result<Result<Answer>> {
         let deadline = Instant::now() + REPLY_DEADLINE;
         loop {
             let frame = tokio::time::timeout_at(deadline, self.frames.recv())
@@ -210,6 +235,20 @@ struct Link {
     marked: u64,
     connected: u64,
     delivered: Option<u64>,
+}
+/// A block on its way from a peer: the bytes so far, its most bytes, when it
+/// was asked for and by when it must be complete.
+struct Download {
+    bytes: Vec<u8>,
+    max: u64,
+    started: Instant,
+    deadline: Instant,
+}
+/// Why a download stopped asking for more before the chain had nothing left:
+/// the peer lacks a block, or the chain refused one for now.
+enum Stop {
+    Missing,
+    Policy,
 }
 /// What a push reads of this node's own: a block, or a pooled or deferred
 /// transaction.
@@ -323,103 +362,184 @@ impl Link {
         Ok(true)
     }
     /// Blocks along the best header's branch, as many as the chain asks of
-    /// this peer; other connections fetch others at the same time.
+    /// this peer; other connections fetch others at the same time. Their
+    /// requests go out together and are kept topped up, so that the peer is
+    /// never waiting for the next.
     async fn blocks(&mut self) -> Result<()> {
         let handle = self.node.handle.clone();
-        loop {
-            let wanted = handle
-                .call("blocks_wanted", json!({"peer":self.peer}))
-                .await?;
-            let ids = wanted["ids"].as_array().ok_or("invalid wanted blocks")?;
-            if ids.is_empty() {
-                return Ok(());
+        match self.download(&handle).await {
+            // This peer does not have one of them: the others are asked, and
+            // this one again once it announces a new tip.
+            Ok(Some(Stop::Missing)) => {
+                self.fetch = false;
+                handle.call("release", json!({"peer":self.peer})).await?;
+                Ok(())
             }
-            let wanted: Vec<(Hash, u64)> = ids
-                .iter()
-                .enumerate()
-                .map(|(k, id)| {
-                    let id = hash_arg(id.as_str().ok_or("invalid wanted blocks")?)?;
-                    let max = wanted["max"][k].as_u64().ok_or("invalid wanted blocks")?;
-                    Ok((id, max))
-                })
-                .collect::<Result<_>>()?;
-            for (id, max) in wanted {
-                let block = match self.fetch_block(&id, max).await {
-                    Ok(block) => block,
-                    // This peer does not have it: the others are asked, and
-                    // this one again once it announces a new tip.
-                    Err(e) if e == "block not found" => {
-                        self.fetch = false;
-                        handle.call("release", json!({"peer":self.peer})).await?;
-                        return Ok(());
-                    }
-                    Err(e) => return Err(e),
-                };
-                match handle
-                    .call_bytes("import", json!({"peer":self.peer}), Some(block))
-                    .await
-                {
-                    Ok(imported) => {
-                        if imported["known"] == false {
-                            self.delivered = Some(crate::now());
-                        }
-                    }
-                    Err(e) if is_policy(&e) => return Ok(()),
-                    Err(e) => return Err(e),
-                }
+            Ok(_) => Ok(()),
+            // Answers may still be on their way, and nothing can tell them
+            // from the answers to later requests.
+            Err(error) => {
+                self.conn.broken.get_or_insert_with(|| error.clone());
+                Err(error)
             }
         }
     }
-    /// Fetches the block `id`, of at most `max` bytes, its data capacity, in
-    /// slices of at most `SLICE_MAX` bytes, within one deadline for the whole
-    /// block. A peer that sends another block, or claims one larger than its
-    /// capacity, sent invalid data.
-    async fn fetch_block(&mut self, id: &Hash, max: u64) -> Result<Vec<u8>> {
-        // The capacity bounds the time until the first slice tells the size.
-        let started = Instant::now();
-        let mut deadline = started + transfer_time(max);
-        let mut bytes = Vec::new();
+    /// The blocks the chain wants of this peer, each with its most bytes,
+    /// its data capacity.
+    async fn wanted(&self, handle: &Handle) -> Result<Vec<(Hash, u64)>> {
+        let wanted = handle
+            .call("blocks_wanted", json!({"peer":self.peer}))
+            .await?;
+        let ids = wanted["ids"].as_array().ok_or("invalid wanted blocks")?;
+        ids.iter()
+            .enumerate()
+            .map(|(k, id)| {
+                let id = hash_arg(id.as_str().ok_or("invalid wanted blocks")?)?;
+                let max = wanted["max"][k].as_u64().ok_or("invalid wanted blocks")?;
+                Ok((id, max))
+            })
+            .collect()
+    }
+    /// Fetches the blocks the chain wants of this peer and imports each as it
+    /// completes: up to `PIPELINE` slices asked at once, topped up from the
+    /// chain as answers come. A block is asked for in slices of at most
+    /// `SLICE_MAX` bytes, each from where its bytes so far end, its next slice
+    /// before any further block. Each block has its `transfer_time` from when
+    /// it was asked. A peer that sends another
+    /// block, or claims one larger than its capacity, sent invalid data.
+    /// Returns why it stopped early, once every answer on its way has come.
+    async fn download(&mut self, handle: &Handle) -> Result<Option<Stop>> {
+        // The blocks under way, the slices to ask for, and the slices asked
+        // for, in the order their answers come.
+        let mut parts: HashMap<Hash, Download> = HashMap::new();
+        let mut queue: VecDeque<(Hash, u64)> = VecDeque::new();
+        let mut asked: VecDeque<(Hash, u64)> = VecDeque::new();
+        let mut more = true;
+        let mut stop = None;
         loop {
-            let offset = bytes.len() as u64;
-            let request = Request::Raw {
-                id: *id,
-                offset,
-                length: SLICE_MAX as u32,
-            };
-            let (at, total, part) =
-                match tokio::time::timeout_at(deadline, self.conn.request(request))
-                    .await
-                    .map_err(|_| "block download deadline exceeded")??
-                {
-                    Answer::Slice {
-                        offset,
-                        total,
-                        bytes,
-                    } => (offset, total, bytes),
-                    _ => return Err(unexpected("raw")),
+            if more && stop.is_none() && queue.is_empty() && asked.len() <= PIPELINE / 2 {
+                let mut new = false;
+                for (id, max) in self.wanted(handle).await? {
+                    if parts.contains_key(&id) {
+                        continue;
+                    }
+                    let started = Instant::now();
+                    parts.insert(
+                        id,
+                        Download {
+                            bytes: Vec::new(),
+                            max,
+                            deadline: started + transfer_time(max),
+                            started,
+                        },
+                    );
+                    queue.push_back((id, 0));
+                    new = true;
+                }
+                more = new;
+            }
+            // The bytes held of blocks whose other slices are still to come.
+            let held: usize = parts.values().map(|part| part.bytes.len()).sum();
+            while stop.is_none() && asked.len() < PIPELINE {
+                let Some(&(id, offset)) = queue.front() else {
+                    break;
                 };
-            if at != offset || offset.saturating_add(part.len() as u64) > total {
+                if offset == 0 && held > PARTS_MAX {
+                    break;
+                }
+                queue.pop_front();
+                self.conn
+                    .send(Request::Raw {
+                        id,
+                        offset,
+                        length: SLICE_MAX as u32,
+                    })
+                    .await?;
+                asked.push_back((id, offset));
+            }
+            let Some((id, offset)) = asked.pop_front() else {
+                return Ok(stop);
+            };
+            let answer = self.conn.next_answer().await;
+            // A block given up on has its last answers read and dropped.
+            let Some(part) = parts.get_mut(&id) else {
+                if let Err(error) = answer
+                    && self.conn.broken.is_some()
+                {
+                    return Err(error);
+                }
+                continue;
+            };
+            let (at, total, bytes) = match answer {
+                Ok(Answer::Slice {
+                    offset,
+                    total,
+                    bytes,
+                }) => (offset, total, bytes),
+                Ok(_) => return Err(unexpected("raw")),
+                Err(e) if e == "block not found" && self.conn.broken.is_none() => {
+                    parts.remove(&id);
+                    queue.retain(|(q, _)| *q != id);
+                    stop.get_or_insert(Stop::Missing);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            if Instant::now() > part.deadline {
+                return Err("block download deadline exceeded".into());
+            }
+            if at != offset || at != part.bytes.len() as u64 {
                 return Err("invalid block slice".into());
             }
-            if total > max {
+            if at.saturating_add(bytes.len() as u64) > total {
+                return Err("invalid block slice".into());
+            }
+            if total > part.max {
                 return Err(format!("{INVALID}block: larger than its capacity"));
             }
-            deadline = started + transfer_time(total);
-            let checked = bytes.len() >= HEADER_LEN;
-            let empty = part.is_empty();
-            bytes.extend(part);
-            if !checked && bytes.len() >= HEADER_LEN {
-                let header = Header::decode(&bytes[..HEADER_LEN])
+            let checked = part.bytes.len() >= HEADER_LEN;
+            let empty = bytes.is_empty();
+            part.bytes.extend(bytes);
+            if !checked && part.bytes.len() >= HEADER_LEN {
+                let header = Header::decode(&part.bytes[..HEADER_LEN])
                     .map_err(|e| format!("{INVALID}block: {e}"))?;
-                if header.id() != *id {
+                if header.id() != id {
                     return Err(format!("{INVALID}block: not the block asked for"));
                 }
             }
-            if bytes.len() as u64 >= total {
-                return Ok(bytes);
+            let have = part.bytes.len() as u64;
+            if have < total {
+                if empty {
+                    return Err("empty block slice".into());
+                }
+                // Its next slice is asked for before any further block, from
+                // where its bytes end; once its first slice tells its size, its
+                // time follows from that.
+                if offset == 0 {
+                    part.deadline = part.started + transfer_time(total);
+                }
+                queue.push_front((id, have));
+                continue;
             }
-            if empty {
-                return Err("empty block slice".into());
+            let block = parts.remove(&id).map(|part| part.bytes).unwrap_or_default();
+            if matches!(stop, Some(Stop::Policy)) {
+                continue;
+            }
+            match handle
+                .call_bytes("import", json!({"peer":self.peer}), Some(block))
+                .await
+            {
+                Ok(imported) => {
+                    if imported["known"] == false {
+                        self.delivered = Some(crate::now());
+                    }
+                    // What the chain asks of this peer moves on with it.
+                    more = true;
+                }
+                Err(e) if is_policy(&e) => {
+                    stop = Some(Stop::Policy);
+                }
+                Err(e) => return Err(e),
             }
         }
     }

@@ -254,7 +254,7 @@ The **best header** is the indexed header with the most work that is not invalid
 node downloads the blocks of its branch that it does not store:
 
 - in order of height, from the lowest one missing, at most 1,024 beyond it;
-- from several peers at once, each connection asking for its own, up to 16 per peer
+- from several peers at once, each connection asking for its own, up to 64 per peer
   at a time and none of two peers at once; a block asked of a peer and not delivered
   within its transfer time, or one the peer does not have, goes back to the others,
   and is not asked of a peer that let it lapse again for two minutes;
@@ -262,7 +262,14 @@ node downloads the blocks of its branch that it does not store:
   its transfer time for the whole block. Its header is known before it is asked for,
   so a peer that answers with another block, or claims one larger than the data
   capacity at its height, has sent [invalid data](#invalid-data) and is caught at the
-  first slice.
+  first slice;
+- with the requests sent together: a connection asks for up to 64 slices before
+  their answers come, since a peer answers in order, and tops them up as answers
+  arrive, so one round trip carries many blocks and the peer never waits for the
+  next request. A block larger than a slice has its next slice asked for, from
+  where its bytes end, before any further block, and no further block is begun
+  while 32 MiB of blocks wait for their other slices. Each block is imported as it
+  completes.
 
 An item's **transfer time** is a minute, and ten seconds more for every 1 MiB slice
 it may span: for a block, its size once the first slice tells it, and until then the
@@ -346,9 +353,12 @@ The first request on a connection must be `hello` with a version of at least 1 a
 the receiving node's ChainId, in a frame of at most 4 KiB; anything else is
 answered with the error `peer version or genesis mismatch` and the connection
 closes. After it, the connection stays open as long as requests keep coming: one
-idle for 120 seconds is closed. Requests are counted by cost, a block slice or a
-block 16, a page of headers 8, `state`, `inventory`, `pending` and `deferred` 2, any
-other 1, and beyond 200 a second, after a burst of 2,000, they wait their turn. An
+idle for 120 seconds is closed. Requests are counted by cost: a page of headers 8,
+`state`, `inventory`, `pending` and `deferred` 2, any other 1, and one that carries a
+block or a transaction 1 more for every 64 KiB of it, a slice counted once it is
+answered. Beyond 200 a second, after a burst of 2,000, they wait their turn, so a
+connection draws at most about 12 MiB of blocks a second, as many small ones or few
+large. An
 error answer is an answer like any other, such as a block the node does not have,
 and the connection stays open; it ends for a second `hello` and for
 [invalid data](#invalid-data). Requests are answered in the order they were sent.

@@ -1765,3 +1765,123 @@ async fn seed_names_resolve_to_addresses_and_bad_ones_are_passed_over() {
     assert!(found.iter().all(|a| a.port() != 0));
     assert!(ting_node::config::SEEDS.iter().all(|s| s.contains(':')));
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blocks_are_asked_for_many_at_once_and_assembled_from_their_slices() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    // A peer with 24 blocks that answers each request a little late and in
+    // slices of 100 bytes, so that every block takes several: the node keeps
+    // many requests on their way, and assembles each block from its slices.
+    let b = Node::start(false, "fetcher");
+    let g = config::genesis(&b.dir.0).unwrap();
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let (mut history, mut blocks) = (Vec::new(), Vec::new());
+    let start = ting_node::now();
+    for i in 0..24 {
+        let mut block = runtime
+            .build_candidate(&g, &history, vec![], start + i, [0; 4], vec![])
+            .unwrap();
+        while !consensus::valid_pow(&block.header) {
+            block.header.nonce += 1;
+        }
+        runtime
+            .validate_and_apply_block(&g, &history, &block)
+            .unwrap();
+        history.push(block.header.clone());
+        blocks.push(block);
+    }
+    let tip = blocks[23].header.id();
+    let state = wire::State {
+        version: 1,
+        chain_id: g.chain_id(),
+        agent: "slow".into(),
+        features: vec![],
+        nonce: 0xbb,
+        height: 24,
+        tip,
+        work: history.iter().map(|h| consensus::work(&h.target)).sum(),
+        locator: vec![],
+        pending: vec![],
+        deferred: vec![],
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (waiting, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (served, seen) = (blocks.clone(), (waiting.clone(), most.clone()));
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let (mut read, mut write) = stream.into_split();
+            let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+            let (waiting, most) = seen.clone();
+            tokio::spawn(async move {
+                while let Ok(wire::Frame::Request(request)) =
+                    transport::read_wire(&mut read, None, ting_node::FRAME_MAX).await
+                {
+                    let now = waiting.fetch_add(1, Ordering::SeqCst) + 1;
+                    most.fetch_max(now, Ordering::SeqCst);
+                    if sender.send(request).is_err() {
+                        return;
+                    }
+                }
+            });
+            let (served, state, waiting) = (served.clone(), state.clone(), seen.0.clone());
+            tokio::spawn(async move {
+                let mut sent_headers = false;
+                while let Some(request) = requests.recv().await {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    let answer = match request {
+                        wire::Request::Hello(_) | wire::Request::State => {
+                            Ok(wire::Answer::State(state.clone()))
+                        }
+                        wire::Request::Headers { .. } if !sent_headers => {
+                            sent_headers = true;
+                            Ok(wire::Answer::Headers(
+                                served
+                                    .iter()
+                                    .map(|b| b.header.encode().try_into().unwrap())
+                                    .collect(),
+                            ))
+                        }
+                        wire::Request::Headers { .. } => Ok(wire::Answer::Headers(vec![])),
+                        wire::Request::Raw { id, offset, .. } => {
+                            let block = served.iter().find(|b| b.header.id() == id).unwrap();
+                            let bytes = block.encode();
+                            let from = offset as usize;
+                            let to = (from + 100).min(bytes.len());
+                            Ok(wire::Answer::Slice {
+                                offset,
+                                total: bytes.len() as u64,
+                                bytes: bytes[from..to].to_vec(),
+                            })
+                        }
+                        wire::Request::Inventory { .. } => Ok(wire::Answer::Inventory {
+                            ids: vec![],
+                            next: None,
+                        }),
+                        wire::Request::Addresses => Ok(wire::Answer::Addresses(vec![])),
+                        _ => Err("not served".to_string()),
+                    };
+                    waiting.fetch_sub(1, Ordering::SeqCst);
+                    let frame = match answer {
+                        Ok(answer) => wire::Frame::Answer(answer),
+                        Err(error) => wire::Frame::Error(error),
+                    };
+                    if transport::write_wire(&mut write, &frame).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    command(&b.dir.0, &["add", "node", &address.to_string()]);
+    b.wait_height(24).await;
+    assert_eq!(b.call("status", json!({})).await["tip"], hex(&tip));
+    let most = most.load(Ordering::SeqCst);
+    assert!(
+        most >= 16,
+        "at most {most} requests were on their way at once"
+    );
+    b.stop().await;
+}

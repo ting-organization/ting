@@ -3085,11 +3085,11 @@ fn a_chain_far_behind_is_checked_without_being_kept_until_it_overtakes() {
     let indexed = headers_from(&mut chain, &headers(0..1_460)).unwrap();
     assert_eq!(indexed["indexed"], 1_460);
     assert_eq!(status(&mut chain)["best_height"], 1_460);
-    // The blocks are asked along B, sixteen at a time, and connected once B
-    // has more work than A.
+    // The blocks are asked along B, sixty-four at a time of one peer, and
+    // connected once B has more work than A.
     let wanted = chain.request("blocks_wanted", json!({"peer":"p"})).unwrap();
     let ids = wanted["ids"].as_array().unwrap();
-    assert_eq!(ids.len(), 16);
+    assert_eq!(ids.len(), 64);
     assert_eq!(ids[0], hex(&b[0].header.id()));
     for block in &b {
         chain.import(&block.encode(), true).unwrap();

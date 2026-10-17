@@ -433,11 +433,18 @@ const MIN_VERSION: u32 = 1;
 const IDLE: Duration = Duration::from_secs(120);
 /// Announcements wait this long, so that a burst of changes is told once.
 const ANNOUNCE_DELAY: Duration = Duration::from_millis(200);
-/// Requests one connection may make, counted by cost (a block slice 16, a
-/// header page 8, most others 1): this many a second, in bursts of up to
-/// `BURST`. Requests beyond the rate wait.
+/// Requests one connection may make, counted by cost (most 1, a header page
+/// 8, and a request that carries a block or a transaction 1 more for every
+/// `CARRIED` bytes): this many a second, in bursts of up to `BURST`, so that a
+/// connection draws at most about 12 MiB a second of blocks, many small ones
+/// or a few large. Requests beyond the rate wait.
 const RATE: f64 = 200.0;
 const BURST: f64 = 2_000.0;
+const CARRIED: usize = 64 * 1024;
+/// What carrying `bytes` of a block or transaction adds to a request's cost.
+fn carried(bytes: usize) -> f64 {
+    bytes.div_ceil(CARRIED) as f64
+}
 /// What a peer is told when this node's tip or pool changes.
 pub fn announcement(event: &Event) -> wire::Announcement {
     wire::Announcement {
@@ -670,11 +677,13 @@ async fn serve(
             break;
         };
         // What a request takes from the allowance follows what it costs the
-        // node: a block slice or a page of headers is many small requests.
-        let cost = match request {
-            wire::Request::Raw { .. }
-            | wire::Request::TransactionRaw { .. }
-            | wire::Request::Import(_) => 16.0,
+        // node: a page of headers is many small requests, and one that
+        // carries a block or a transaction counts its bytes, the slices asked
+        // for once they are answered.
+        let cost = match &request {
+            wire::Request::Import(part) | wire::Request::Submit { part, .. } => {
+                1.0 + carried(part.bytes.len())
+            }
             wire::Request::Headers { .. } => 8.0,
             wire::Request::State
             | wire::Request::Pending { .. }
@@ -730,6 +739,9 @@ async fn serve(
         // full pool, a transaction not taken) and the connection stays open,
         // unless the peer sent a second hello or invalid data, which also
         // bans it.
+        if let Ok(wire::Answer::Slice { bytes, .. }) = &result {
+            tokens -= carried(bytes.len());
+        }
         let failed = match &result {
             Err(e) if is_invalid(e) => {
                 peers::punish(&node, remote);
