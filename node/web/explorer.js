@@ -155,7 +155,8 @@ function stats(status) {
     const article = node('article', undefined, 'stat'); article.append(node('p', label, 'stat-label'));
     if (value instanceof Element && value.tagName !== 'SPAN') article.append(value);
     else { const figure = node('p', undefined, 'stat-value'); figure.append(value); article.append(figure); }
-    if (note) article.append(node('p', note, 'stat-note')); return article;
+    if (note) { const line = node('p', undefined, 'stat-note'); line.append(note); article.append(line); }
+    return article;
   };
   const limits = node('dl', undefined, 'capacity');
   RESOURCES.forEach(([symbol, name], index) => {
