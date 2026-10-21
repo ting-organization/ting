@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 260" role="img" aria-labelledby="voting-title voting-desc">
+  <title id="voting-title">A capacity vote and when it takes effect</title>
+  <desc id="voting-desc">Votes are counted over the blocks of epoch e, weighted by work: an increase passes with at least two-thirds of the epoch's work, a decrease with more than half. The decision takes effect at the start of epoch e plus 3, after two complete epochs of notice. Then capacity moves one step: up 5 percent with no ceiling, or down 10 percent but never below the genesis floor.</desc>
+  <style>
+    .voting-epoch { fill: var(--card, #ffffff); stroke: var(--border, #d0d5dd); stroke-width: 1.5; }
+    .voting-count { fill: var(--primary-soft, #eef2ff); stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+    .voting-label { fill: var(--text, #101828); font: 600 13px var(--font, system-ui, sans-serif); }
+    .voting-note { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .voting-hint { fill: var(--muted, #667085); font: italic 12px var(--font, system-ui, sans-serif); }
+    .voting-arc { fill: none; stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+    .voting-tip { fill: var(--primary, #4f46e5); }
+    .voting-axis { fill: none; stroke: var(--border, #d0d5dd); stroke-width: 1.5; }
+    .voting-level { fill: none; stroke: var(--text, #101828); stroke-width: 2; }
+    .voting-up { fill: none; stroke: var(--success, #067647); stroke-width: 2; }
+    .voting-down { fill: none; stroke: var(--danger, #d92d20); stroke-width: 2; stroke-dasharray: 5 4; }
+    .voting-upt { fill: var(--success, #067647); font: 600 12px var(--font, system-ui, sans-serif); }
+    .voting-downt { fill: var(--danger, #d92d20); font: 600 12px var(--font, system-ui, sans-serif); }
+  </style>
+  <defs>
+    <marker id="voting-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="voting-tip"/>
+    </marker>
+  </defs>
+
+  <!-- Epochs -->
+  <rect x="90" y="70" width="140" height="40" class="voting-count"/>
+  <text x="160" y="95" text-anchor="middle" class="voting-label">epoch e</text>
+  <rect x="230" y="70" width="140" height="40" class="voting-epoch"/>
+  <text x="300" y="95" text-anchor="middle" class="voting-label">e + 1</text>
+  <rect x="370" y="70" width="140" height="40" class="voting-epoch"/>
+  <text x="440" y="95" text-anchor="middle" class="voting-label">e + 2</text>
+  <rect x="510" y="70" width="140" height="40" class="voting-epoch"/>
+  <text x="580" y="95" text-anchor="middle" class="voting-label">e + 3</text>
+
+  <path d="M230,66 C300,34 440,34 510,66" class="voting-arc" marker-end="url(#voting-arrow)"/>
+  <text x="370" y="30" text-anchor="middle" class="voting-hint">decided at the end of e, applied at the start of e + 3</text>
+
+  <text x="160" y="130" text-anchor="middle" class="voting-note">votes counted by work:</text>
+  <text x="160" y="146" text-anchor="middle" class="voting-note">up with at least 2/3,</text>
+  <text x="160" y="162" text-anchor="middle" class="voting-note">down with more than 1/2</text>
+  <text x="370" y="130" text-anchor="middle" class="voting-note">two full epochs of notice</text>
+
+  <!-- Capacity -->
+  <text x="10" y="215" class="voting-label">capacity</text>
+  <line x1="90" y1="245" x2="650" y2="245" class="voting-axis"/>
+  <path d="M90,210 H510" class="voting-level"/>
+  <path d="M510,210 V196 H650" class="voting-up"/>
+  <path d="M510,210 V238 H650" class="voting-down"/>
+  <text x="560" y="189" class="voting-upt">+5%, no ceiling</text>
+  <text x="530" y="232" class="voting-downt">−10%, down to the floor</text>
+</svg>

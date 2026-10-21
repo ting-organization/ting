@@ -1,0 +1,11 @@
+{
+  "group": "v8-work",
+  "rule": "a block's work is 2^256 / (target + 1), rounded down",
+  "rules": "8.2",
+  "input": {
+    "target_hex": "0000000000000300000000000000000000000000000000000000000000000000"
+  },
+  "expect": {
+    "work": "24019198012642645"
+  }
+}

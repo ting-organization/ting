@@ -1,0 +1,268 @@
+# Mining and voting
+
+The reference node builds candidate blocks, and either mines them with its built-in
+miner or hands them to mining software outside it. This page covers that split, how
+a candidate is assembled, the producer data and capacity votes its blocks carry, and
+the pools of transactions it holds for future blocks. Which transactions it takes
+and how it mines are its own policy; a block it builds is validated like one from a
+peer.
+
+## Templates and solutions
+
+Mining is two jobs, and the node does one of them. It assembles a *template*: a
+complete candidate block on its tip whose header lacks only the nonce. Whoever mines
+searches for a nonce that makes the header's id meet the target and hands the
+*solution* back; the node then validates the finished block like one from a peer,
+commits it and relays it.
+
+The proof of work is the block id, `H("block", header bytes)` read as a big-endian
+integer, at or below the header's target; see
+[Proof of work](../consensus/proof-of-work.md). The nonce is the header's last field:
+16 bytes, little-endian, at offset 278 of the 294-byte header.
+
+`ting template` asks for a template. The answer holds:
+
+| Field | Content |
+|---|---|
+| `id` | The template's id, the id of its header with the nonce still zero |
+| `height`, `parent`, `timestamp` | Where the block goes and the time it carries |
+| `header_hex` | The complete header bytes |
+| `bytes`, `used` | The block's encoded size and its C, S, D, G totals |
+| `transactions` | The ids of the transactions it holds, in order |
+| `mining` | `nonce_offset` (278), `nonce_bytes` (16), `nonce_endian` (`little`) and `target_hex` |
+
+`ting solution ID NONCE` submits a nonce, as a decimal number, for a template. The
+node checks the proof of work and then imports the block exactly as if a peer had
+sent it, which validates and commits it and lets the peer loop relay it. A nonce that
+misses the target is refused with `solution does not meet the target`.
+
+Templates are kept per tip, the eight most recent at a time. All of them are
+discarded when the tip moves or the miner settings change, so a solution for an old
+template is refused with `unknown or expired template`.
+
+## Assembling a candidate
+
+To build a template the node:
+
+1. opens a candidate on its tip: the block context set, the active capacities in
+   force, and nothing executed yet;
+2. adds transactions one at a time, executing each into the candidate and keeping
+   it only when the block still fits it. Its selector picks them from the pool (the
+   reference selector gives every transaction and every address its turn, as
+   [the mempool](#the-mempool) describes); instead,
+   `ting template --tx ID`, repeated, names exactly the pooled transactions to
+   include, in order, bypassing the selector, and fails if one does not fit;
+3. completes the receipts and the three roots, and restores its state and context
+   from the journal. A candidate is never committed.
+
+A template throws away at most about one block's compute. Once the transactions
+it ran but could not keep have used a block's compute between them, it runs no more,
+whatever the selector asks; the one that crosses the line still finishes, so the
+bound is two blocks at worst. A transaction that does not fit even a block holding
+nothing else leaves the pool. One that did not fit beside others waits for its next
+turn.
+
+The timestamp is the current time, or one second past the median of the last eleven
+timestamps when the clock is behind it. The producer data and the capacity votes come
+from the configuration.
+
+Assembly uses the same execution and the same C, S, D, G checks as validation, takes
+no shortcut that validation would not, and changes no VM semantics. Once a nonce is
+found, the normal validator executes the block again and commits it.
+
+## What a mining fork replaces
+
+A miner runs a fork of this node and replaces two pieces. Each is a trait in the
+`mining` module whose reference implementation is the default; the fork passes its
+own to `daemon::run_with` and keeps everything else: assembly, validation, storage,
+synchronization and relay.
+
+- **Selection** (`Selector`): which pending transactions a template includes, and
+  which pooled transaction gives way when the pool is full. The selector is handed
+  the pooled transactions, each with its id, size, arrival, the address it counts
+  against and when a template last ran it, and a candidate block: it adds a transaction and gets back its
+  receipt, with its events, or nothing when the block would not fit it, and it can
+  take the last one back out. So it can judge transactions by anything a receipt
+  shows, such as what the programs it knows pay the producer, and remember what it
+  learned of each by its id. The reference `FirstIn` gives every pooled transaction
+  and every address its turn, first in, first served, and keeps each one the block
+  fits; when the pool is full, it makes room by the address rule below. The node itself knows nothing about
+  fees or rewards; those belong to programs.
+- **Search** (`Search`): finding the nonce for a header within a bounded number of
+  attempts. The reference `Cpu` hashes the header up to its nonce once, then each
+  nonce from that SHA-256 midstate, on the configured threads over disjoint nonce
+  ranges; a fork drives a GPU or an ASIC. A search is always bounded,
+  so it never works long on a stale template.
+
+## The built-in miner
+
+`ting miner start [--threads N] [--spacing S]` runs the miner inside the node. It is
+the loop between the two pieces: it fetches a template, lets the search try a slice
+of 16,777,216 nonces per thread (about a second on a current processor core), and
+submits a solution when it finds one. It fetches a fresh template after every slice,
+so new transactions, a new tip and the clock reach the header it works on. After an
+error, such as a template that expired, it waits half a second and starts over.
+While the node is more than one block behind its best header, as while it
+synchronizes, the miner waits instead, since a block on a tip about to be replaced
+would be lost; its status shows how far behind.
+
+- `--threads` sets the search threads, 1 to 64; `--spacing` the least number of
+  seconds between its own blocks, useful on an easy development chain. Both default
+  to the configured values.
+- `ting miner stop` stops it.
+- `ting miner status` reports whether it runs, the search in use, the spacing, when
+  it started, templates fetched, nonces tried, blocks found, the height it works on
+  and its last error, and the producer data and capacity votes its blocks carry.
+
+Its state is kept in the configuration (`miner_enabled`, `miner_threads`,
+`miner_spacing`), so a restarted node resumes mining if it was.
+
+The miner is only a client of the template and solution requests, which the
+[control channel](security.md#the-control-channel) offers as well, so the
+chain thread stays the only owner of state and a program outside the node can do by
+hand what the miner does in a loop. Mining has no REST surface.
+
+`ting mine --count N --attempts A` is the shortcut for a
+[development chain](../start/node.md#a-development-chain): template, search and
+solution in one request, for up to N blocks (1 to 100, default 1) with at most A
+nonces tried for each (1 to 10,000,000, default 1,000,000). The search runs beside the
+chain thread, as the miner's does, so the node answers meanwhile; a template that the
+tip moves past is replaced by a new one. The answer lists the blocks imported and
+says whether the attempts ran out first.
+
+## Producer data
+
+Each block carries producer data in its body, under the header's commitment. The
+node writes the bytes set with `ting miner producer HEX` (lower-case hex, at most
+4,096 bytes) and kept as `producer_hex`, and none when it is unset, so nothing about
+the node is published unless its operator chooses; `ting miner producer` with no
+argument clears it. The node attaches no meaning to the data. Programs read it, and
+a program that compensates block producers can take the destination of its payments
+from there. It proves nothing about who mined.
+
+## Capacity votes
+
+Every block the node builds, by its own miner or as a template, carries its votes,
+one for each resource in C, S, D, G order: compute, state access, data and growth.
+`ting miner votes` sets them, each `hold`, `increase` or `decrease`:
+
+```text
+ting miner votes increase hold hold hold
+```
+
+A running node takes them at once, from its next template on, and keeps them in the
+`votes` field of `config.json`, as numbers: 0 for hold, 1 for increase, 2 for
+decrease. A stopped node's file is edited in place. They hold until changed.
+
+`ting votes` shows where voting stands at the tip, as `GET /v1/votes` does over REST
+([the REST API](../start/explore.md#the-rest-api)):
+
+| Field | Content |
+|---|---|
+| `epoch`, `epoch_blocks`, `next_epoch_from` | The epoch the next block belongs to, the blocks in an epoch, and the height the next epoch begins at |
+| `this_epoch` | Its blocks so far; for each resource the share of their work that votes increase and decrease, in percent rounded down; what those votes would decide if the epoch ended now; and `takes_effect_from`, the height from which this epoch's decision applies, three epochs on |
+| `capacities` | The capacities of this epoch and the next two, which earlier epochs' votes already decided, each with the epoch and the height it begins at |
+| `votes` | `ting votes` only: this node's own votes |
+
+The node counts this once per tip, from the block headers of the last three epochs,
+which it holds in memory. How votes are counted is covered in
+[Capacity voting](../consensus/capacity-voting.md).
+
+## The mempool
+
+Mempool rules are local policy, not consensus:
+
+- submission checks canonical encoding, that the data budget covers the envelope's
+  own base data charge, and a size within the data capacity active at the tip; a
+  larger transaction is refused with `transaction larger than the data capacity`. Any
+  declared budget is taken, however large, since only what a transaction uses has to
+  fit a block ([declared versus actual](../resources/capacity.md#declared-versus-actual)):
+  a template keeps a transaction only when its use fits. Nothing executes until a
+  block is assembled or validated;
+- at most `mempool_transactions` transactions, 1,024 unless `config.json` says
+  otherwise, and `mempool_mib` MiB of encoded transactions, 16 unless it says
+  otherwise, or the data of four blocks at the next block's capacity when that is
+  more, so that a transaction of any size a block can hold fits. Both are read when
+  the node starts. A template runs pooled transactions against what is left of its
+  block, within its allowance for discarded work, so the compute they declare does
+  not bound the pool: one that cannot fit is stopped at its first charge past the
+  block's room, and leaves the pool if the block held nothing else;
+- a transaction counts against an IP address: the peer's that relayed it, or the
+  client's that submitted it through REST. Behind a reverse proxy on the same
+  machine, the node takes the last address the proxy appends to `X-Forwarded-For`.
+  Transactions from the CLI, and from a local client without that header, count
+  against no address: they are the operator's own. Any address may fill a pool that
+  has room. When the pool is full, a submission takes the place of the most recent
+  transaction of the address holding the most, if that address holds more than the
+  submitter's, so every address keeps an equal share against the others once the
+  pool is contended; the operator's own transactions can take such a place and never
+  give up theirs. Otherwise the submission is refused with `mempool is full`. A
+  [mining fork](#what-a-mining-fork-replaces) may make room by its own rule, such as
+  what transactions pay it;
+- the reference selector tries the transactions no template has run first, then
+  those run longest ago. Among them it takes the first of each address before the
+  second of any, and the addresses whose transactions it tried longest ago first, so
+  every address gets its turn even while another fills the pool with transactions
+  that never fit. A transaction whose id is already pooled is not added again;
+- a transaction a peer relays is refused with `transaction already included` when
+  one of the last 1,440 canonical blocks included it and it succeeded there: a pool
+  keeps a transaction at most a day, so a relayed one this recent is one a block just
+  took. One that failed is refused only while one of the last 10 blocks includes it,
+  as long as the block's echo lasts: pools drop what a block takes, so it does not
+  travel back, yet a miner who made it fail on purpose cannot keep it from the
+  network for a day; sent again, it spreads as before. Submitted through the API or
+  the CLI, it is taken;
+- transactions included in a new canonical block leave the pool, and so do those
+  that have waited a day. A live reorganization returns displaced transactions that
+  the new branch does not include, within the same limits;
+- the pool is not saved: a node starts, and recovers, with an empty pool.
+
+Acceptance into the pool means a transaction is well formed, not that it will
+succeed. Authentication, assets and replay protection are decided by programs when
+the transaction runs. The same transaction id may also appear in more than one
+block; every such occurrence is consensus-valid, and lookups page through them.
+
+## Deferred transactions
+
+A submission may carry `not_before`, a Unix time. Such a transaction is deferred: the
+node keeps it in a separate deferred set instead of the pool.
+
+- Once `not_before` has passed, the node executes it on its tip, and moves it into
+  the pool only when that execution fits a block and succeeds. It tries due entries
+  every two seconds and on every new tip, the least recently tried first, until
+  about one block's compute has run in that pass. One that does not fit even a block
+  holding nothing else leaves the set.
+- A failing one is tried again when the tip changes, or after thirty seconds.
+- An entry stays in the set, through restarts and reorganizations, until a
+  canonical block above the height it was submitted at includes the transaction
+  **with a successful receipt**, or until it expires thirty days after `not_before`
+  (or after its submission, if that came later). The set is saved in `deferred.json`
+  within five seconds of a change, and when the node stops.
+- An inclusion that failed, such as one before the transaction's time, leaves the
+  entry in place, and if the block that removed an entry is disconnected, the entry
+  comes back instead of entering the pool. An envelope mined once can therefore be
+  deferred again.
+- An entry the node can no longer decode when it starts, such as a transaction above
+  a data capacity voted down since, is dropped with a note on standard error.
+- The set holds at most 4,096 transactions and as many bytes as the pool, with at
+  most 256 of them counting against one IP address, a relaying peer's or a REST
+  client's, and `not_before` may be at most a
+  year (366 days) ahead. When the set is full, a submission due earlier takes the
+  place of the relayed entry due latest; otherwise it is refused with
+  `deferred set is full`.
+- Submitting a transaction that is already deferred or already pooled changes
+  nothing; the answer says it was known.
+
+This is how a program's time-dependent call, such as a scheduled action, is handed
+to the node when it is created: the node, not the submitter, has to be there when it
+falls due. Peers exchange deferred transactions with their times, so any of them may
+be the one mining when it does. The deferral is policy; the program's own checks
+still decide whether the transaction succeeds when a block includes it.
+
+## Local policy
+
+Mempool acceptance, fee selection, transaction simulation, relay queues, peer
+selection, proof-of-submission work and willingness to accept particular assets are
+all local policies. Consensus never requires any node to execute every request that
+has not been mined, and a transaction that some node's policy rejects can still
+appear in a valid block.

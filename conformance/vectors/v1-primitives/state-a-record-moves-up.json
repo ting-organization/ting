@@ -1,0 +1,28 @@
+{
+  "group": "v1-primitives",
+  "rule": "the state root of the records present after the writes, in the tree the protocol rules define",
+  "rules": "6.2",
+  "input": {
+    "writes": [
+      {
+        "key": "0000000000000000000000000000000000000000000000000000000000000000",
+        "value_hex": "61"
+      },
+      {
+        "key": "8000000000000000000000000000000000000000000000000000000000000000",
+        "value_hex": "62"
+      },
+      {
+        "key": "0000000000000000000000000000000000000000000000000000000000000001",
+        "value_hex": "63"
+      },
+      {
+        "key": "8000000000000000000000000000000000000000000000000000000000000000",
+        "delete": true
+      }
+    ]
+  },
+  "expect": {
+    "root": "baf622e0fd1dffab706e79efc2abfa09db476ca951428301e7afdee8abf8752a"
+  }
+}

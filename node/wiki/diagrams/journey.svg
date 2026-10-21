@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 200" role="img" aria-labelledby="journey-title journey-desc">
+  <title id="journey-title">From a transaction to a block every node agrees on</title>
+  <desc id="journey-desc">A transaction is written as a Deploy or Call with its budget. A node holds it in its mempool, which is node policy. A miner executes it and seals the result in a header it mines. Every node that receives the block executes it again and checks every result. Nodes follow the heaviest valid chain.</desc>
+  <style>
+    .journey-box { fill: var(--card, #ffffff); stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+    .journey-policy { fill: var(--card-alt, #f8f9fb); stroke: var(--faint, #98a2b3); stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .journey-step { fill: var(--muted, #667085); font: 11px var(--font, system-ui, sans-serif); }
+    .journey-title { fill: var(--text, #101828); font: 600 14px var(--font, system-ui, sans-serif); }
+    .journey-note { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .journey-line { fill: none; stroke: var(--muted, #667085); stroke-width: 1.5; }
+    .journey-head { fill: var(--muted, #667085); }
+  </style>
+  <defs>
+    <marker id="journey-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="journey-head"/>
+    </marker>
+  </defs>
+
+  <rect x="10" y="24" width="120" height="104" rx="8" class="journey-box"/>
+  <text x="70" y="46" text-anchor="middle" class="journey-step">1</text>
+  <text x="70" y="68" text-anchor="middle" class="journey-title">Written</text>
+  <text x="70" y="92" text-anchor="middle" class="journey-note">a Deploy or Call</text>
+  <text x="70" y="110" text-anchor="middle" class="journey-note">with its budget</text>
+
+  <rect x="150" y="24" width="120" height="104" rx="8" class="journey-policy"/>
+  <text x="210" y="46" text-anchor="middle" class="journey-step">2</text>
+  <text x="210" y="68" text-anchor="middle" class="journey-title">Held</text>
+  <text x="210" y="92" text-anchor="middle" class="journey-note">in a node's</text>
+  <text x="210" y="110" text-anchor="middle" class="journey-note">mempool</text>
+
+  <rect x="290" y="24" width="120" height="104" rx="8" class="journey-box"/>
+  <text x="350" y="46" text-anchor="middle" class="journey-step">3</text>
+  <text x="350" y="68" text-anchor="middle" class="journey-title">Mined</text>
+  <text x="350" y="92" text-anchor="middle" class="journey-note">executed, then</text>
+  <text x="350" y="110" text-anchor="middle" class="journey-note">sealed in a header</text>
+
+  <rect x="430" y="24" width="120" height="104" rx="8" class="journey-box"/>
+  <text x="490" y="46" text-anchor="middle" class="journey-step">4</text>
+  <text x="490" y="68" text-anchor="middle" class="journey-title">Checked</text>
+  <text x="490" y="92" text-anchor="middle" class="journey-note">every node</text>
+  <text x="490" y="110" text-anchor="middle" class="journey-note">executes it again</text>
+
+  <rect x="570" y="24" width="120" height="104" rx="8" class="journey-box"/>
+  <text x="630" y="46" text-anchor="middle" class="journey-step">5</text>
+  <text x="630" y="68" text-anchor="middle" class="journey-title">Settled</text>
+  <text x="630" y="92" text-anchor="middle" class="journey-note">the heaviest</text>
+  <text x="630" y="110" text-anchor="middle" class="journey-note">valid chain wins</text>
+
+  <line x1="131" y1="76" x2="148" y2="76" class="journey-line" marker-end="url(#journey-arrow)"/>
+  <line x1="271" y1="76" x2="288" y2="76" class="journey-line" marker-end="url(#journey-arrow)"/>
+  <line x1="411" y1="76" x2="428" y2="76" class="journey-line" marker-end="url(#journey-arrow)"/>
+  <line x1="551" y1="76" x2="568" y2="76" class="journey-line" marker-end="url(#journey-arrow)"/>
+
+  <rect x="10" y="158" width="26" height="16" rx="4" class="journey-box"/>
+  <text x="44" y="171" class="journey-note">a consensus rule every node checks</text>
+  <rect x="300" y="158" width="26" height="16" rx="4" class="journey-policy"/>
+  <text x="334" y="171" class="journey-note">node policy, each node's own choice</text>
+</svg>

@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 190" role="img" aria-labelledby="status-title status-desc">
+  <title id="status-title">What a node holds of a block</title>
+  <desc id="status-desc">A block starts as a checked header. When its body arrives and matches the header it is stored. When its branch is connected it is executed and becomes valid. A stored block whose execution fails becomes invalid, and so does every block above it.</desc>
+  <style>
+    .status-box { fill: var(--card, #ffffff); stroke: var(--border, #d0d5dd); stroke-width: 1.5; }
+    .status-good { fill: var(--success-soft, #ecfdf3); stroke: var(--success, #067647); stroke-width: 1.5; }
+    .status-bad { fill: var(--danger-soft, #fef3f2); stroke: var(--danger, #d92d20); stroke-width: 1.5; }
+    .status-title { fill: var(--text, #101828); font: 600 14px var(--font, system-ui, sans-serif); }
+    .status-note { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .status-label { fill: var(--muted, #667085); font: italic 12px var(--font, system-ui, sans-serif); }
+    .status-line { fill: none; stroke: var(--muted, #667085); stroke-width: 1.5; }
+    .status-head { fill: var(--muted, #667085); }
+  </style>
+  <defs>
+    <marker id="status-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="status-head"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="30" width="150" height="64" rx="8" class="status-box"/>
+  <text x="95" y="57" text-anchor="middle" class="status-title">Header</text>
+  <text x="95" y="77" text-anchor="middle" class="status-note">checked, in memory</text>
+
+  <rect x="270" y="30" width="150" height="64" rx="8" class="status-box"/>
+  <text x="345" y="57" text-anchor="middle" class="status-title">Stored</text>
+  <text x="345" y="77" text-anchor="middle" class="status-note">body on disk</text>
+
+  <rect x="520" y="30" width="160" height="64" rx="8" class="status-good"/>
+  <text x="600" y="57" text-anchor="middle" class="status-title">Valid</text>
+  <text x="600" y="77" text-anchor="middle" class="status-note">executed, changes kept</text>
+
+  <rect x="270" y="120" width="150" height="56" rx="8" class="status-bad"/>
+  <text x="345" y="153" text-anchor="middle" class="status-title">Invalid</text>
+
+  <line x1="170" y1="62" x2="268" y2="62" class="status-line" marker-end="url(#status-arrow)"/>
+  <text x="219" y="54" text-anchor="middle" class="status-label">body matches</text>
+
+  <line x1="420" y1="62" x2="518" y2="62" class="status-line" marker-end="url(#status-arrow)"/>
+  <text x="469" y="54" text-anchor="middle" class="status-label">connected</text>
+
+  <line x1="345" y1="94" x2="345" y2="118" class="status-line" marker-end="url(#status-arrow)"/>
+  <text x="353" y="111" class="status-label">execution fails</text>
+
+  <text x="440" y="146" class="status-note">and every block above it:</text>
+  <text x="440" y="162" class="status-note">never connected</text>
+</svg>

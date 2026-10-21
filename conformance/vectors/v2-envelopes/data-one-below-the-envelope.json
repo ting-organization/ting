@@ -1,0 +1,11 @@
+{
+  "group": "v2-envelopes",
+  "rule": "D covers the transaction's bytes and the data base of 81",
+  "rules": "4.4",
+  "input": {
+    "transaction_hex": "010010270000000000000a0000000000000096000000000000000010000000000000111111111111111111111111111111111111111111111111111111111111111100000000"
+  },
+  "expect": {
+    "valid": false
+  }
+}

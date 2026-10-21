@@ -1,0 +1,11 @@
+{
+  "group": "v2-envelopes",
+  "rule": "a transaction is not empty",
+  "rules": "4.4",
+  "input": {
+    "transaction_hex": ""
+  },
+  "expect": {
+    "valid": false
+  }
+}

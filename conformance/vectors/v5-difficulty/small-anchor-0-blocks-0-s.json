@@ -1,0 +1,16 @@
+{
+  "group": "v5-difficulty",
+  "rule": "the target of the next block: anchor * 2^((elapsed - interval * blocks) / half-life), the exponent floored in 1/65536 steps, its fraction by the cubic, clamped to [1, limit]",
+  "rules": "9.3",
+  "input": {
+    "anchor_target_hex": "00000000000000000000000000000000000000000000000000000000000003e8",
+    "interval": 60,
+    "half_life": 600,
+    "blocks": 0,
+    "elapsed": 0,
+    "pow_limit_hex": "0000000000000000000000000000000000000000000000000000000000002710"
+  },
+  "expect": {
+    "target_hex": "00000000000000000000000000000000000000000000000000000000000003e8"
+  }
+}

@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 270" role="img" aria-labelledby="checkpoints-title checkpoints-desc">
+  <title id="checkpoints-title">Checkpoints: what a failure undoes</title>
+  <desc id="checkpoints-desc">Two cases of one caller calling program A, which calls B and then C. On the left, B succeeds and C traps: C's changes are undone, A receives status 2, carries on and succeeds, so the changes of A and B are kept. On the right, B succeeds and C traps as before, but then A reverts: everything since A's checkpoint is undone, B's changes included, and the caller receives status 1. In both cases every resource consumed stays charged.</desc>
+  <style>
+    .checkpoints-caller { fill: var(--card, #ffffff); stroke: var(--border, #d0d5dd); stroke-width: 1.5; }
+    .checkpoints-kept { fill: var(--success-soft, #ecfdf3); stroke: var(--success, #067647); stroke-width: 1.5; }
+    .checkpoints-undone { fill: var(--danger-soft, #fef3f2); stroke: var(--danger, #d92d20); stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .checkpoints-panel { fill: var(--text, #101828); font: 600 13px var(--font, system-ui, sans-serif); }
+    .checkpoints-name { fill: var(--text, #101828); font: 600 13px var(--font, system-ui, sans-serif); }
+    .checkpoints-note { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .checkpoints-status { fill: var(--muted, #667085); font: italic 12px var(--font, system-ui, sans-serif); }
+    .checkpoints-line { fill: none; stroke: var(--faint, #98a2b3); stroke-width: 1.5; }
+  </style>
+
+  <!-- Left: C fails, A carries on -->
+  <text x="175" y="20" text-anchor="middle" class="checkpoints-panel">C traps; A carries on</text>
+  <rect x="115" y="34" width="120" height="32" rx="6" class="checkpoints-caller"/>
+  <text x="175" y="55" text-anchor="middle" class="checkpoints-name">Caller</text>
+  <rect x="105" y="96" width="140" height="44" rx="6" class="checkpoints-kept"/>
+  <text x="175" y="114" text-anchor="middle" class="checkpoints-name">A</text>
+  <text x="175" y="131" text-anchor="middle" class="checkpoints-note">succeeds: kept</text>
+  <rect x="15" y="176" width="140" height="44" rx="6" class="checkpoints-kept"/>
+  <text x="85" y="194" text-anchor="middle" class="checkpoints-name">B</text>
+  <text x="85" y="211" text-anchor="middle" class="checkpoints-note">succeeds: kept</text>
+  <rect x="195" y="176" width="140" height="44" rx="6" class="checkpoints-undone"/>
+  <text x="265" y="194" text-anchor="middle" class="checkpoints-name">C</text>
+  <text x="265" y="211" text-anchor="middle" class="checkpoints-note">traps: undone</text>
+  <line x1="175" y1="66" x2="175" y2="96" class="checkpoints-line"/>
+  <line x1="145" y1="140" x2="95" y2="176" class="checkpoints-line"/>
+  <line x1="205" y1="140" x2="255" y2="176" class="checkpoints-line"/>
+  <text x="240" y="158" class="checkpoints-status">status 2 to A</text>
+  <text x="185" y="86" class="checkpoints-status">status 0</text>
+
+  <!-- Right: A fails, B is undone too -->
+  <text x="525" y="20" text-anchor="middle" class="checkpoints-panel">A reverts; B is undone too</text>
+  <rect x="465" y="34" width="120" height="32" rx="6" class="checkpoints-caller"/>
+  <text x="525" y="55" text-anchor="middle" class="checkpoints-name">Caller</text>
+  <rect x="455" y="96" width="140" height="44" rx="6" class="checkpoints-undone"/>
+  <text x="525" y="114" text-anchor="middle" class="checkpoints-name">A</text>
+  <text x="525" y="131" text-anchor="middle" class="checkpoints-note">reverts: undone</text>
+  <rect x="365" y="176" width="140" height="44" rx="6" class="checkpoints-undone"/>
+  <text x="435" y="194" text-anchor="middle" class="checkpoints-name">B</text>
+  <text x="435" y="211" text-anchor="middle" class="checkpoints-note">succeeded: undone</text>
+  <rect x="545" y="176" width="140" height="44" rx="6" class="checkpoints-undone"/>
+  <text x="615" y="194" text-anchor="middle" class="checkpoints-name">C</text>
+  <text x="615" y="211" text-anchor="middle" class="checkpoints-note">traps: undone</text>
+  <line x1="525" y1="66" x2="525" y2="96" class="checkpoints-line"/>
+  <line x1="495" y1="140" x2="445" y2="176" class="checkpoints-line"/>
+  <line x1="555" y1="140" x2="605" y2="176" class="checkpoints-line"/>
+  <text x="590" y="158" class="checkpoints-status">status 2 to A</text>
+  <text x="535" y="86" class="checkpoints-status">status 1</text>
+
+  <text x="350" y="256" text-anchor="middle" class="checkpoints-note">In both cases every resource consumed stays charged: rollback restores state, never counters.</text>
+</svg>

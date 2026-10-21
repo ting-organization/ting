@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 372" role="img" aria-labelledby="sync-title sync-desc">
+  <title id="sync-title">How a node follows the chain</title>
+  <desc id="sync-desc">Headers from peers are checked one by one. Those close to the tip's work go into the header tree; a chain with too little work is checked by presync without being kept, and indexed once it reaches enough work. Blocks are downloaded along the best header's branch, stored without being executed, and connected step by step once the best branch is complete, which moves the tip.</desc>
+  <style>
+    .sync-box { fill: var(--card, #ffffff); stroke: var(--border, #d0d5dd); stroke-width: 1.5; }
+    .sync-key { fill: var(--primary-soft, #eef2ff); stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+    .sync-soft { fill: var(--card-alt, #f8f9fb); stroke: var(--faint, #98a2b3); stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .sync-title { fill: var(--text, #101828); font: 600 14px var(--font, system-ui, sans-serif); }
+    .sync-note { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .sync-label { fill: var(--muted, #667085); font: italic 12px var(--font, system-ui, sans-serif); }
+    .sync-line { fill: none; stroke: var(--muted, #667085); stroke-width: 1.5; }
+    .sync-head { fill: var(--muted, #667085); }
+  </style>
+  <defs>
+    <marker id="sync-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="sync-head"/>
+    </marker>
+  </defs>
+
+  <!-- Row 1: peers, the header check, the header tree -->
+  <rect x="20" y="30" width="110" height="68" rx="8" class="sync-box"/>
+  <text x="75" y="69" text-anchor="middle" class="sync-title">Peers</text>
+
+  <rect x="180" y="30" width="180" height="68" rx="8" class="sync-box"/>
+  <text x="270" y="58" text-anchor="middle" class="sync-title">Check each header</text>
+  <text x="270" y="78" text-anchor="middle" class="sync-note">work, difficulty, time</text>
+
+  <rect x="470" y="30" width="180" height="68" rx="8" class="sync-key"/>
+  <text x="560" y="58" text-anchor="middle" class="sync-title">Header tree</text>
+  <text x="560" y="78" text-anchor="middle" class="sync-note">every accepted header</text>
+
+  <line x1="130" y1="64" x2="178" y2="64" class="sync-line" marker-end="url(#sync-arrow)"/>
+  <text x="154" y="56" text-anchor="middle" class="sync-label">headers</text>
+
+  <line x1="360" y1="64" x2="468" y2="64" class="sync-line" marker-end="url(#sync-arrow)"/>
+  <text x="414" y="56" text-anchor="middle" class="sync-label">enough work</text>
+
+  <!-- Row 2: presync below the check, download below the tree -->
+  <rect x="180" y="160" width="180" height="68" rx="8" class="sync-soft"/>
+  <text x="270" y="188" text-anchor="middle" class="sync-title">Presync</text>
+  <text x="270" y="208" text-anchor="middle" class="sync-note">checked, not kept</text>
+
+  <line x1="270" y1="98" x2="270" y2="158" class="sync-line" marker-end="url(#sync-arrow)"/>
+  <text x="278" y="133" class="sync-label">too little work</text>
+
+  <path d="M360,194 L452,194 L520,100" class="sync-line" marker-end="url(#sync-arrow)"/>
+  <text x="368" y="146" class="sync-label">reaches it:</text>
+  <text x="368" y="161" class="sync-label">fetched again,</text>
+  <text x="368" y="176" class="sync-label">then indexed</text>
+
+  <rect x="470" y="160" width="180" height="68" rx="8" class="sync-box"/>
+  <text x="560" y="188" text-anchor="middle" class="sync-title">Download</text>
+  <text x="560" y="208" text-anchor="middle" class="sync-note">from several peers at once</text>
+
+  <line x1="600" y1="98" x2="600" y2="158" class="sync-line" marker-end="url(#sync-arrow)"/>
+  <text x="608" y="133" class="sync-label">best header</text>
+
+  <!-- Row 3: stored blocks, connect, the tip -->
+  <rect x="470" y="290" width="180" height="68" rx="8" class="sync-box"/>
+  <text x="560" y="318" text-anchor="middle" class="sync-title">Stored blocks</text>
+  <text x="560" y="338" text-anchor="middle" class="sync-note">not executed yet</text>
+
+  <line x1="560" y1="228" x2="560" y2="288" class="sync-line" marker-end="url(#sync-arrow)"/>
+
+  <rect x="180" y="290" width="180" height="68" rx="8" class="sync-box"/>
+  <text x="270" y="318" text-anchor="middle" class="sync-title">Connect</text>
+  <text x="270" y="338" text-anchor="middle" class="sync-note">the best branch, in steps</text>
+
+  <line x1="470" y1="324" x2="362" y2="324" class="sync-line" marker-end="url(#sync-arrow)"/>
+  <text x="416" y="316" text-anchor="middle" class="sync-label">all stored</text>
+
+  <rect x="20" y="290" width="110" height="68" rx="8" class="sync-key"/>
+  <text x="75" y="318" text-anchor="middle" class="sync-title">The tip</text>
+  <text x="75" y="338" text-anchor="middle" class="sync-note">executed state</text>
+
+  <line x1="180" y1="324" x2="132" y2="324" class="sync-line" marker-end="url(#sync-arrow)"/>
+</svg>

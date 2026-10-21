@@ -1,0 +1,11 @@
+{
+  "group": "v2-envelopes",
+  "rule": "every field is complete",
+  "rules": "4.4",
+  "input": {
+    "transaction_hex": "010010270000000000000a000000000000000004000000000000001000000000000011111111111111111111111111111111"
+  },
+  "expect": {
+    "valid": false
+  }
+}

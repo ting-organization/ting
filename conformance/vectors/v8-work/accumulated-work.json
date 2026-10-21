@@ -1,0 +1,16 @@
+{
+  "group": "v8-work",
+  "rule": "a branch's work is the sum of its blocks' work",
+  "rules": "8.2",
+  "input": {
+    "targets_hex": [
+      "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "03ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    ]
+  },
+  "expect": {
+    "work": "4294967368"
+  }
+}

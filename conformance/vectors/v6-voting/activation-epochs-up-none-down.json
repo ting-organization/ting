@@ -1,0 +1,272 @@
+{
+  "group": "v6-voting",
+  "rule": "the votes of epoch e, weighed by each block's work, set the limits from epoch e + 3",
+  "rules": "10.3",
+  "input": {
+    "profile": "experimental",
+    "headers": [
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          1,
+          1,
+          0,
+          2
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          1,
+          1,
+          0,
+          2
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          1,
+          1,
+          0,
+          2
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          1,
+          1,
+          0,
+          2
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          2,
+          0,
+          1,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          2,
+          0,
+          1,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          2,
+          0,
+          1,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          2,
+          0,
+          1,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "target_hex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "votes": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "active_limits_after_each_epoch": [
+      [
+        100000000,
+        1024,
+        1048576,
+        524288
+      ],
+      [
+        100000000,
+        1024,
+        1048576,
+        524288
+      ],
+      [
+        100000000,
+        1024,
+        1048576,
+        524288
+      ],
+      [
+        105000000,
+        1075,
+        1048576,
+        471860
+      ],
+      [
+        105000000,
+        1075,
+        1048576,
+        471860
+      ],
+      [
+        94500000,
+        1075,
+        1101004,
+        471860
+      ],
+      [
+        94500000,
+        1075,
+        1101004,
+        471860
+      ]
+    ]
+  }
+}

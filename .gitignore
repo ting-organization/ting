@@ -1,0 +1,4 @@
+/target/
+/.ting/
+/.node-tests/
+/node/.node-tests/

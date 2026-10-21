@@ -1,0 +1,13 @@
+{
+  "group": "v6-voting",
+  "rule": "an increase adds 5% and at least 1, saturating at 2^64 - 1; a decrease takes 10% and at least 1, down to the floor",
+  "rules": "10.4",
+  "input": {
+    "limit": 19,
+    "direction": 1,
+    "floor": 1
+  },
+  "expect": {
+    "limit": 20
+  }
+}

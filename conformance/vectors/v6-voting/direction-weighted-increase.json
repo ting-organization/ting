@@ -1,0 +1,24 @@
+{
+  "group": "v6-voting",
+  "rule": "an increase needs two-thirds of the epoch's work, a decrease more than half; otherwise the limit holds",
+  "rules": "10.2",
+  "input": {
+    "work_and_signal": [
+      [
+        "4",
+        1
+      ],
+      [
+        "1",
+        0
+      ],
+      [
+        "1",
+        0
+      ]
+    ]
+  },
+  "expect": {
+    "direction": 1
+  }
+}

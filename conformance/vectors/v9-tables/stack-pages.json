@@ -1,0 +1,29 @@
+{
+  "group": "v9-tables",
+  "rule": "a stack of h slots pays ceil(h / 8192) - 1 pages, none for the first 64 KiB",
+  "rules": "15.4",
+  "input": {
+    "heights": [
+      0,
+      1,
+      8192,
+      8193,
+      16384,
+      16385,
+      4294967296,
+      "18446744073709551615"
+    ]
+  },
+  "expect": {
+    "pages": [
+      0,
+      0,
+      0,
+      1,
+      1,
+      2,
+      524287,
+      2251799813685247
+    ]
+  }
+}

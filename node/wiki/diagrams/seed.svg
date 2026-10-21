@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 280" role="img" aria-labelledby="seed-title seed-desc">
+  <title id="seed-title">A chain's first blocks are its seed</title>
+  <desc id="seed-desc">After the genesis anchor at height 0, block 1 is an empty block with producer data, and sections S1 to S10 follow, each starting a block. These seed blocks are the ones whose ids every node holds. Ordinary blocks follow. At a seed height, a block that is not the listed one is refused as an invalid header before anything runs. The listed block is checked and executed like any other block. A node whose own execution rejects a listed block stops and names the first transaction whose receipt differs.</desc>
+  <style>
+    .seed-anchor { fill: var(--card-alt, #f8f9fb); stroke: var(--faint, #98a2b3); stroke-width: 1.5; }
+    .seed-block { fill: var(--primary-soft, #eef2ff); stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+    .seed-later { fill: var(--card, #ffffff); stroke: var(--faint, #98a2b3); stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .seed-box { fill: var(--card, #ffffff); stroke: var(--border, #d0d5dd); stroke-width: 1.5; }
+    .seed-bad { fill: var(--danger-soft, #fef3f2); stroke: var(--danger, #d92d20); stroke-width: 1.5; }
+    .seed-good { fill: var(--success-soft, #ecfdf3); stroke: var(--success, #067647); stroke-width: 1.5; }
+    .seed-head { fill: var(--text, #101828); font: 600 13px var(--font, system-ui, sans-serif); }
+    .seed-sec { fill: var(--primary, #4f46e5); font: 600 12px var(--font, system-ui, sans-serif); }
+    .seed-note { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .seed-line { fill: none; stroke: var(--faint, #98a2b3); stroke-width: 1.5; }
+    .seed-brace { fill: none; stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+  </style>
+
+  <!-- The chain -->
+  <path d="M120,62 V54 H590 V62" class="seed-brace"/>
+  <text x="355" y="44" text-anchor="middle" class="seed-head">The seed: heights 1 to N, whose ids every node holds</text>
+
+  <rect x="10" y="70" width="80" height="48" rx="6" class="seed-anchor"/>
+  <text x="50" y="91" text-anchor="middle" class="seed-head">Genesis</text>
+  <text x="50" y="108" text-anchor="middle" class="seed-note">height 0</text>
+
+  <rect x="120" y="70" width="80" height="48" rx="6" class="seed-block"/>
+  <text x="160" y="91" text-anchor="middle" class="seed-head">Block 1</text>
+  <text x="160" y="108" text-anchor="middle" class="seed-note">empty</text>
+
+  <rect x="220" y="70" width="370" height="48" rx="6" class="seed-block"/>
+  <line x1="257" y1="70" x2="257" y2="118" class="seed-line"/>
+  <line x1="294" y1="70" x2="294" y2="118" class="seed-line"/>
+  <line x1="331" y1="70" x2="331" y2="118" class="seed-line"/>
+  <line x1="368" y1="70" x2="368" y2="118" class="seed-line"/>
+  <line x1="405" y1="70" x2="405" y2="118" class="seed-line"/>
+  <line x1="442" y1="70" x2="442" y2="118" class="seed-line"/>
+  <line x1="479" y1="70" x2="479" y2="118" class="seed-line"/>
+  <line x1="516" y1="70" x2="516" y2="118" class="seed-line"/>
+  <line x1="553" y1="70" x2="553" y2="118" class="seed-line"/>
+  <text x="238.5" y="98" text-anchor="middle" class="seed-sec">S1</text>
+  <text x="275.5" y="98" text-anchor="middle" class="seed-sec">S2</text>
+  <text x="312.5" y="98" text-anchor="middle" class="seed-sec">S3</text>
+  <text x="349.5" y="98" text-anchor="middle" class="seed-sec">S4</text>
+  <text x="386.5" y="98" text-anchor="middle" class="seed-sec">S5</text>
+  <text x="423.5" y="98" text-anchor="middle" class="seed-sec">S6</text>
+  <text x="460.5" y="98" text-anchor="middle" class="seed-sec">S7</text>
+  <text x="497.5" y="98" text-anchor="middle" class="seed-sec">S8</text>
+  <text x="534.5" y="98" text-anchor="middle" class="seed-sec">S9</text>
+  <text x="571.5" y="98" text-anchor="middle" class="seed-sec">S10</text>
+
+  <rect x="610" y="70" width="80" height="48" rx="6" class="seed-later"/>
+  <text x="650" y="91" text-anchor="middle" class="seed-head">Ordinary</text>
+  <text x="650" y="108" text-anchor="middle" class="seed-note">blocks</text>
+
+  <line x1="90" y1="94" x2="120" y2="94" class="seed-line"/>
+  <line x1="200" y1="94" x2="220" y2="94" class="seed-line"/>
+  <line x1="590" y1="94" x2="610" y2="94" class="seed-line"/>
+  <text x="405" y="140" text-anchor="middle" class="seed-note">ten sections, each starting a block, from primitives to heavy blocks</text>
+
+  <!-- What a node does at a seed height -->
+  <text x="10" y="180" class="seed-head">At a seed height</text>
+  <rect x="10" y="192" width="220" height="70" rx="8" class="seed-bad"/>
+  <text x="120" y="214" text-anchor="middle" class="seed-head">Any other block</text>
+  <text x="120" y="233" text-anchor="middle" class="seed-note">refused as an invalid header,</text>
+  <text x="120" y="250" text-anchor="middle" class="seed-note">before anything runs</text>
+  <rect x="240" y="192" width="220" height="70" rx="8" class="seed-good"/>
+  <text x="350" y="214" text-anchor="middle" class="seed-head">The listed block</text>
+  <text x="350" y="233" text-anchor="middle" class="seed-note">checked and executed</text>
+  <text x="350" y="250" text-anchor="middle" class="seed-note">like any other block</text>
+  <rect x="470" y="192" width="220" height="70" rx="8" class="seed-box"/>
+  <text x="580" y="214" text-anchor="middle" class="seed-head">Rejected by the node itself</text>
+  <text x="580" y="233" text-anchor="middle" class="seed-note">the node stops and names the</text>
+  <text x="580" y="250" text-anchor="middle" class="seed-note">first receipt that differs</text>
+</svg>

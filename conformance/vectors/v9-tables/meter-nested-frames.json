@@ -1,0 +1,137 @@
+{
+  "group": "v9-tables",
+  "rule": "a debit fits every open frame or changes nothing, C, S, D, G checked in order; a nested budget opens within what is left; closing a frame returns its use",
+  "rules": "11.2",
+  "input": {
+    "root_budget": [
+      10,
+      2,
+      10,
+      10
+    ]
+  },
+  "expect": {
+    "steps": [
+      {
+        "charge": [
+          2,
+          1,
+          0,
+          0
+        ],
+        "outcome": "ok",
+        "root_used_after": [
+          2,
+          1,
+          0,
+          0
+        ]
+      },
+      {
+        "open": [
+          5,
+          1,
+          5,
+          5
+        ],
+        "outcome": "opened",
+        "root_used_after": [
+          2,
+          1,
+          0,
+          0
+        ]
+      },
+      {
+        "charge": [
+          3,
+          1,
+          2,
+          1
+        ],
+        "outcome": "ok",
+        "root_used_after": [
+          5,
+          2,
+          2,
+          1
+        ]
+      },
+      {
+        "charge": [
+          3,
+          1,
+          0,
+          0
+        ],
+        "outcome": "C",
+        "root_used_after": [
+          5,
+          2,
+          2,
+          1
+        ]
+      },
+      {
+        "close": true,
+        "outcome": [
+          3,
+          1,
+          2,
+          1
+        ],
+        "root_used_after": [
+          5,
+          2,
+          2,
+          1
+        ]
+      },
+      {
+        "open": [
+          6,
+          0,
+          0,
+          0
+        ],
+        "outcome": "refused",
+        "root_used_after": [
+          5,
+          2,
+          2,
+          1
+        ]
+      },
+      {
+        "open": [
+          5,
+          0,
+          8,
+          9
+        ],
+        "outcome": "opened",
+        "root_used_after": [
+          5,
+          2,
+          2,
+          1
+        ]
+      },
+      {
+        "close": true,
+        "outcome": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "root_used_after": [
+          5,
+          2,
+          2,
+          1
+        ]
+      }
+    ]
+  }
+}

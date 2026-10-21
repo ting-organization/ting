@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 270" role="img" aria-labelledby="budgets-title budgets-desc">
+  <title id="budgets-title">Budgets within budgets</title>
+  <desc id="budgets-desc">One counter of a transaction's budget is drawn as a bar. The top-level invocation consumes part of it and gives program A a sub-budget out of what it has left. A consumes part of its sub-budget and gives program B a sub-budget out of what it has left. What B consumes is also consumed by A and by the transaction. What a child leaves unused is available to its caller again.</desc>
+  <style>
+    .budgets-frame { fill: var(--card, #ffffff); stroke: var(--border, #d0d5dd); stroke-width: 1.5; }
+    .budgets-used { fill: var(--primary, #4f46e5); }
+    .budgets-spare { fill: var(--primary-soft, #eef2ff); }
+    .budgets-sub { fill: none; stroke: var(--primary, #4f46e5); stroke-width: 1.5; stroke-dasharray: 5 3; }
+    .budgets-label { fill: var(--text, #101828); font: 600 13px var(--font, system-ui, sans-serif); }
+    .budgets-note { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .budgets-guide { fill: none; stroke: var(--faint, #98a2b3); stroke-width: 1; stroke-dasharray: 3 3; }
+  </style>
+
+  <!-- The transaction's declared budget -->
+  <text x="10" y="43" class="budgets-label">Transaction</text>
+  <text x="10" y="59" class="budgets-note">declared budget</text>
+  <rect x="150" y="30" width="540" height="32" rx="4" class="budgets-frame"/>
+  <rect x="151" y="31" width="89" height="30" class="budgets-used"/>
+  <rect x="240" y="31" width="162" height="30" class="budgets-used"/>
+  <rect x="402" y="31" width="108" height="30" class="budgets-spare"/>
+  <rect x="240" y="30" width="270" height="32" class="budgets-sub"/>
+
+  <!-- A's sub-budget -->
+  <line x1="240" y1="62" x2="240" y2="110" class="budgets-guide"/>
+  <line x1="510" y1="62" x2="510" y2="110" class="budgets-guide"/>
+  <text x="10" y="123" class="budgets-label">Call to A</text>
+  <text x="10" y="139" class="budgets-note">its sub-budget</text>
+  <rect x="240" y="110" width="270" height="32" rx="4" class="budgets-frame"/>
+  <rect x="241" y="111" width="89" height="30" class="budgets-used"/>
+  <rect x="330" y="111" width="72" height="30" class="budgets-used"/>
+  <rect x="402" y="111" width="36" height="30" class="budgets-spare"/>
+  <rect x="330" y="110" width="108" height="32" class="budgets-sub"/>
+  <text x="525" y="123" class="budgets-note">fits in what the transaction</text>
+  <text x="525" y="139" class="budgets-note">had left when A was called</text>
+
+  <!-- B's sub-budget -->
+  <line x1="330" y1="142" x2="330" y2="190" class="budgets-guide"/>
+  <line x1="438" y1="142" x2="438" y2="190" class="budgets-guide"/>
+  <text x="10" y="203" class="budgets-label">Call to B</text>
+  <text x="10" y="219" class="budgets-note">its sub-budget</text>
+  <rect x="330" y="190" width="108" height="32" rx="4" class="budgets-frame"/>
+  <rect x="331" y="191" width="71" height="30" class="budgets-used"/>
+  <rect x="402" y="191" width="35" height="30" class="budgets-spare"/>
+  <text x="453" y="203" class="budgets-note">a debit of B must fit B, A and</text>
+  <text x="453" y="219" class="budgets-note">the transaction, and is charged</text>
+  <text x="453" y="235" class="budgets-note">to all three</text>
+
+  <!-- Legend -->
+  <rect x="150" y="252" width="14" height="12" class="budgets-used"/>
+  <text x="170" y="262" class="budgets-note">consumed</text>
+  <rect x="250" y="252" width="14" height="12" class="budgets-spare"/>
+  <text x="270" y="262" class="budgets-note">left unused by a child, available to its caller again</text>
+</svg>

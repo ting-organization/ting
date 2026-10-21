@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 264" role="img" aria-labelledby="lifecycle-title lifecycle-desc">
+  <title id="lifecycle-title">The steps of a deployment and of an invocation</title>
+  <desc id="lifecycle-desc">A deployment takes six steps: take an ordinal, which fails with status 7 on overflow; derive the identifier and read its manifest, status 10 if it exists; pay the code price and the CodeHash and validate, status 9 if invalid; install the manifest and the code record; run the initializer, which is an invocation; and produce the identifier for 32 C and 32 D. An invocation takes four steps: read the manifest and the code record and pay the code price unless the transaction has prepared it, status 8 if the contract is absent; prepare a fresh instance; debit the reservation of invoke; run it until it returns, reverts, traps or runs out. Any step can also fail by exhausting a budget.</desc>
+  <style>
+    .lifecycle-box { fill: var(--card, #ffffff); stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+    .lifecycle-run { fill: var(--primary-soft, #eef2ff); stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+    .lifecycle-lane { fill: var(--text, #101828); font: 600 13px var(--font, system-ui, sans-serif); }
+    .lifecycle-title { fill: var(--text, #101828); font: 600 13px var(--font, system-ui, sans-serif); }
+    .lifecycle-note { fill: var(--muted, #667085); font: 11px var(--font, system-ui, sans-serif); }
+    .lifecycle-fail { fill: var(--danger, #d92d20); font: 11px var(--font, system-ui, sans-serif); }
+    .lifecycle-hint { fill: var(--muted, #667085); font: italic 12px var(--font, system-ui, sans-serif); }
+    .lifecycle-line { fill: none; stroke: var(--muted, #667085); stroke-width: 1.5; }
+    .lifecycle-dash { fill: none; stroke: var(--primary, #4f46e5); stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .lifecycle-head { fill: var(--muted, #667085); }
+    .lifecycle-headp { fill: var(--primary, #4f46e5); }
+  </style>
+  <defs>
+    <marker id="lifecycle-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="lifecycle-head"/>
+    </marker>
+    <marker id="lifecycle-arrowp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="lifecycle-headp"/>
+    </marker>
+  </defs>
+
+  <!-- Deployment -->
+  <text x="10" y="20" class="lifecycle-lane">Deployment, from a transaction or a program</text>
+  <rect x="10" y="32" width="102" height="80" rx="6" class="lifecycle-box"/>
+  <text x="61" y="52" text-anchor="middle" class="lifecycle-title">1 Ordinal</text>
+  <text x="61" y="70" text-anchor="middle" class="lifecycle-note">the next ordinal</text>
+  <text x="61" y="85" text-anchor="middle" class="lifecycle-note">is taken</text>
+  <text x="61" y="102" text-anchor="middle" class="lifecycle-fail">7 on overflow</text>
+
+  <rect x="124" y="32" width="102" height="80" rx="6" class="lifecycle-box"/>
+  <text x="175" y="52" text-anchor="middle" class="lifecycle-title">2 Identifier</text>
+  <text x="175" y="70" text-anchor="middle" class="lifecycle-note">id derived,</text>
+  <text x="175" y="85" text-anchor="middle" class="lifecycle-note">manifest read</text>
+  <text x="175" y="102" text-anchor="middle" class="lifecycle-fail">10 if it exists</text>
+
+  <rect x="238" y="32" width="102" height="80" rx="6" class="lifecycle-box"/>
+  <text x="289" y="52" text-anchor="middle" class="lifecycle-title">3 Validation</text>
+  <text x="289" y="70" text-anchor="middle" class="lifecycle-note">code price paid,</text>
+  <text x="289" y="85" text-anchor="middle" class="lifecycle-note">then validated</text>
+  <text x="289" y="102" text-anchor="middle" class="lifecycle-fail">9 if invalid</text>
+
+  <rect x="352" y="32" width="102" height="80" rx="6" class="lifecycle-box"/>
+  <text x="403" y="52" text-anchor="middle" class="lifecycle-title">4 Installation</text>
+  <text x="403" y="70" text-anchor="middle" class="lifecycle-note">manifest and</text>
+  <text x="403" y="85" text-anchor="middle" class="lifecycle-note">code written</text>
+
+  <rect x="466" y="32" width="102" height="80" rx="6" class="lifecycle-run"/>
+  <text x="517" y="52" text-anchor="middle" class="lifecycle-title">5 Initializer</text>
+  <text x="517" y="70" text-anchor="middle" class="lifecycle-note">an invocation</text>
+  <text x="517" y="85" text-anchor="middle" class="lifecycle-note">with the input</text>
+
+  <rect x="580" y="32" width="110" height="80" rx="6" class="lifecycle-box"/>
+  <text x="635" y="52" text-anchor="middle" class="lifecycle-title">6 Result</text>
+  <text x="635" y="70" text-anchor="middle" class="lifecycle-note">the ContractId,</text>
+  <text x="635" y="85" text-anchor="middle" class="lifecycle-note">32 C and 32 D</text>
+
+  <line x1="112" y1="72" x2="122" y2="72" class="lifecycle-line" marker-end="url(#lifecycle-arrow)"/>
+  <line x1="226" y1="72" x2="236" y2="72" class="lifecycle-line" marker-end="url(#lifecycle-arrow)"/>
+  <line x1="340" y1="72" x2="350" y2="72" class="lifecycle-line" marker-end="url(#lifecycle-arrow)"/>
+  <line x1="454" y1="72" x2="464" y2="72" class="lifecycle-line" marker-end="url(#lifecycle-arrow)"/>
+  <line x1="568" y1="72" x2="578" y2="72" class="lifecycle-line" marker-end="url(#lifecycle-arrow)"/>
+
+  <path d="M517,112 V154" class="lifecycle-dash" marker-end="url(#lifecycle-arrowp)"/>
+  <text x="527" y="138" class="lifecycle-hint">runs the steps below</text>
+
+  <!-- Invocation -->
+  <text x="10" y="164" class="lifecycle-lane">Invocation, every run of a program</text>
+  <rect x="10" y="176" width="160" height="66" rx="6" class="lifecycle-box"/>
+  <text x="90" y="196" text-anchor="middle" class="lifecycle-title">1 Code</text>
+  <text x="90" y="214" text-anchor="middle" class="lifecycle-note">two reads; the code price</text>
+  <text x="90" y="232" text-anchor="middle" class="lifecycle-fail">8 if absent</text>
+
+  <rect x="186" y="176" width="160" height="66" rx="6" class="lifecycle-box"/>
+  <text x="266" y="196" text-anchor="middle" class="lifecycle-title">2 Preparation</text>
+  <text x="266" y="214" text-anchor="middle" class="lifecycle-note">a fresh instance:</text>
+  <text x="266" y="232" text-anchor="middle" class="lifecycle-note">memory, globals, table</text>
+
+  <rect x="362" y="176" width="152" height="66" rx="6" class="lifecycle-box"/>
+  <text x="438" y="196" text-anchor="middle" class="lifecycle-title">3 Entry</text>
+  <text x="438" y="214" text-anchor="middle" class="lifecycle-note">the reservation</text>
+  <text x="438" y="232" text-anchor="middle" class="lifecycle-note">of invoke</text>
+
+  <rect x="530" y="176" width="160" height="66" rx="6" class="lifecycle-run"/>
+  <text x="610" y="196" text-anchor="middle" class="lifecycle-title">4 Run</text>
+  <text x="610" y="214" text-anchor="middle" class="lifecycle-note">until return, revert,</text>
+  <text x="610" y="232" text-anchor="middle" class="lifecycle-note">a trap or exhaustion</text>
+
+  <line x1="170" y1="209" x2="184" y2="209" class="lifecycle-line" marker-end="url(#lifecycle-arrow)"/>
+  <line x1="346" y1="209" x2="360" y2="209" class="lifecycle-line" marker-end="url(#lifecycle-arrow)"/>
+  <line x1="514" y1="209" x2="528" y2="209" class="lifecycle-line" marker-end="url(#lifecycle-arrow)"/>
+
+  <text x="10" y="260" class="lifecycle-note">Every step's debit is atomic; a debit that does not fit fails the step with the status of the exhausted counter, 3 to 6.</text>
+</svg>

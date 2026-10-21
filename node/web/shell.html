@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{title}} · Ting</title>
+  <link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  {{head}}
+</head>
+<body class="page-{{section}}">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="Ting home"><img src="/assets/logo.svg" alt=""><span>Ting</span></a>
+    <nav class="top-nav" aria-label="Main navigation">
+      <a {{node_active}} href="/">Node</a>
+      <a {{wiki_active}} href="/wiki">Wiki</a>
+      <a {{api_active}} href="/docs">API</a>
+    </nav>
+  </header>
+  <div class="layout">
+    {{navigation}}
+    <div class="content">
+      <main id="main">
+        {{body}}
+      </main>
+      <footer class="site-footer">Ting v{{version}}</footer>
+    </div>
+  </div>
+  {{scripts}}
+</body>
+</html>

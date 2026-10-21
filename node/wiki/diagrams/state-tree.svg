@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 300" role="img" aria-labelledby="tree-title tree-desc">
+  <title id="tree-title">A compact sparse Merkle tree of four records</title>
+  <desc id="tree-desc">Four records have keys starting 000, 001, 10 and 11. The root at depth 0 splits them by their first bit. On the 1 side, the next bit separates C and D, so their leaves sit at depth 2. On the 0 side, A and B also share the second bit, so a node at depth 1 has an empty subtree on its 1 side and a node at depth 2 on its 0 side, whose children are the leaves of A and B at depth 3.</desc>
+  <style>
+    .tree-node { fill: var(--card, #ffffff); stroke: var(--border, #d0d5dd); stroke-width: 1.5; }
+    .tree-leaf { fill: var(--primary-soft, #eef2ff); stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+    .tree-empty { fill: var(--card-alt, #f8f9fb); stroke: var(--faint, #98a2b3); stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .tree-head { fill: var(--text, #101828); font: 600 13px var(--font, system-ui, sans-serif); }
+    .tree-key { fill: var(--muted, #667085); font: 11px var(--mono, ui-monospace, monospace); }
+    .tree-bit { fill: var(--muted, #667085); font: 600 12px var(--mono, ui-monospace, monospace); }
+    .tree-note { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .tree-line { fill: none; stroke: var(--faint, #98a2b3); stroke-width: 1.5; }
+  </style>
+
+  <!-- Depth 0 -->
+  <rect x="295" y="14" width="110" height="34" rx="6" class="tree-node"/>
+  <text x="350" y="36" text-anchor="middle" class="tree-head">node, d = 0</text>
+
+  <!-- Depth 1 -->
+  <rect x="135" y="84" width="110" height="34" rx="6" class="tree-node"/>
+  <text x="190" y="106" text-anchor="middle" class="tree-head">node, d = 1</text>
+  <rect x="455" y="84" width="110" height="34" rx="6" class="tree-node"/>
+  <text x="510" y="106" text-anchor="middle" class="tree-head">node, d = 1</text>
+
+  <!-- Depth 2 -->
+  <rect x="55" y="154" width="110" height="34" rx="6" class="tree-node"/>
+  <text x="110" y="176" text-anchor="middle" class="tree-head">node, d = 2</text>
+  <rect x="225" y="156" width="90" height="30" rx="6" class="tree-empty"/>
+  <text x="270" y="176" text-anchor="middle" class="tree-head">empty</text>
+  <rect x="390" y="150" width="100" height="42" rx="6" class="tree-leaf"/>
+  <text x="440" y="168" text-anchor="middle" class="tree-head">leaf C</text>
+  <text x="440" y="184" text-anchor="middle" class="tree-key">10…</text>
+  <rect x="530" y="150" width="100" height="42" rx="6" class="tree-leaf"/>
+  <text x="580" y="168" text-anchor="middle" class="tree-head">leaf D</text>
+  <text x="580" y="184" text-anchor="middle" class="tree-key">11…</text>
+
+  <!-- Depth 3 -->
+  <rect x="10" y="220" width="100" height="42" rx="6" class="tree-leaf"/>
+  <text x="60" y="238" text-anchor="middle" class="tree-head">leaf A</text>
+  <text x="60" y="254" text-anchor="middle" class="tree-key">000…</text>
+  <rect x="130" y="220" width="100" height="42" rx="6" class="tree-leaf"/>
+  <text x="180" y="238" text-anchor="middle" class="tree-head">leaf B</text>
+  <text x="180" y="254" text-anchor="middle" class="tree-key">001…</text>
+
+  <!-- Edges, labeled with the bit they follow -->
+  <line x1="320" y1="48" x2="210" y2="84" class="tree-line"/>
+  <text x="256" y="60" class="tree-bit">0</text>
+  <line x1="380" y1="48" x2="490" y2="84" class="tree-line"/>
+  <text x="438" y="60" class="tree-bit">1</text>
+  <line x1="165" y1="118" x2="120" y2="154" class="tree-line"/>
+  <text x="130" y="134" class="tree-bit">0</text>
+  <line x1="215" y1="118" x2="260" y2="156" class="tree-line"/>
+  <text x="243" y="134" class="tree-bit">1</text>
+  <line x1="485" y1="118" x2="450" y2="150" class="tree-line"/>
+  <text x="456" y="134" class="tree-bit">0</text>
+  <line x1="535" y1="118" x2="570" y2="150" class="tree-line"/>
+  <text x="558" y="134" class="tree-bit">1</text>
+  <line x1="90" y1="188" x2="65" y2="220" class="tree-line"/>
+  <text x="66" y="204" class="tree-bit">0</text>
+  <line x1="130" y1="188" x2="170" y2="220" class="tree-line"/>
+  <text x="155" y="204" class="tree-bit">1</text>
+
+  <text x="300" y="234" class="tree-note">Each record's leaf sits at the shallowest depth</text>
+  <text x="300" y="252" class="tree-note">where no other record shares its path.</text>
+  <text x="300" y="276" class="tree-note">Internal nodes are hashed from their children.</text>
+</svg>

@@ -1,0 +1,12 @@
+{
+  "group": "v1-primitives",
+  "rule": "H(tag, bytes) = SHA-256('Ting/' || u16 tag length || tag || bytes)",
+  "rules": "2.4",
+  "input": {
+    "tag": "example",
+    "bytes_hex": ""
+  },
+  "expect": {
+    "hash": "21c678bddfb0263135de6e3168b0621f197be36fbc38f7b3a30fb455a609960b"
+  }
+}

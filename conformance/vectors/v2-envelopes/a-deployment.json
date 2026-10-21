@@ -1,0 +1,12 @@
+{
+  "group": "v2-envelopes",
+  "rule": "a deployment: version 1, kind 1, the budget, the code and the input",
+  "rules": "4.4",
+  "input": {
+    "transaction_hex": "010110270000000000000a0000000000000000040000000000000010000000000000040000000061736d02000000696e"
+  },
+  "expect": {
+    "valid": true,
+    "id_on_development": "46c6348a8aaf3176af3132a0d2a21f172eedea4d06b692e6da93b14da91d8a86"
+  }
+}

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 270" role="img" aria-labelledby="asert-title asert-desc">
+  <title id="asert-title">The target against the chain's distance from schedule</title>
+  <desc id="asert-desc">The horizontal axis is how far the parent block is behind schedule, in half-lives, from two ahead to two behind. The vertical axis is the target as a multiple of the initial target, on a doubling scale from a quarter to four. The target is a straight line on this scale: on schedule it is the initial target, each half-life behind doubles it, and each half-life ahead halves it. A larger target is easier to meet.</desc>
+  <style>
+    .asert-grid { fill: none; stroke: var(--border, #d0d5dd); stroke-width: 1; }
+    .asert-axis { fill: none; stroke: var(--faint, #98a2b3); stroke-width: 1.5; }
+    .asert-curve { fill: none; stroke: var(--primary, #4f46e5); stroke-width: 2.5; }
+    .asert-dot { fill: var(--primary, #4f46e5); }
+    .asert-tick { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .asert-label { fill: var(--text, #101828); font: 600 12px var(--font, system-ui, sans-serif); }
+    .asert-note { fill: var(--muted, #667085); font: italic 12px var(--font, system-ui, sans-serif); }
+  </style>
+
+  <!-- Grid: one column per half-life, one row per doubling -->
+  <line x1="140" y1="30" x2="140" y2="210" class="asert-grid"/>
+  <line x1="250" y1="30" x2="250" y2="210" class="asert-grid"/>
+  <line x1="470" y1="30" x2="470" y2="210" class="asert-grid"/>
+  <line x1="580" y1="30" x2="580" y2="210" class="asert-grid"/>
+  <line x1="140" y1="30" x2="580" y2="30" class="asert-grid"/>
+  <line x1="140" y1="75" x2="580" y2="75" class="asert-grid"/>
+  <line x1="140" y1="165" x2="580" y2="165" class="asert-grid"/>
+  <line x1="140" y1="210" x2="580" y2="210" class="asert-grid"/>
+  <line x1="360" y1="30" x2="360" y2="210" class="asert-axis"/>
+  <line x1="140" y1="120" x2="580" y2="120" class="asert-axis"/>
+
+  <line x1="140" y1="210" x2="580" y2="30" class="asert-curve"/>
+  <circle cx="360" cy="120" r="4" class="asert-dot"/>
+  <circle cx="470" cy="75" r="4" class="asert-dot"/>
+
+  <!-- Vertical ticks: the target as a multiple of the initial target -->
+  <text x="130" y="34" text-anchor="end" class="asert-tick">×4</text>
+  <text x="130" y="79" text-anchor="end" class="asert-tick">×2</text>
+  <text x="130" y="124" text-anchor="end" class="asert-tick">×1</text>
+  <text x="130" y="169" text-anchor="end" class="asert-tick">×½</text>
+  <text x="130" y="214" text-anchor="end" class="asert-tick">×¼</text>
+  <text x="10" y="110" class="asert-label">target</text>
+  <text x="10" y="126" class="asert-tick">easier ↑</text>
+  <text x="10" y="142" class="asert-tick">harder ↓</text>
+
+  <!-- Horizontal ticks: half-lives behind schedule -->
+  <text x="140" y="230" text-anchor="middle" class="asert-tick">−2</text>
+  <text x="250" y="230" text-anchor="middle" class="asert-tick">−1</text>
+  <text x="360" y="230" text-anchor="middle" class="asert-tick">0</text>
+  <text x="470" y="230" text-anchor="middle" class="asert-tick">+1</text>
+  <text x="580" y="230" text-anchor="middle" class="asert-tick">+2</text>
+  <text x="140" y="254" class="asert-tick">ahead of schedule</text>
+  <text x="580" y="254" text-anchor="end" class="asert-tick">behind schedule</text>
+  <text x="360" y="254" text-anchor="middle" class="asert-label">half-lives behind</text>
+
+  <text x="372" y="138" class="asert-note">on schedule: the initial target</text>
+  <text x="482" y="92" class="asert-note">one half-life behind:</text>
+  <text x="482" y="107" class="asert-note">twice the target</text>
+</svg>

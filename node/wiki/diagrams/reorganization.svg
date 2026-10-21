@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 330" role="img" aria-labelledby="reorg-title reorg-desc">
+  <title id="reorg-title">Switching to a heavier branch</title>
+  <desc id="reorg-desc">The connected branch ends at block 102. A stored branch from block 99 reaches 103 and has more work. The node disconnects 102, 101 and 100, restoring the values each block changed, then connects 100 to 103 of the other branch: blocks executed before by their stored changes, the others by executing them, one per step.</desc>
+  <style>
+    .reorg-on { fill: var(--primary-soft, #eef2ff); stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+    .reorg-base { fill: var(--card, #ffffff); stroke: var(--border, #d0d5dd); stroke-width: 1.5; }
+    .reorg-new { fill: var(--card-alt, #f8f9fb); stroke: var(--faint, #98a2b3); stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .reorg-block { fill: var(--text, #101828); font: 600 13px var(--mono, ui-monospace, monospace); }
+    .reorg-note { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .reorg-step { fill: var(--text, #101828); font: 600 13px var(--font, system-ui, sans-serif); }
+    .reorg-link { fill: none; stroke: var(--faint, #98a2b3); stroke-width: 1.5; }
+    .reorg-move { fill: none; stroke: var(--primary, #4f46e5); stroke-width: 1.8; }
+    .reorg-head { fill: var(--primary, #4f46e5); }
+  </style>
+  <defs>
+    <marker id="reorg-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="reorg-head"/>
+    </marker>
+  </defs>
+
+  <!-- The shared blocks -->
+  <rect x="20" y="130" width="60" height="40" rx="6" class="reorg-base"/>
+  <text x="50" y="155" text-anchor="middle" class="reorg-block">97</text>
+  <rect x="100" y="130" width="60" height="40" rx="6" class="reorg-base"/>
+  <text x="130" y="155" text-anchor="middle" class="reorg-block">98</text>
+  <rect x="180" y="130" width="60" height="40" rx="6" class="reorg-base"/>
+  <text x="210" y="155" text-anchor="middle" class="reorg-block">99</text>
+  <line x1="80" y1="150" x2="100" y2="150" class="reorg-link"/>
+  <line x1="160" y1="150" x2="180" y2="150" class="reorg-link"/>
+  <text x="130" y="195" text-anchor="middle" class="reorg-note">shared by both branches</text>
+
+  <!-- The connected branch -->
+  <path d="M240,140 L280,90" class="reorg-link"/>
+  <rect x="280" y="70" width="60" height="40" rx="6" class="reorg-on"/>
+  <text x="310" y="95" text-anchor="middle" class="reorg-block">100</text>
+  <rect x="360" y="70" width="60" height="40" rx="6" class="reorg-on"/>
+  <text x="390" y="95" text-anchor="middle" class="reorg-block">101</text>
+  <rect x="440" y="70" width="60" height="40" rx="6" class="reorg-on"/>
+  <text x="470" y="95" text-anchor="middle" class="reorg-block">102</text>
+  <line x1="340" y1="90" x2="360" y2="90" class="reorg-link"/>
+  <line x1="420" y1="90" x2="440" y2="90" class="reorg-link"/>
+  <text x="520" y="86" class="reorg-note">the tip now:</text>
+  <text x="520" y="102" class="reorg-note">executed, connected</text>
+
+  <!-- The heavier stored branch -->
+  <path d="M240,160 L280,210" class="reorg-link"/>
+  <rect x="280" y="190" width="60" height="40" rx="6" class="reorg-new"/>
+  <text x="310" y="215" text-anchor="middle" class="reorg-block">100′</text>
+  <rect x="360" y="190" width="60" height="40" rx="6" class="reorg-new"/>
+  <text x="390" y="215" text-anchor="middle" class="reorg-block">101′</text>
+  <rect x="440" y="190" width="60" height="40" rx="6" class="reorg-new"/>
+  <text x="470" y="215" text-anchor="middle" class="reorg-block">102′</text>
+  <rect x="520" y="190" width="60" height="40" rx="6" class="reorg-new"/>
+  <text x="550" y="215" text-anchor="middle" class="reorg-block">103′</text>
+  <line x1="340" y1="210" x2="360" y2="210" class="reorg-link"/>
+  <line x1="420" y1="210" x2="440" y2="210" class="reorg-link"/>
+  <line x1="500" y1="210" x2="520" y2="210" class="reorg-link"/>
+  <text x="596" y="206" class="reorg-note">stored,</text>
+  <text x="596" y="222" class="reorg-note">more work</text>
+
+  <!-- Step 1: disconnect back to the shared block -->
+  <path d="M470,66 C470,46 230,46 214,126" class="reorg-move" marker-end="url(#reorg-arrow)"/>
+  <text x="342" y="16" text-anchor="middle" class="reorg-step">1 · disconnect 102, 101, 100</text>
+  <text x="342" y="32" text-anchor="middle" class="reorg-note">restore the values each one changed</text>
+
+  <!-- Step 2: connect the other branch -->
+  <path d="M214,174 C230,280 540,280 550,234" class="reorg-move" marker-end="url(#reorg-arrow)"/>
+  <text x="382" y="290" text-anchor="middle" class="reorg-step">2 · connect 100′ … 103′</text>
+  <text x="382" y="308" text-anchor="middle" class="reorg-note">stored changes where executed before, otherwise execute,</text>
+  <text x="382" y="324" text-anchor="middle" class="reorg-note">one database step at a time</text>
+</svg>

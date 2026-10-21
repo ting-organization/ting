@@ -1,0 +1,16 @@
+{
+  "group": "v1-primitives",
+  "rule": "an ordered commitment: indexed leaves padded to a power of two, paired to one node, with the count in the root",
+  "rules": "2.5",
+  "input": {
+    "tag": "receipts",
+    "items_hex": [
+      "61",
+      "62",
+      "63"
+    ]
+  },
+  "expect": {
+    "root": "2f4a85d46eb3e07f3242f4cdc86dbce658609a92de8783f0746f241f8f4125a9"
+  }
+}

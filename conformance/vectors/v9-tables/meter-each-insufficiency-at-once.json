@@ -1,0 +1,122 @@
+{
+  "group": "v9-tables",
+  "rule": "a debit fits every open frame or changes nothing, C, S, D, G checked in order; a nested budget opens within what is left; closing a frame returns its use",
+  "rules": "11.2",
+  "input": {
+    "root_budget": [
+      5,
+      5,
+      5,
+      5
+    ]
+  },
+  "expect": {
+    "steps": [
+      {
+        "charge": [
+          6,
+          6,
+          6,
+          6
+        ],
+        "outcome": "C",
+        "root_used_after": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "charge": [
+          5,
+          6,
+          6,
+          6
+        ],
+        "outcome": "S",
+        "root_used_after": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "charge": [
+          5,
+          5,
+          6,
+          6
+        ],
+        "outcome": "D",
+        "root_used_after": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "charge": [
+          5,
+          5,
+          5,
+          6
+        ],
+        "outcome": "G",
+        "root_used_after": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "charge": [
+          5,
+          5,
+          5,
+          5
+        ],
+        "outcome": "ok",
+        "root_used_after": [
+          5,
+          5,
+          5,
+          5
+        ]
+      },
+      {
+        "charge": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "outcome": "ok",
+        "root_used_after": [
+          5,
+          5,
+          5,
+          5
+        ]
+      },
+      {
+        "charge": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "outcome": "G",
+        "root_used_after": [
+          5,
+          5,
+          5,
+          5
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,37 @@
+name: ci
+on:
+  push:
+  pull_request:
+# The checks only read the repository.
+permissions:
+  contents: read
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy, all features
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Workspace tests
+        run: cargo test --workspace --locked
+      - name: Release build agrees with the VM tests
+        run: cargo test --release --package ting-core --test vm --locked
+      - name: Coverage gate, the seed exercises every rule
+        run: cargo test --release --package ting-core --features coverage --test vm --locked coverage
+      - name: The published chains replay in the node through restarts
+        run: cargo test --release --package ting-node --test seed_replay --locked -- --ignored
+      - name: No WebAssembly crates in the consensus build
+        shell: bash
+        run: |
+          if cargo tree --package ting-core --edges normal --locked | grep -Ei 'wasmi|wasmparser|wasm-encoder|wast'; then
+            echo "a WebAssembly crate reached the consensus build" >&2
+            exit 1
+          fi

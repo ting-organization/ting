@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 330" role="img" aria-labelledby="block-title block-desc">
+  <title id="block-title">What a block header commits to</title>
+  <desc id="block-desc">A 294-byte header lists thirteen fields. Its parent_id names the parent block by its BlockId, the hash of the parent's header. Three roots commit to the body and the state: transactions_root to the transactions, receipts_root to the receipts and state_root to every record after the block. Its producer_hash commits to the producer data at the start of the body.</desc>
+  <style>
+    .block-box { fill: var(--card, #ffffff); stroke: var(--border, #d0d5dd); stroke-width: 1.5; }
+    .block-key { fill: var(--primary-soft, #eef2ff); }
+    .block-head { fill: var(--text, #101828); font: 600 14px var(--font, system-ui, sans-serif); }
+    .block-field { fill: var(--text, #101828); font: 12px var(--mono, ui-monospace, monospace); }
+    .block-quiet { fill: var(--muted, #667085); font: 12px var(--mono, ui-monospace, monospace); }
+    .block-note { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .block-line { fill: none; stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+    .block-halo { fill: none; stroke: var(--card, #ffffff); stroke-width: 7; }
+    .block-tip { fill: var(--primary, #4f46e5); }
+  </style>
+  <defs>
+    <marker id="block-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="block-tip"/>
+    </marker>
+  </defs>
+
+  <!-- The parent -->
+  <rect x="10" y="100" width="112" height="45" rx="6" class="block-box"/>
+  <text x="66" y="127" text-anchor="middle" class="block-head">Parent block</text>
+  <text x="10" y="168" class="block-note">named by its BlockId,</text>
+  <text x="10" y="185" class="block-note">the hash of its header</text>
+
+  <!-- The header -->
+  <rect x="170" y="20" width="230" height="292" rx="8" class="block-box"/>
+  <text x="185" y="44" class="block-head">Header, 294 bytes</text>
+  <rect x="171" y="113" width="228" height="19" class="block-key"/>
+  <rect x="171" y="170" width="228" height="57" class="block-key"/>
+  <rect x="171" y="265" width="228" height="19" class="block-key"/>
+  <text x="185" y="70" class="block-quiet">protocol_version</text>
+  <text x="185" y="89" class="block-quiet">chain_id</text>
+  <text x="185" y="108" class="block-quiet">height</text>
+  <text x="185" y="127" class="block-field">parent_id</text>
+  <text x="185" y="146" class="block-quiet">timestamp</text>
+  <text x="185" y="165" class="block-quiet">target</text>
+  <text x="185" y="184" class="block-field">transactions_root</text>
+  <text x="185" y="203" class="block-field">receipts_root</text>
+  <text x="185" y="222" class="block-field">state_root</text>
+  <text x="185" y="241" class="block-quiet">resources_used</text>
+  <text x="185" y="260" class="block-quiet">votes</text>
+  <text x="185" y="279" class="block-field">producer_hash</text>
+  <text x="185" y="298" class="block-quiet">nonce</text>
+
+  <!-- The body and the state -->
+  <rect x="480" y="20" width="210" height="140" rx="8" class="block-box"/>
+  <text x="495" y="44" class="block-head">Body</text>
+  <text x="495" y="70" class="block-field">producer_data</text>
+  <text x="495" y="94" class="block-quiet">transaction_count</text>
+  <text x="495" y="118" class="block-field">transactions</text>
+  <text x="495" y="142" class="block-field">receipts</text>
+
+  <rect x="480" y="200" width="210" height="100" rx="8" class="block-box"/>
+  <text x="495" y="226" class="block-head">State after the block</text>
+  <text x="495" y="250" class="block-note">every record, committed</text>
+  <text x="495" y="268" class="block-note">by the root of one</text>
+  <text x="495" y="286" class="block-note">state tree</text>
+
+  <!-- Links: the producer link is drawn first, the others bridge over it -->
+  <line x1="170" y1="122.5" x2="124" y2="122.5" class="block-line" marker-end="url(#block-arrow)"/>
+  <path d="M400,274.5 H465 V66 H478" class="block-line" marker-end="url(#block-arrow)"/>
+  <line x1="459" y1="114" x2="471" y2="114" class="block-halo"/>
+  <path d="M400,179.5 H420 V114 H478" class="block-line" marker-end="url(#block-arrow)"/>
+  <line x1="459" y1="138" x2="471" y2="138" class="block-halo"/>
+  <path d="M400,198.5 H435 V138 H478" class="block-line" marker-end="url(#block-arrow)"/>
+  <line x1="459" y1="250" x2="471" y2="250" class="block-halo"/>
+  <path d="M400,217.5 H450 V250 H478" class="block-line" marker-end="url(#block-arrow)"/>
+</svg>

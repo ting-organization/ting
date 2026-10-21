@@ -1,0 +1,12 @@
+{
+  "group": "v2-envelopes",
+  "rule": "a call: version 1, kind 0, the budget, the target and the input",
+  "rules": "4.4",
+  "input": {
+    "transaction_hex": "010010270000000000000a0000000000000000040000000000000010000000000000111111111111111111111111111111111111111111111111111111111111111100000000"
+  },
+  "expect": {
+    "valid": true,
+    "id_on_development": "0e8d29adf1dcb3f0ea17e500e39e7f868084bb7c6476258ce7a967293dd234fd"
+  }
+}

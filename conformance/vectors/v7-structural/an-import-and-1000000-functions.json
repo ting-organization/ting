@@ -1,0 +1,63 @@
+{
+  "expect": {
+    "accepted": false
+  },
+  "group": "v7-structural",
+  "input": {
+    "module": {
+      "preamble_hex": "0061736d01000000",
+      "sections": [
+        {
+          "id": 1,
+          "payload": [
+            {
+              "hex": "0260000060027f7f00"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "payload": [
+            {
+              "hex": "010474696e67067265766572740001"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "payload": [
+            {
+              "hex": "c0843d"
+            },
+            {
+              "repeat_hex": "00",
+              "times": 1000000
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "payload": [
+            {
+              "hex": "0106696e766f6b6500c0843d"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "payload": [
+            {
+              "hex": "c0843d"
+            },
+            {
+              "repeat_hex": "02000b",
+              "times": 1000000
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "rule": "a module has at most 1,000,000 functions, its imports among them",
+  "rules": "18.3"
+}

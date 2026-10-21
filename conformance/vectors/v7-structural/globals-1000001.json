@@ -1,0 +1,59 @@
+{
+  "expect": {
+    "accepted": false
+  },
+  "group": "v7-structural",
+  "input": {
+    "module": {
+      "preamble_hex": "0061736d01000000",
+      "sections": [
+        {
+          "id": 1,
+          "payload": [
+            {
+              "hex": "01600000"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "payload": [
+            {
+              "hex": "0100"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "payload": [
+            {
+              "hex": "c1843d"
+            },
+            {
+              "repeat_hex": "7f0041000b",
+              "times": 1000001
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "payload": [
+            {
+              "hex": "0106696e766f6b650000"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "payload": [
+            {
+              "hex": "010300010b"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "rule": "a module declares at most 1,000,000 globals",
+  "rules": "18.3"
+}

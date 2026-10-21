@@ -1,0 +1,182 @@
+{
+  "group": "v9-tables",
+  "rule": "a debit fits every open frame or changes nothing, C, S, D, G checked in order; a nested budget opens within what is left; closing a frame returns its use",
+  "rules": "11.2",
+  "input": {
+    "root_budget": [
+      100,
+      100,
+      100,
+      100
+    ]
+  },
+  "expect": {
+    "steps": [
+      {
+        "charge": [
+          40,
+          30,
+          20,
+          10
+        ],
+        "outcome": "ok",
+        "root_used_after": [
+          40,
+          30,
+          20,
+          10
+        ]
+      },
+      {
+        "open": [
+          61,
+          70,
+          80,
+          90
+        ],
+        "outcome": "refused",
+        "root_used_after": [
+          40,
+          30,
+          20,
+          10
+        ]
+      },
+      {
+        "open": [
+          60,
+          71,
+          80,
+          90
+        ],
+        "outcome": "refused",
+        "root_used_after": [
+          40,
+          30,
+          20,
+          10
+        ]
+      },
+      {
+        "open": [
+          60,
+          70,
+          81,
+          90
+        ],
+        "outcome": "refused",
+        "root_used_after": [
+          40,
+          30,
+          20,
+          10
+        ]
+      },
+      {
+        "open": [
+          60,
+          70,
+          80,
+          91
+        ],
+        "outcome": "refused",
+        "root_used_after": [
+          40,
+          30,
+          20,
+          10
+        ]
+      },
+      {
+        "open": [
+          60,
+          70,
+          80,
+          90
+        ],
+        "outcome": "opened",
+        "root_used_after": [
+          40,
+          30,
+          20,
+          10
+        ]
+      },
+      {
+        "charge": [
+          60,
+          70,
+          80,
+          90
+        ],
+        "outcome": "ok",
+        "root_used_after": [
+          100,
+          100,
+          100,
+          100
+        ]
+      },
+      {
+        "open": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "outcome": "opened",
+        "root_used_after": [
+          100,
+          100,
+          100,
+          100
+        ]
+      },
+      {
+        "charge": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "outcome": "G",
+        "root_used_after": [
+          100,
+          100,
+          100,
+          100
+        ]
+      },
+      {
+        "close": true,
+        "outcome": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "root_used_after": [
+          100,
+          100,
+          100,
+          100
+        ]
+      },
+      {
+        "close": true,
+        "outcome": [
+          60,
+          70,
+          80,
+          90
+        ],
+        "root_used_after": [
+          100,
+          100,
+          100,
+          100
+        ]
+      }
+    ]
+  }
+}

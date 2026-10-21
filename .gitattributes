@@ -1,0 +1,7 @@
+# Vendored assets have byte-for-byte checksums; preserve upstream line endings.
+/node/vendor/swagger-ui/* -text
+# The reference programs are identified by the hash of their exact bytes.
+/programs/*.wasm binary
+# The published chains are checked byte for byte; the node carries the seed.
+/conformance/seed/*.blocks binary
+/conformance/chains/*.blocks binary

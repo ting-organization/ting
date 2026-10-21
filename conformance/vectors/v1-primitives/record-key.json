@@ -1,0 +1,13 @@
+{
+  "group": "v1-primitives",
+  "rule": "a record's state key is H('state-key', namespace || program || logical key)",
+  "rules": "5.1",
+  "input": {
+    "namespace": 2,
+    "contract": "1111111111111111111111111111111111111111111111111111111111111111",
+    "logical_key": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "expect": {
+    "key": "6e8da4c64f0f1b06e6ea4a83dd0d7b433dab12ef7fd69989d9bc092864b6d9f2"
+  }
+}

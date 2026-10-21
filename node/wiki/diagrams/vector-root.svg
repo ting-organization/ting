@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 300" role="img" aria-labelledby="vector-title vector-desc">
+  <title id="vector-title">An ordered commitment to three items</title>
+  <desc id="vector-desc">Three items become leaves 0, 1 and 2, each hashed with its position. A padding leaf at position 3 fills the width to four, the next power of two. Neighboring hashes are combined in pairs into nodes, and the two nodes into the tree root. The final root hashes the item count, 3, together with the tree root.</desc>
+  <style>
+    .vector-root { fill: var(--primary-soft, #eef2ff); stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+    .vector-node { fill: var(--card, #ffffff); stroke: var(--border, #d0d5dd); stroke-width: 1.5; }
+    .vector-leaf { fill: var(--card, #ffffff); stroke: var(--primary, #4f46e5); stroke-width: 1.5; }
+    .vector-pad { fill: var(--card-alt, #f8f9fb); stroke: var(--faint, #98a2b3); stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .vector-head { fill: var(--text, #101828); font: 600 13px var(--font, system-ui, sans-serif); }
+    .vector-code { fill: var(--muted, #667085); font: 11px var(--mono, ui-monospace, monospace); }
+    .vector-note { fill: var(--muted, #667085); font: 12px var(--font, system-ui, sans-serif); }
+    .vector-line { fill: none; stroke: var(--faint, #98a2b3); stroke-width: 1.5; }
+  </style>
+
+  <!-- The root with the count -->
+  <rect x="200" y="12" width="280" height="44" rx="8" class="vector-root"/>
+  <text x="340" y="31" text-anchor="middle" class="vector-head">Root</text>
+  <text x="340" y="47" text-anchor="middle" class="vector-code">count 3 || tree root</text>
+
+  <rect x="270" y="84" width="140" height="36" rx="6" class="vector-node"/>
+  <text x="340" y="107" text-anchor="middle" class="vector-head">tree root</text>
+
+  <rect x="110" y="148" width="140" height="36" rx="6" class="vector-node"/>
+  <text x="180" y="171" text-anchor="middle" class="vector-head">node</text>
+  <rect x="430" y="148" width="140" height="36" rx="6" class="vector-node"/>
+  <text x="500" y="171" text-anchor="middle" class="vector-head">node</text>
+
+  <!-- Leaves and padding -->
+  <rect x="40" y="212" width="120" height="44" rx="6" class="vector-leaf"/>
+  <text x="100" y="231" text-anchor="middle" class="vector-head">leaf 0</text>
+  <text x="100" y="247" text-anchor="middle" class="vector-code">0 || item 0</text>
+  <rect x="200" y="212" width="120" height="44" rx="6" class="vector-leaf"/>
+  <text x="260" y="231" text-anchor="middle" class="vector-head">leaf 1</text>
+  <text x="260" y="247" text-anchor="middle" class="vector-code">1 || item 1</text>
+  <rect x="360" y="212" width="120" height="44" rx="6" class="vector-leaf"/>
+  <text x="420" y="231" text-anchor="middle" class="vector-head">leaf 2</text>
+  <text x="420" y="247" text-anchor="middle" class="vector-code">2 || item 2</text>
+  <rect x="520" y="212" width="120" height="44" rx="6" class="vector-pad"/>
+  <text x="580" y="231" text-anchor="middle" class="vector-head">pad 3</text>
+  <text x="580" y="247" text-anchor="middle" class="vector-code">3</text>
+
+  <line x1="340" y1="56" x2="340" y2="84" class="vector-line"/>
+  <line x1="300" y1="120" x2="180" y2="148" class="vector-line"/>
+  <line x1="380" y1="120" x2="500" y2="148" class="vector-line"/>
+  <line x1="150" y1="184" x2="100" y2="212" class="vector-line"/>
+  <line x1="210" y1="184" x2="260" y2="212" class="vector-line"/>
+  <line x1="470" y1="184" x2="420" y2="212" class="vector-line"/>
+  <line x1="530" y1="184" x2="580" y2="212" class="vector-line"/>
+
+  <text x="340" y="286" text-anchor="middle" class="vector-note">Each leaf hashes its position with its item; padding fills the width to the next power of two.</text>
+</svg>
