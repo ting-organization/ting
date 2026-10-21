@@ -49,6 +49,7 @@ pub fn router(node: Node, cors: bool) -> Router {
         .route("/transactions/{id}", get(explorer))
         .route("/contracts/{id}", get(explorer))
         .route("/mempool", get(explorer))
+        .route("/network", get(explorer))
         .route("/assets/{name}", get(asset))
         .route("/wiki", get(|| async { Html(wiki::page("").unwrap()) }))
         .route("/wiki/{*page}", get(wiki_page))

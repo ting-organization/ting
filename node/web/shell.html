@@ -3,20 +3,36 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>{{title}} · Ting</title>
   <link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
+  <script>try { const theme = localStorage.getItem('ting-theme'); if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme; } catch {}</script>
   {{head}}
 </head>
 <body class="page-{{section}}">
   <a class="skip-link" href="#main">Skip to content</a>
   <header class="site-header">
-    <a class="brand" href="/" aria-label="Ting home"><img src="/assets/logo.svg" alt=""><span>Ting</span></a>
-    <nav class="top-nav" aria-label="Main navigation">
-      <a {{node_active}} href="/">Node</a>
-      <a {{wiki_active}} href="/wiki">Wiki</a>
-      <a {{api_active}} href="/docs">API</a>
-    </nav>
+    <div class="header-inner">
+      <a class="brand" href="/" aria-label="Ting home"><img src="/assets/logo.svg" alt=""><span>Ting</span></a>
+      <nav class="top-nav" aria-label="Main navigation">
+        <a {{node_active}} href="/">Explorer</a>
+        <a {{wiki_active}} href="/wiki">Wiki</a>
+        <a {{api_active}} href="/docs">API</a>
+      </nav>
+      <form id="search" class="search" role="search" aria-label="Search the chain">
+        <svg class="search-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.75"/><path d="m13 13 4.5 4.5"/></svg>
+        <label class="sr-only" for="search-query">Block height, block hash, transaction ID or contract ID</label>
+        <input id="search-query" name="query" type="search" placeholder="Height, block, transaction or contract ID" autocomplete="off" spellcheck="false" required>
+        <kbd class="search-key" aria-hidden="true">/</kbd>
+        <p id="search-message" class="search-message" role="status"></p>
+      </form>
+      <a class="live" id="live" href="/" data-state="connecting" title="The node's canonical height, followed live"><span class="live-dot" aria-hidden="true"></span><span id="live-text">Connecting</span></a>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch between light and dark">
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg>
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.5"/><path d="M12 1.5v3m0 15v3M1.5 12h3m15 0h3M4.6 4.6l2.1 2.1m10.6 10.6 2.1 2.1M4.6 19.4l2.1-2.1M17.3 6.7l2.1-2.1"/></svg>
+      </button>
+    </div>
   </header>
   <div class="layout">
     {{navigation}}
@@ -24,9 +40,10 @@
       <main id="main">
         {{body}}
       </main>
-      <footer class="site-footer">Ting v{{version}}</footer>
+      <footer class="site-footer"><span>Ting node v{{version}}</span><span class="sep" aria-hidden="true">·</span><a href="/docs">REST API</a><span class="sep" aria-hidden="true">·</span><a href="/wiki/node">The reference node</a></footer>
     </div>
   </div>
+  <script src="/assets/site.js" defer></script>
   {{scripts}}
 </body>
 </html>

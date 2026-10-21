@@ -1,15 +1,8 @@
-<nav class="side-nav" aria-label="Explorer sections">
-  <p class="nav-label">Explorer</p>
-  <a href="/" data-view="overview">Overview</a>
-  <a href="/blocks" data-view="blocks">Blocks</a>
-  <a href="/mempool" data-view="mempool">Pending transactions<span id="nav-pending" class="nav-count" hidden></span></a>
-  <section class="node-status" aria-label="Node status">
-    <p class="nav-label">Node</p>
-    <p class="status-line" data-state="connecting"><span class="status-dot" aria-hidden="true"></span><span id="status-text" role="status">Connecting…</span></p>
-    <dl class="status-facts">
-      <div><dt>Network</dt><dd id="status-network">—</dd></div>
-      <div><dt>Height</dt><dd id="status-height">—</dd></div>
-      <div><dt>Tip</dt><dd id="status-tip" class="mono">—</dd></div>
-    </dl>
-  </section>
+<nav class="section-nav" aria-label="Explorer sections">
+  <div class="section-nav-inner">
+    <a href="/" data-view="overview">Overview</a>
+    <a href="/blocks" data-view="blocks">Blocks</a>
+    <a href="/mempool" data-view="mempool">Mempool<span id="nav-pending" class="nav-count" hidden></span></a>
+    <a href="/network" data-view="network">Network</a>
+  </div>
 </nav>

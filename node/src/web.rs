@@ -68,6 +68,10 @@ pub fn asset(name: &str) -> Option<(&'static str, &'static str)> {
     let (mime, body) = match name {
         "site.css" => ("text/css; charset=utf-8", include_str!("../web/site.css")),
         "logo.svg" => ("image/svg+xml", include_str!("../web/logo.svg")),
+        "site.js" => (
+            "application/javascript; charset=utf-8",
+            include_str!("../web/site.js"),
+        ),
         "explorer.js" => (
             "application/javascript; charset=utf-8",
             include_str!("../web/explorer.js"),
