@@ -1,12 +1,11 @@
 <div class="page-head">
-  <div class="title-group"><h1 id="page-title"></h1><span id="page-badge"></span></div>
-  <form id="search" class="search" role="search" aria-label="Search the chain">
-    <svg class="search-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.75"/><path d="m13 13 4.5 4.5"/></svg>
-    <label class="sr-only" for="search-query">Block height, block hash, transaction ID or contract ID</label>
-    <input id="search-query" name="query" type="search" placeholder="Block height, hash or ID" autocomplete="off" spellcheck="false" required>
-    <button type="submit">Search</button>
-  </form>
+  <div class="title-group">
+    <p id="page-kicker" class="kicker"></p>
+    <div class="title-line"><h1 id="page-title"></h1><span id="page-badge" class="badges"></span></div>
+    <p id="page-sub" class="page-sub"></p>
+  </div>
+  <div id="page-actions" class="page-actions"></div>
 </div>
-<p id="search-message" class="form-message" role="status"></p>
-<div id="view"><p class="muted">Loading…</p></div>
+<div id="view"><p class="loading">Loading…</p></div>
+<div class="tooltip" id="tooltip" role="tooltip" hidden></div>
 <noscript><p>The explorer needs JavaScript. You can also use the <a href="/docs">consumer API</a>.</p></noscript>

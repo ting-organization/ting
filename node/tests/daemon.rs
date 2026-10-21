@@ -366,7 +366,9 @@ async fn daemon_cli_rest_wiki_sync_and_restart_work_together() {
         "/v1/votes",
         "/blocks",
         "/mempool",
+        "/network",
         "/assets/site.css",
+        "/assets/site.js",
         "/assets/explorer.js",
         "/assets/swagger-ui.css",
         "/assets/swagger-ui-bundle.js",
@@ -390,7 +392,7 @@ async fn daemon_cli_rest_wiki_sync_and_restart_work_together() {
     assert!(consumer.get("listeners").is_none());
     assert!(consumer.get("pid").is_none());
     assert!(a.call("status", json!({})).await.get("listeners").is_some());
-    for path in ["/", "/blocks", "/mempool", "/docs"] {
+    for path in ["/", "/blocks", "/mempool", "/network", "/docs"] {
         let (_, html) = http(api, "GET", path, None, None).await;
         assert!(
             !html.contains("Wiki chapters"),
