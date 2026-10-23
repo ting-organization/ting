@@ -16,8 +16,9 @@ reference node does with it.
 | 18441 | The REST API over HTTP, when the node's operator turns it on; its reference is served at `/docs` |
 | 18440 | The control channel, on the node's own machine only, never for peers ([security](../node/security.md#the-control-channel)) |
 
-The production network's seed node is `2.29.97.212:18442`. A node learns of the
-others through the [`addresses`](#requests) request.
+The production network's seed nodes are `node1.ting-node.com:18442` and
+`node2.ting-node.com:18442`. A node learns of the others through the
+[`addresses`](#requests) request.
 
 ## A connection
 

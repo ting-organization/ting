@@ -212,7 +212,7 @@ pub const LAUNCH: Option<u64> = Some(1_792_540_800);
 /// The production network's seed nodes, as `host:port` names: a new node with
 /// discovery on looks them up as it starts and learns their addresses, so that
 /// it finds the network with no peer configured (wiki: node/sync).
-pub const SEEDS: &[&str] = &["2.29.97.212:18442"];
+pub const SEEDS: &[&str] = &["node1.ting-node.com:18442", "node2.ting-node.com:18442"];
 /// The production network's genesis (rules §3).
 pub fn production_genesis() -> Option<Genesis> {
     LAUNCH.map(Genesis::production)

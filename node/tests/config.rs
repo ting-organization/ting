@@ -140,7 +140,10 @@ fn the_production_genesis_is_the_production_profile_at_the_launch_time() {
         hex(&genesis.block_id()),
         "24b76a52f3825b921373b6c6a41ced2a74de7dbdb34015669c10594996887459"
     );
-    assert_eq!(config::SEEDS, ["2.29.97.212:18442"]);
+    assert_eq!(
+        config::SEEDS,
+        ["node1.ting-node.com:18442", "node2.ting-node.com:18442"]
+    );
 }
 #[test]
 fn the_control_token_is_its_owners_alone() {
