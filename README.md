@@ -14,7 +14,9 @@ difficulty adjustment and miner capacity voting.
 The production network began on 21 October 2026 at 00:00 UTC, with ChainId
 `15d6549cfacd816f835c632b4c67308d1c63e642f4cbf4049368430670705107`. Its rules are
 frozen: a different rule set is a different chain
-([Freeze consensus once](node/wiki/decisions/freeze.md)). `ting init --dev` creates
+([Freeze consensus once](node/wiki/decisions/freeze.md)). Its seed node
+[node1.ting-node.com](https://node1.ting-node.com/) serves a block explorer of the
+chain and the [wiki](https://node1.ting-node.com/wiki). `ting init --dev` creates
 a development chain to run, explore and build on.
 
 ## Documentation
@@ -25,7 +27,7 @@ from the canonical bytes to SHA-256; the seed blocks are the conformance suite e
 node replays as the chain's first blocks.
 
 The [wiki](node/wiki/index.md) explains it all for readers, and every node serves it
-at `/wiki`. Start with [Why Ting](node/wiki/index.md) and the
+at `/wiki`, [node1.ting-node.com](https://node1.ting-node.com/wiki) among them. Start with [Why Ting](node/wiki/index.md) and the
 [tour](node/wiki/tour.md); the sections on [consensus](node/wiki/consensus.md),
 [blocks and state](node/wiki/data.md), [resources](node/wiki/resources.md) and
 [the VM](node/wiki/vm.md) explain the rules, and the pages on
@@ -53,6 +55,15 @@ API reference at <http://127.0.0.1:18441/docs>. Plain `ting init` creates a node
 for the production network instead: it replays the network's seed blocks and finds
 its peers through the network's seed nodes. [Start a node](node/wiki/start/node.md)
 covers the rest of the command line.
+
+## Wallet and miner
+
+[Ting ID](https://github.com/ting-organization/ting-id) is a wallet and identity
+app for Ting: an identity's spending and savings accounts, payments in any coin of
+the standard coin program, and recovery through a phrase or guardians.
+[Ting miner](https://github.com/ting-organization/ting-miner) is this node with a
+mining policy for pay: it mines on the machine's CPU, its GPUs or both, claims each
+block's reward and takes first the transactions that pay it most.
 
 ## Repository
 
