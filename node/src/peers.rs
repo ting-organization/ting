@@ -1158,26 +1158,55 @@ async fn ended(node: &Node, address: SocketAddr, source: &str, result: Result<()
 
 type Ended = (SocketAddr, Result<()>);
 
-/// Whether the node can do without the seeds (wiki:
-/// node/sync#finding-more-peers): whether at least half of `max_peers` of its
-/// connections `linked`, configured or discovered, are to peers other than
-/// seeds and connected, as `peers` shows them.
-fn past_seeds(
+/// Whether the node does without the seeds (wiki:
+/// node/sync#finding-more-peers), having done so before if `left`, by its
+/// connections `linked` that `peers` shows connected. It leaves them once a
+/// seed is connected and at least half of `max_peers` others, configured or
+/// discovered, are as high as any connection reports, the seeds' included: a
+/// peer still behind cannot serve it yet. It goes back to them only once
+/// fewer than a quarter of `max_peers` others are connected, or none, so that
+/// a peer that drops for a while does not bring them back.
+fn without_seeds(
+    left: bool,
     linked: impl IntoIterator<Item = SocketAddr>,
     book: &AddressBook,
     peers: &BTreeMap<String, Value>,
     max_peers: u32,
 ) -> bool {
-    let others = linked
+    let connected: Vec<(bool, u64)> = linked
         .into_iter()
-        .filter(|a| !book.is_seed(a))
-        .filter(|a| {
-            peers
-                .get(&a.to_string())
-                .is_some_and(|s| s["connected"].is_u64())
+        .filter_map(|a| {
+            let status = peers.get(&a.to_string())?;
+            status["connected"].is_u64().then(|| {
+                let height = status["height"].as_u64().unwrap_or(0);
+                (book.is_seed(&a), height)
+            })
         })
+        .collect();
+    let others = connected.iter().filter(|(seed, _)| !seed).count();
+    if left {
+        return others >= (max_peers as usize / 4).max(1);
+    }
+    let highest = connected.iter().map(|(_, height)| *height).max();
+    let caught_up = connected
+        .iter()
+        .filter(|(seed, height)| !seed && Some(*height) == highest)
         .count();
-    others >= (max_peers as usize).div_ceil(2)
+    connected.iter().any(|(seed, _)| *seed) && caught_up >= (max_peers as usize).div_ceil(2)
+}
+
+/// The discovered peers of the links `(address, source)` that take one of the
+/// `max_peers` slots: a seed takes none, so that a node starts other peers
+/// beside the seeds however few slots it has.
+fn slotted(
+    links: impl IntoIterator<Item = (SocketAddr, &'static str)>,
+    book: &AddressBook,
+) -> Vec<SocketAddr> {
+    links
+        .into_iter()
+        .filter(|(a, source)| *source == "discovered" && !book.is_seed(a))
+        .map(|(a, _)| a)
+        .collect()
 }
 
 /// Keeps the outbound connections, checking every two seconds.
@@ -1192,6 +1221,8 @@ pub async fn run(node: Node) {
     // Addresses that reached this node itself, configured ones included: not
     // connected again in this run.
     let mut itself: BTreeSet<SocketAddr> = BTreeSet::new();
+    // Whether the node has left the seeds.
+    let mut left_seeds = false;
     loop {
         // A busy or slow chain thread is waited out, never a reason to stop
         // keeping the connections.
@@ -1283,33 +1314,27 @@ pub async fn run(node: Node) {
                 })
                 .collect()
         };
-        // A seed is where a node starts, not a peer to keep: once the node
-        // holds enough other connections, its links to seeds end, and the
-        // seeds keep room for nodes that are new.
-        let leave_seeds = {
+        // A seed is where a node starts, not a peer to keep: its links to
+        // seeds take none of the `max_peers` slots, and end once the node
+        // holds enough other peers that can serve it, so that the seeds keep
+        // room for nodes that are new.
+        let (seeds, discovered) = {
             let book = node.book.lock().unwrap();
             let peers = node.peers.lock().unwrap();
             let gone = |a: &SocketAddr| ending.iter().any(|(e, _)| e == a);
             let linked = links.keys().copied().filter(|a| !gone(a));
-            let leave = past_seeds(linked, &book, &peers, config.max_peers);
-            if leave {
-                let seeds: Vec<(SocketAddr, &str)> = links
-                    .keys()
-                    .copied()
-                    .filter(|a| book.is_seed(a) && !gone(a))
-                    .map(|a| (a, "enough other peers"))
-                    .collect();
-                ending.extend(seeds);
-            }
-            leave
+            left_seeds = without_seeds(left_seeds, linked, &book, &peers, config.max_peers);
+            let seeds: Vec<(SocketAddr, &str)> = links
+                .keys()
+                .copied()
+                .filter(|a| left_seeds && book.is_seed(a) && !gone(a))
+                .map(|a| (a, "enough peers besides the seeds"))
+                .collect();
+            let linked = links.iter().filter(|(a, _)| !gone(a));
+            let discovered = slotted(linked.map(|(a, (_, source))| (*a, *source)), &book);
+            (seeds, discovered)
         };
-        let discovered: Vec<SocketAddr> = links
-            .iter()
-            .filter(|(a, (_, source))| {
-                *source == "discovered" && !ending.iter().any(|(e, _)| e == *a)
-            })
-            .map(|(a, _)| *a)
-            .collect();
+        ending.extend(seeds);
         if discovered.len() > want {
             let peers = node.peers.lock().unwrap();
             let last_block = |a: &SocketAddr| {
@@ -1357,12 +1382,12 @@ pub async fn run(node: Node) {
                     .chain([own])
                     .chain(itself.iter().copied())
                     .collect();
-                let connected = links.values().filter(|(_, s)| *s == "discovered").count();
-                let missing = want.saturating_sub(connected);
+                let linked = links.iter().map(|(a, (_, source))| (*a, *source));
+                let missing = want.saturating_sub(slotted(linked, &book).len());
                 for address in book.pick(missing, &busy, now, discovery::seed()) {
                     // Picked after every other address, a seed comes only
                     // when nothing else is left to try.
-                    if !(leave_seeds && book.is_seed(&address)) {
+                    if !(left_seeds && book.is_seed(&address)) {
                         start.push((address, "discovered"));
                     }
                 }
@@ -1390,7 +1415,11 @@ pub async fn run(node: Node) {
                 tasks.spawn(async move { (address, follow(node, address, source, looking).await) });
             links.insert(address, (link, source));
         }
-        looking.store(links.len() < config.max_peers as usize, Ordering::Relaxed);
+        let linked = {
+            let book = node.book.lock().unwrap();
+            links.keys().filter(|a| !book.is_seed(a)).count()
+        };
+        looking.store(linked < config.max_peers as usize, Ordering::Relaxed);
         node.peers.lock().unwrap().retain(|a, _| {
             a.parse()
                 .is_ok_and(|a: SocketAddr| configured.contains(&a) || links.contains_key(&a))
@@ -1413,7 +1442,7 @@ mod tests {
     use discovery::Source;
 
     #[test]
-    fn a_node_leaves_the_seeds_once_half_its_peers_are_others() {
+    fn a_node_leaves_the_seeds_once_half_its_peers_can_serve_it() {
         let a = |i: u8| SocketAddr::from(([8, i, 1, 1], 18442));
         let mut book = AddressBook::default();
         let seeds = [a(1), a(2)];
@@ -1424,26 +1453,54 @@ mod tests {
         for i in 4..=8 {
             book.learn(a(i), Source::Peer);
         }
-        let connected = |addresses: &[SocketAddr]| -> BTreeMap<String, Value> {
-            addresses
+        let connected = |heights: &[(SocketAddr, u64)]| -> BTreeMap<String, Value> {
+            heights
                 .iter()
-                .map(|a| (a.to_string(), json!({"address":a,"connected":1})))
+                .map(|(a, height)| (a.to_string(), json!({"connected":1,"height":height})))
                 .collect()
         };
-        // The seeds and three others connected, a configured one among them,
-        // and two more still connecting: the seeds stay.
         let linked: Vec<SocketAddr> = (1..=7).map(a).collect();
-        let peers = connected(&[a(1), a(2), a(3), a(4), a(5)]);
-        assert!(!past_seeds(linked.clone(), &book, &peers, 8));
-        // A fourth connected, half of eight: the seeds go.
-        let peers = connected(&[a(1), a(2), a(3), a(4), a(5), a(6)]);
-        assert!(past_seeds(linked.clone(), &book, &peers, 8));
+        // The seeds at 500, a configured peer and another as high, two more
+        // still at genesis, and one still connecting: the seeds stay.
+        let mut peers = connected(&[
+            (a(1), 500),
+            (a(2), 500),
+            (a(3), 500),
+            (a(4), 500),
+            (a(5), 0),
+            (a(6), 0),
+        ]);
+        assert!(!without_seeds(false, linked.clone(), &book, &peers, 8));
+        // Once two more catch up, half of eight can serve the node.
+        peers.extend(connected(&[(a(5), 500), (a(6), 500)]));
+        assert!(without_seeds(false, linked.clone(), &book, &peers, 8));
         // A peer that failed is not connected, whatever its status says.
         let mut failed = peers.clone();
-        failed.insert(a(6).to_string(), json!({"connected":null,"error":"gone"}));
-        assert!(!past_seeds(linked.clone(), &book, &failed, 8));
+        failed.insert(a(6).to_string(), json!({"connected":null,"height":500}));
+        assert!(!without_seeds(false, linked.clone(), &book, &failed, 8));
+        // Peers only as high as each other, before any seed has answered, do
+        // not keep a node from the seeds: they may all be behind.
+        let cluster = connected(&[(a(3), 0), (a(4), 0), (a(5), 0), (a(6), 0)]);
+        assert!(!without_seeds(false, linked.clone(), &book, &cluster, 8));
+        // Gone, a node comes back to the seeds only once fewer than a quarter
+        // of its peers are connected, and with fewer than four, none.
+        let few = connected(&[(a(3), 500), (a(4), 0)]);
+        assert!(without_seeds(true, linked.clone(), &book, &few, 8));
+        let one = connected(&[(a(1), 500), (a(4), 0)]);
+        assert!(!without_seeds(true, linked.clone(), &book, &one, 8));
+        assert!(without_seeds(true, linked.clone(), &book, &one, 3));
+        assert!(!without_seeds(true, seeds, &book, &peers, 3));
         // A node that reaches only the seeds keeps them, however few it wants.
-        assert!(!past_seeds(seeds, &book, &peers, 1));
-        assert!(past_seeds([a(1), a(4)], &book, &peers, 1));
+        assert!(!without_seeds(false, seeds, &book, &peers, 1));
+        assert!(without_seeds(false, [a(1), a(4)], &book, &peers, 1));
+        // The seeds take none of its slots: of these links, only the
+        // discovered peer that is not a seed takes one.
+        let links = [
+            (a(1), "discovered"),
+            (a(2), "discovered"),
+            (a(3), "config"),
+            (a(4), "discovered"),
+        ];
+        assert_eq!(slotted(links, &book), [a(4)]);
     }
 }

@@ -328,12 +328,18 @@ like any other.
 
 **Leaving the seeds.** A seed node is where a node starts, not a peer it keeps: were
 every node to stay connected to the seeds, they would fill up as the network grows,
-and a new node, which knows no other address, could not join. Once at least half of
-`max_peers` of a node's connections, configured or discovered, are to other peers
-and connected, its connections to the seed nodes end, and it picks a seed again
-only when no other address is left to try. A node that reaches only the seeds keeps
-them. A configured seed is a configured peer like any other, and an address a peer
-shared is marked as a seed's when the seed's name resolves to it.
+and a new node, which knows no other address, could not join. A connection to a
+seed takes none of the `max_peers` slots, so a node starts other peers beside the
+seeds however few slots it has. Once a seed has answered and at least half of
+`max_peers` of the node's other connections, configured or discovered, are as high
+as any connection reports, the seeds' included, its connections to the seed nodes
+end: a peer still behind, as another new node is, cannot serve it yet. The node
+then picks a seed again only once fewer than a quarter of `max_peers` other peers
+are connected, or none, so that a peer that drops for a while does not bring the
+seeds back. A node that reaches only the seeds keeps them. A configured seed is a
+configured peer like any other, and an address a peer shared is marked as a seed's
+when the seed's name resolves to it. A seed's address is never dropped from a full
+book.
 
 **Probing.** When every slot is taken, the node tests one untried address every two
 minutes with a connection that only exchanges `hello`, never a seed's. An address
@@ -370,13 +376,13 @@ network it costs one extra connection.
 ## Limits
 
 - At most 32 configured peers, and connections to up to `max_peers` peers (1 to 64,
-  default 8; one more while the tip is stale)
+  default 8; one more while the tip is stale), the seed nodes aside
 - Connections from up to `max_inbound` peers (1 to 1,024, default 125, read at
   start), at most 8 from one address range. A full node still takes a new
   connection, in place of the one least worth keeping: the peers that delivered new
-  blocks and transactions latest, and the longest connected, keep theirs. An
-  operator raises `max_inbound` for a seed node, and the process's open-file limit
-  with it
+  blocks latest, the longest connected, the connections of the node's own machine
+  and those less than ten seconds old keep theirs. An operator raises
+  `max_inbound` for a seed node, and the process's open-file limit with it
 - An address book of at most 1,024 addresses
 
 The transport's own limits, on connections, requests and frames, are on

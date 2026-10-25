@@ -374,13 +374,15 @@ impl AddressBook {
         self.dirty = true;
         true
     }
-    /// Drops the least useful address: never a configured one, an unproven
-    /// one before a proven one, the most failed and longest unproven first.
+    /// Drops the least useful address: never a configured one or a seed's, an
+    /// unproven one before a proven one, the most failed and longest unproven
+    /// first. A seed's is proven no more once the node leaves it, and is
+    /// looked up only at start.
     fn evict(&mut self) -> bool {
         let worst = self
             .entries
             .values()
-            .filter(|e| e.source != Source::Config)
+            .filter(|e| !matches!(e.source, Source::Config | Source::Seed))
             .min_by_key(|e| {
                 (
                     e.verified.is_some(),
@@ -661,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_book_evicts_unproven_addresses_never_configured_ones() {
+    fn a_full_book_evicts_unproven_addresses_never_configured_ones_or_seeds() {
         let mut book = AddressBook::default();
         book.configure(&[a("8.0.0.1:1")]);
         let proven = a("8.0.0.2:1");
@@ -674,6 +676,19 @@ mod tests {
         assert!(book.get(&a("8.0.0.1:1")).is_some() && book.get(&proven).is_some());
         book.configure(&[]);
         assert!(book.get(&a("8.0.0.1:1")).is_none());
+        // A seed's address stays, however long ago it was proven, while
+        // addresses proven since take each other's places.
+        let mut book = AddressBook::default();
+        let seed = a("8.0.0.3:1");
+        book.learn_seed(seed);
+        book.succeeded(seed, 1);
+        for i in 0..2000 {
+            let address = a(&format!("9.{}.{}.1:1", i / 256, i % 256));
+            book.learn(address, Source::Peer);
+            book.succeeded(address, 100);
+        }
+        assert_eq!(book.len(), BOOK_MAX);
+        assert!(book.is_seed(&seed));
     }
 
     #[test]

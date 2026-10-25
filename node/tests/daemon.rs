@@ -1142,6 +1142,14 @@ async fn a_full_node_takes_a_newcomer_in_place_of_its_newest_connection() {
         let answer = transport::ask(&mut open[k], wire::Request::State).await;
         assert!(matches!(answer, Ok(wire::Answer::State(_))), "{answer:?}");
     }
+    // A connection that gives way before its hello closes at once, not when
+    // its hello's deadline passes, so that the sockets of connections given
+    // way do not pile up.
+    let mut silent = TcpStream::connect(n.info.p2p).await.unwrap();
+    let (_newest, answer) = greet(n.info.p2p, hello(chain_id)).await;
+    assert!(matches!(answer, Ok(wire::Answer::State(_))), "{answer:?}");
+    let closed = tokio::time::timeout(Duration::from_secs(2), silent.read(&mut byte)).await;
+    assert!(matches!(closed, Ok(Ok(0)) | Ok(Err(_))), "{closed:?}");
     n.stop().await;
 }
 
