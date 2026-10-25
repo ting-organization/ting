@@ -104,7 +104,8 @@ peers](#finding-more-peers)).
 
 **Failures.** A connection whose request fails, or gets no reply within 30 seconds,
 ends. The blocks it was asked for go back to the other connections, and `ting peers`
-shows each peer's last success, or its last attempt and error. A configured peer is
+shows each peer's last success, or its last attempt and error; the node's log says
+why the connection ended ([what the node writes](../start/node.md#what-the-node-writes)). A configured peer is
 connected again a minute after the failed attempt; a discovered one waits a minute,
 doubling with each further failure up to an hour, and is replaced meanwhile.
 
@@ -320,7 +321,10 @@ ones in random order, and the seed nodes after every other. Among public address
 it keeps at most one discovered peer per network group (an IPv4 /16, an IPv6 /32),
 so a single operator's address range cannot take every slot. A discovered peer
 whose connection fails is replaced, and its address is not tried again for a
-minute, doubling with each further failure up to an hour.
+minute, doubling with each further failure up to an hour. A delivered block counts
+as a completed round, so a long first download that fails partway still proves the
+peer; a `hello` alone does not, and a peer that answers it and then fails backs off
+like any other.
 
 **Leaving the seeds.** A seed node is where a node starts, not a peer it keeps: were
 every node to stay connected to the seeds, they would fill up as the network grows,

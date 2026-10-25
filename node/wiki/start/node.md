@@ -41,7 +41,10 @@ The node needs no peer address. It looks up the network's seed nodes at every st
 and finds further peers through them
 ([finding more peers](../node/sync.md#finding-more-peers)), then downloads and
 validates every block from genesis. `ting status` shows the height it has reached,
-and `ting peers` the peers it is connected to.
+and `ting peers` the peers it is connected to. Its log, `node.log` in the data
+directory, follows the download as it goes: the peers it connects to, its progress
+every ten seconds and the moment it catches up
+([what the node writes](#what-the-node-writes)).
 
 ## Reachability
 
@@ -93,10 +96,11 @@ in [Mining and voting](../node/mining.md).
 
 ## Command reference
 
-Every command accepts `--data-dir DIRECTORY`. Every command except `ting run` prints
-its result as JSON; `ting run` prints `Ting ready:` and its listener addresses once
-the node listens, and then any messages the node writes. A command that fails prints
-`ting: ` and the error to standard error.
+Every command accepts `--data-dir DIRECTORY` and `--json`. Every command except
+`ting run` prints its result as text for a person to read; with `--json` it prints
+the result itself as JSON instead, the form scripts and mining software read, with
+every field. `ting run` writes the node's log ([what the node writes](#what-the-node-writes)).
+A command that fails prints `ting: ` and the error to standard error.
 
 | Command | What it does |
 |---|---|
@@ -125,6 +129,47 @@ stopped; the CLI then edits `config.json` itself. Details are on
 [The reference node](../node.md), [Mining and voting](../node/mining.md) and
 [Access and exposure](../node/security.md).
 
+## What the node writes
+
+`ting run` writes the node's log to the terminal, and a node started with
+`ting start` appends it to `node.log` in the data directory, where
+`tail -f ~/.ting/node.log` follows it. Each line begins with the time in UTC. A
+new node on the production network writes, for example:
+
+```text
+2026-10-25T13:10:12Z Ting ready: control=127.0.0.1:18440 peers=0.0.0.0:18442 REST=disabled
+2026-10-25T13:10:12Z production chain at height 325, tip 00000000e04237d2…
+2026-10-25T13:10:12Z seed node node1.ting-node.com:18442: 1 address
+2026-10-25T13:10:14Z connected to 203.0.113.4:18442: ting-node/0.1.0, at height 5427
+2026-10-25T13:10:15Z downloading blocks from height 326, best header so far 2325
+2026-10-25T13:10:25Z height 1687 of 5427 (31%), 136 blocks/s, about 27s left
+2026-10-25T13:10:35Z height 4252 of 5427 (78%), 196 blocks/s, about 5s left
+2026-10-25T13:10:40Z caught up at height 5427, tip 00000000c64a9a39…: 5102 blocks in 24s
+2026-10-25T13:10:40Z block 5428 00000002251ebfe8…
+```
+
+The log shows the full block ids. It holds:
+
+- `Ting ready:` and the listener addresses once the node listens, then where the
+  chain stands: its network, height and tip. On the production network, each seed
+  node and the addresses it resolved to.
+- Each connection to a peer as it opens, with the peer's software and height, and
+  as it ends, with the reason. A configured peer that cannot be reached is written
+  once for each new reason; discovered addresses are tried quietly, as many never
+  answer.
+- While the node is more than two blocks below its best header, it is downloading:
+  a line every ten seconds with the height, the share done, the speed and the time
+  left, and a line when it catches up. Its best header can rise during the download
+  as further headers arrive.
+- Once caught up, each new tip.
+- With no peer connected either way for 30 seconds, a line saying where the node is
+  looking, and another every ten minutes for as long as none is: the seed nodes and
+  known addresses on the production network, known addresses on another, and only
+  the configured peers with discovery off. A node with nowhere to look, such as a
+  development chain of its own, writes none.
+- Invalid blocks and the peers banned for them, reorganizations, and anything that
+  stops the chain.
+
 ## The data directory
 
 | File | Purpose |
@@ -137,7 +182,7 @@ stopped; the CLI then edits `config.json` itself. Details are on
 | `deferred.json` | Transactions held until their time |
 | `peers.json` | Addresses of other nodes, learned from seed nodes and peers |
 | `runtime.json` | Actual listener addresses and process ID while the node runs |
-| `node.log` | Output of a background node |
+| `node.log` | The log of a background node ([what the node writes](#what-the-node-writes)) |
 | `node.lock` | Locked by the running node |
 
 The operating-system lock on `node.lock` stops two nodes from using the same

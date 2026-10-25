@@ -234,6 +234,13 @@ impl AddressBook {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+    /// The configured peers the book holds.
+    pub fn configured(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|e| e.source == Source::Config)
+            .count()
+    }
     pub fn get(&self, address: &SocketAddr) -> Option<&Entry> {
         self.entries.get(address)
     }

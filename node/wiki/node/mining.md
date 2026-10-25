@@ -20,7 +20,8 @@ integer, at or below the header's target; see
 [Proof of work](../consensus/proof-of-work.md). The nonce is the header's last field:
 16 bytes, little-endian, at offset 278 of the 294-byte header.
 
-`ting template` asks for a template. The answer holds:
+`ting template` asks for a template, and `ting template --json` prints it whole, as
+mining software reads it. The answer holds:
 
 | Field | Content |
 |---|---|
@@ -155,7 +156,8 @@ A running node takes them at once, from its next template on, and keeps them in 
 decrease. A stopped node's file is edited in place. They hold until changed.
 
 `ting votes` shows where voting stands at the tip, as `GET /v1/votes` does over REST
-([the REST API](../start/explore.md#the-rest-api)):
+([the REST API](../start/explore.md#the-rest-api)). `ting votes --json` prints these
+fields:
 
 | Field | Content |
 |---|---|

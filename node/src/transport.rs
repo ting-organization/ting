@@ -8,7 +8,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::{IpAddr, SocketAddr},
     sync::{
         Arc, Mutex,
@@ -34,6 +34,10 @@ pub type PeerStats = Arc<Mutex<BTreeMap<String, Value>>>;
 pub struct Inbound {
     next: u64,
     open: BTreeMap<u64, Slot>,
+    /// The open connections whose peer follows this node: its hello asked to
+    /// be told of changes, as a node's own connections do and a probe's does
+    /// not.
+    following: BTreeSet<u64>,
     /// Most connections at once.
     max: usize,
     /// New blocks and transactions delivered so far, by which the latest
@@ -69,6 +73,7 @@ impl Inbound {
         Self {
             next: 0,
             open: BTreeMap::new(),
+            following: BTreeSet::new(),
             max,
             deliveries: 0,
         }
@@ -165,6 +170,19 @@ impl Inbound {
             }
         }
     }
+    /// Marks the connection `key` as a peer that follows this node.
+    pub fn follows(&mut self, key: u64) {
+        if self.open.contains_key(&key) {
+            self.following.insert(key);
+        }
+    }
+    /// The inbound peers following this node.
+    pub fn peers(&self) -> usize {
+        self.following
+            .iter()
+            .filter(|key| self.open.contains_key(key))
+            .count()
+    }
     /// Ends every connection from an address `banned` covers.
     pub fn end(&mut self, banned: impl Fn(IpAddr) -> bool) {
         let ending: Vec<u64> = self
@@ -184,7 +202,9 @@ impl Inbound {
 struct Registered<'a>(&'a Mutex<Inbound>, u64);
 impl Drop for Registered<'_> {
     fn drop(&mut self) {
-        self.0.lock().unwrap().open.remove(&self.1);
+        let mut inbound = self.0.lock().unwrap();
+        inbound.open.remove(&self.1);
+        inbound.following.remove(&self.1);
     }
 }
 /// The time a frame may take once it has started.
@@ -707,6 +727,9 @@ async fn serve(
     if hello.nonce == node.nonce {
         let _ = write_wire(&mut stream, &wire::Frame::Error(ITSELF.into())).await;
         return;
+    }
+    if hello.announce {
+        node.inbound.lock().unwrap().follows(key);
     }
     // The listening port a peer announces, at the address it connected from,
     // is a candidate for others to connect to.

@@ -583,7 +583,7 @@ impl Chain {
             .leave_invalid(false)
             .and_then(|()| chain.activate(false))
         {
-            eprintln!("the best stored branch is not connected: {error}");
+            crate::log!("the best stored branch is not connected: {error}");
         }
         // What is below the held heights settles, all of it at the first
         // start of a node that held every block, and old side branches go.
@@ -641,7 +641,7 @@ impl Chain {
                 let child = stored.header.id();
                 match self.index_stored(stored) {
                     Ok(()) => stack.push(child),
-                    Err(error) => eprintln!("stored block {} not indexed: {error}", hex(&child)),
+                    Err(error) => crate::log!("stored block {} not indexed: {error}", hex(&child)),
                 }
             }
         }
@@ -668,7 +668,7 @@ impl Chain {
         }
         match self.fork_warning() {
             Some(warning) if !self.warned => {
-                eprintln!("warning: {warning}");
+                crate::log!("warning: {warning}");
                 self.warned = true;
             }
             Some(_) => {}
@@ -706,14 +706,7 @@ impl Chain {
     /// Which network the node is on, by its genesis: the production network,
     /// a development chain, or another.
     fn network(&self) -> &'static str {
-        let id = self.genesis.chain_id();
-        if crate::config::production_genesis().is_some_and(|g| g.chain_id() == id) {
-            "production"
-        } else if crate::config::development_genesis().chain_id() == id {
-            "development"
-        } else {
-            "other"
-        }
+        crate::config::network(&self.genesis)
     }
     pub fn tip(&self) -> Hash {
         self.canonical
@@ -977,7 +970,7 @@ impl Chain {
     /// A failure the node cannot continue past: reported, remembered as the
     /// answer to every further request, and the node stops.
     fn fail(&mut self, error: String) -> String {
-        eprintln!("chain stopped: {error}");
+        crate::log!("chain stopped: {error}");
         self.failed = Some(error.clone());
         self.shutdown.store(true, Ordering::Relaxed);
         error
@@ -1468,12 +1461,12 @@ impl Chain {
     /// Takes the next steps toward the best branch, for at most the step time.
     pub fn resume_activation(&mut self) {
         if let Err(error) = self.poll_recovery() {
-            eprintln!("rebuilding undo data: {error}");
+            crate::log!("rebuilding undo data: {error}");
         }
         if let Some(requeue) = self.activating
             && let Err(error) = self.activate(requeue)
         {
-            eprintln!("the best stored branch is not connected: {error}");
+            crate::log!("the best stored branch is not connected: {error}");
             self.activating = None;
         }
     }
@@ -1489,7 +1482,7 @@ impl Chain {
         }
         let replaced = from - lowest;
         let deep = replaced >= DEEP_REORG;
-        eprintln!(
+        crate::log!(
             "{}reorganization: {replaced} blocks above height {lowest} replaced; tip {} at height {}",
             if deep { "warning: deep " } else { "" },
             hex(&self.tip()),
@@ -1713,7 +1706,7 @@ impl Chain {
     /// A stored block whose body cannot be read is forgotten, its header kept,
     /// so that it is fetched again; the best branch that is left is connected.
     fn forget_body(&mut self, id: Hash, error: &str) -> Result<()> {
-        eprintln!(
+        crate::log!(
             "block {} cannot be read and is fetched again: {error}",
             hex(&id)
         );
@@ -1746,7 +1739,7 @@ impl Chain {
         let dir = self.directory.join("replay");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        eprintln!(
+        crate::log!(
             "a branch forks at height {down_to}, below the undo window: replaying {upto} blocks from genesis to rebuild their undo data"
         );
         let (data, replay_dir, genesis, shutdown, cache) = (
@@ -1799,7 +1792,7 @@ impl Chain {
             match opened {
                 Ok(store) => recovery.replayed = Some(store),
                 Err(error) => {
-                    eprintln!("rebuilding undo data failed: {error}");
+                    crate::log!("rebuilding undo data failed: {error}");
                     let dir = recovery.dir.clone();
                     self.recovery = None;
                     let _ = std::fs::remove_dir_all(dir);
@@ -1831,7 +1824,7 @@ impl Chain {
             self.recovery = None;
             let _ = std::fs::remove_dir_all(dir);
             self.pruned = down_to;
-            eprintln!("undo data rebuilt above height {down_to}; the reorganization goes on");
+            crate::log!("undo data rebuilt above height {down_to}; the reorganization goes on");
             self.leave_invalid(true)?;
             self.activating = Some(true);
         }
@@ -1841,7 +1834,7 @@ impl Chain {
     /// above it are never connected; at a restart, what is above it follows
     /// from it.
     fn invalidate(&mut self, id: Hash, reason: &str) -> Result<()> {
-        eprintln!("block {} is invalid: {reason}", hex(&id));
+        crate::log!("block {} is invalid: {reason}", hex(&id));
         let invalid = self.index.set_invalid(&id);
         let tx = self.store.begin()?;
         let entry = self.entry(&id);
@@ -1884,7 +1877,7 @@ impl Chain {
         self.hold(&id)?;
         self.index.set_invalid(&id);
         self.sync_best();
-        eprintln!("block {} marked invalid by the operator", hex(&id));
+        crate::log!("block {} marked invalid by the operator", hex(&id));
         self.leave_invalid(true)?;
         self.activate(true)?;
         Ok(json!({"id":hex(&id),"known":known,"tip":hex(&self.tip()),"height":self.height()}))
@@ -1937,7 +1930,7 @@ impl Chain {
         self.failed_work = BigUint::default();
         self.warned = false;
         self.sync_best();
-        eprintln!(
+        crate::log!(
             "block {} reconsidered by the operator: {} blocks no longer invalid",
             hex(&id),
             cleared.len()
@@ -2454,7 +2447,7 @@ impl Chain {
             parsed => {
                 let aside = path.with_extension("json.corrupt");
                 let reason = parsed.map_or_else(|e| e.to_string(), |_| "no items".into());
-                eprintln!(
+                crate::log!(
                     "invalid deferred set ({reason}); moved to {} and started empty",
                     aside.display()
                 );
@@ -2486,7 +2479,7 @@ impl Chain {
             let (tx, bytes, not_before, expires) = match loaded {
                 Ok(loaded) => loaded,
                 Err(error) => {
-                    eprintln!("deferred transaction dropped: {error}");
+                    crate::log!("deferred transaction dropped: {error}");
                     continue;
                 }
             };
@@ -3194,7 +3187,7 @@ impl Drop for Chain {
     /// A deferred set not yet written is written on the way out.
     fn drop(&mut self) {
         if let Err(error) = self.flush_deferred(true) {
-            eprintln!("deferred set not saved: {error}");
+            crate::log!("deferred set not saved: {error}");
         }
     }
 }
@@ -3362,7 +3355,7 @@ impl Handle {
                 if ticked.elapsed() >= TICK {
                     ticked = std::time::Instant::now();
                     if let Err(error) = chain.tick() {
-                        eprintln!("deferred transactions: {error}");
+                        crate::log!("deferred transactions: {error}");
                     }
                     status_tx.send_replace(published(&mut chain));
                 }
