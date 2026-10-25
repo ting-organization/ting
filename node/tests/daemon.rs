@@ -96,6 +96,159 @@ fn fake_peer(
         }
     });
 }
+/// The transactions a fake peer pools, by id: their bytes, or none for one it
+/// only lists.
+type Pool = std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<Hash, Option<Vec<u8>>>>>;
+/// The requests a fake peer was sent, in order.
+type Asked = std::sync::Arc<std::sync::Mutex<Vec<wire::Request>>>;
+/// Serves a fake peer at `state` that pools `pool`, pages its inventory and
+/// answers with a slice's worth of transactions whole as a node does, takes
+/// none of the transactions it is sent, and after each exchange announces
+/// that its pool changed, so that the node exchanges again at once.
+fn pool_peer(listener: tokio::net::TcpListener, state: wire::State, pool: Pool, asked: Asked) {
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let (state, pool, asked) = (state.clone(), pool.clone(), asked.clone());
+            tokio::spawn(async move {
+                let mut changes = 0;
+                while let Ok(wire::Frame::Request(request)) =
+                    transport::read_wire(&mut stream, None, ting_node::FRAME_MAX).await
+                {
+                    asked.lock().unwrap().push(request.clone());
+                    let answer = match &request {
+                        wire::Request::Hello(_) | wire::Request::State => {
+                            Ok(wire::Answer::State(state.clone()))
+                        }
+                        wire::Request::Inventory {
+                            deferred: false,
+                            after,
+                        } => {
+                            let pool = pool.lock().unwrap();
+                            let mut ids: Vec<Hash> = pool
+                                .keys()
+                                .filter(|id| after.is_none_or(|after| **id > after))
+                                .take(1025)
+                                .copied()
+                                .collect();
+                            let next = (ids.len() > 1024).then(|| ids[1023]);
+                            ids.truncate(1024);
+                            Ok(wire::Answer::Inventory { ids, next })
+                        }
+                        wire::Request::Inventory { deferred: true, .. } => {
+                            Ok(wire::Answer::Inventory {
+                                ids: vec![],
+                                next: None,
+                            })
+                        }
+                        wire::Request::Pending { ids } => {
+                            let pool = pool.lock().unwrap();
+                            let mut whole = 0;
+                            Ok(wire::Answer::Items(
+                                ids.iter()
+                                    .filter_map(|id| {
+                                        let bytes = pool.get(id)?.clone()?;
+                                        whole += bytes.len();
+                                        let body = if whole <= ting_node::chain::SLICE_MAX {
+                                            wire::Body::Whole(bytes)
+                                        } else {
+                                            wire::Body::Total(bytes.len() as u64)
+                                        };
+                                        Some(wire::Item {
+                                            id: *id,
+                                            not_before: None,
+                                            body,
+                                        })
+                                    })
+                                    .collect(),
+                            ))
+                        }
+                        wire::Request::TransactionRaw { id, offset, length } => {
+                            let pool = pool.lock().unwrap();
+                            match pool.get(id).cloned().flatten() {
+                                Some(bytes) => {
+                                    let from = (*offset as usize).min(bytes.len());
+                                    let to = (from + *length as usize).min(bytes.len());
+                                    Ok(wire::Answer::Slice {
+                                        offset: *offset,
+                                        total: bytes.len() as u64,
+                                        bytes: bytes[from..to].to_vec(),
+                                    })
+                                }
+                                None => Err("transaction not found".to_string()),
+                            }
+                        }
+                        wire::Request::Submit { .. } => Err("mempool is full".to_string()),
+                        wire::Request::Headers { .. } => Ok(wire::Answer::Headers(vec![])),
+                        wire::Request::Addresses => Ok(wire::Answer::Addresses(vec![])),
+                        _ => Err("not served".to_string()),
+                    };
+                    let mut frames = vec![match answer {
+                        Ok(answer) => wire::Frame::Answer(answer),
+                        Err(error) => wire::Frame::Error(error),
+                    }];
+                    // The deferred inventory ends an exchange.
+                    if matches!(request, wire::Request::Inventory { deferred: true, .. }) {
+                        changes += 1;
+                        frames.push(wire::Frame::Announcement(wire::Announcement {
+                            tip: state.tip,
+                            height: state.height,
+                            work: state.work.clone(),
+                            pending: changes,
+                            deferred: 0,
+                        }));
+                    }
+                    for frame in frames {
+                        if transport::write_wire(&mut stream, &frame).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    });
+}
+/// What a fake peer was asked so far: the exchanges begun, the transactions
+/// sent to it, and the ids of those asked of it.
+fn exchanges(asked: &Asked) -> (usize, usize, usize) {
+    let asked = asked.lock().unwrap();
+    let begun = asked
+        .iter()
+        .filter(|r| {
+            matches!(
+                r,
+                wire::Request::Inventory {
+                    deferred: false,
+                    ..
+                }
+            )
+        })
+        .count();
+    let sent = asked
+        .iter()
+        .filter(|r| matches!(r, wire::Request::Submit { .. }))
+        .count();
+    let fetched = asked
+        .iter()
+        .map(|r| match r {
+            wire::Request::Pending { ids } => ids.len(),
+            _ => 0,
+        })
+        .sum();
+    (begun, sent, fetched)
+}
+/// Waits until a fake peer has seen `rounds` exchanges begin.
+async fn wait_exchanges(n: &Node, asked: &Asked, rounds: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while exchanges(asked).0 < rounds {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{:?} {}",
+            exchanges(asked),
+            n.call("peers", json!({})).await
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
 /// A node's ChainId, as its status gives it.
 async fn chain_id_of(n: &Node) -> Hash {
     ting_node::hash_arg(
@@ -265,6 +418,23 @@ impl Node {
             };
             config::initialize_empty(&dir.0, &c, config::development_genesis()).unwrap();
         }
+        command(&dir.0, &["start"]);
+        let info = Running::load(&dir.0).unwrap();
+        Self { dir, info }
+    }
+    /// A node on the test genesis, with its configuration changed by
+    /// `configure` before it starts, such as its pool's size.
+    fn start_configured(name: &str, configure: impl FnOnce(&mut config::Config)) -> Self {
+        let dir = Directory::new();
+        let mut c = config::Config {
+            name: name.into(),
+            control: "127.0.0.1:0".parse().unwrap(),
+            p2p: "127.0.0.1:0".parse().unwrap(),
+            api: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        };
+        configure(&mut c);
+        config::initialize_with(&dir.0, &c, support::test_genesis()).unwrap();
         command(&dir.0, &["start"]);
         let info = Running::load(&dir.0).unwrap();
         Self { dir, info }
@@ -1973,4 +2143,214 @@ async fn a_node_syncs_the_seed_from_a_peer_restarts_and_carries_on() {
     );
     a.stop().await;
     b.stop().await;
+}
+
+/// A transaction of the test chain, one for each `input`.
+fn pooled(input: u8) -> ting_core::protocol::Transaction {
+    let mut tx = support::tx();
+    if let ting_core::protocol::Payload::Deploy { input: bytes, .. } = &mut tx.payload {
+        *bytes = vec![input];
+    }
+    tx
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_transaction_travels_once_a_connection_however_full_the_pools() {
+    // Two full pools that stay apart: the node's own transactions, which never
+    // give way, fill its pool of two, and the peer takes none of those it is
+    // sent. Exchange after exchange, the node sends each of its own once and
+    // fetches each of the peer's once, until the peer holds another.
+    let n = Node::start_configured("full pool", |c| c.mempool_transactions = 2);
+    let g = config::genesis(&n.dir.0).unwrap();
+    let chain_id = g.chain_id();
+    for input in 0..2 {
+        n.call("submit", json!({"hex":hex(&pooled(input).encode())}))
+            .await;
+    }
+    let held = |input: u8| (pooled(input).id(chain_id), Some(pooled(input).encode()));
+    let (pool, asked): (Pool, Asked) = Default::default();
+    pool.lock().unwrap().extend([held(10), held(11)]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    pool_peer(
+        listener,
+        fake_state(chain_id, g.block_id(), 0xcc),
+        pool.clone(),
+        asked.clone(),
+    );
+    command(&n.dir.0, &["add", "node", &address.to_string()]);
+    wait_exchanges(&n, &asked, 5).await;
+    let (_, sent, fetched) = exchanges(&asked);
+    assert_eq!((sent, fetched), (2, 2));
+    // One the peer pools later is fetched in turn, and only that one.
+    pool.lock().unwrap().extend([held(12)]);
+    wait_exchanges(&n, &asked, exchanges(&asked).0 + 3).await;
+    let (_, sent, fetched) = exchanges(&asked);
+    assert_eq!((sent, fetched), (2, 3));
+    let status = n.call("status", json!({})).await;
+    assert_eq!(status["mempool_count"], 2);
+    let peers = n.call("peers", json!({})).await;
+    assert!(peers["items"][0]["error"].is_null(), "{peers}");
+    n.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_pooling_more_than_the_node_can_hold_keeps_its_connection() {
+    // The peer lists 1,500 transactions, more than the node's pool of two can
+    // hold, as a peer configured with a larger pool may: the node reads one
+    // page of its inventory, fetches what that lists once, and stays connected.
+    // Its own two lie past the page's last id, where it cannot tell whether the
+    // peer holds them, so it does not send them.
+    let n = Node::start_configured("small pool", |c| c.mempool_transactions = 2);
+    let g = config::genesis(&n.dir.0).unwrap();
+    for input in 0..2 {
+        n.call("submit", json!({"hex":hex(&pooled(input).encode())}))
+            .await;
+    }
+    let id = |i: u16| {
+        let mut id = [0; 32];
+        id[30..].copy_from_slice(&i.to_be_bytes());
+        id
+    };
+    let (pool, asked): (Pool, Asked) = Default::default();
+    pool.lock()
+        .unwrap()
+        .extend((1000..2500).map(|i| (id(i), None)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    pool_peer(
+        listener,
+        fake_state(g.chain_id(), g.block_id(), 0xcd),
+        pool.clone(),
+        asked.clone(),
+    );
+    command(&n.dir.0, &["add", "node", &address.to_string()]);
+    wait_exchanges(&n, &asked, 3).await;
+    let (_, sent, fetched) = exchanges(&asked);
+    assert_eq!((sent, fetched), (0, 1024));
+    let paged = asked.lock().unwrap().iter().any(|r| {
+        matches!(
+            r,
+            wire::Request::Inventory {
+                deferred: false,
+                after: Some(_)
+            }
+        )
+    });
+    assert!(!paged, "the node read past what its pool holds");
+    // Ten lower ids push the top of the page past its end, and leave again:
+    // only the ten are fetched, and those the page lists again are not.
+    pool.lock().unwrap().extend((0..10).map(|i| (id(i), None)));
+    wait_exchanges(&n, &asked, exchanges(&asked).0 + 3).await;
+    assert_eq!(exchanges(&asked).2, 1034);
+    pool.lock()
+        .unwrap()
+        .retain(|id, _| u16::from_be_bytes([id[30], id[31]]) >= 1000);
+    wait_exchanges(&n, &asked, exchanges(&asked).0 + 3).await;
+    let (_, sent, fetched) = exchanges(&asked);
+    assert_eq!((sent, fetched), (0, 1034));
+    let peers = n.call("peers", json!({})).await;
+    assert!(peers["items"][0]["error"].is_null(), "{peers}");
+    n.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transactions_refused_for_want_of_room_are_tried_again_once_a_block_makes_room() {
+    // The node's pool of two is full of its own when the peer offers four
+    // transactions of 400 kB, so it takes none. Once a block includes its own,
+    // it fetches the peer's again, but no more bytes than the next block holds,
+    // 1 MiB: three of the four, of which its pool takes two. The rest wait for
+    // the next block.
+    use ting_core::{
+        meter::Resources,
+        protocol::{Payload, Transaction},
+    };
+    let n = Node::start_configured("refused", |c| c.mempool_transactions = 2);
+    let g = config::genesis(&n.dir.0).unwrap();
+    let chain_id = g.chain_id();
+    for input in 0..2 {
+        n.call("submit", json!({"hex":hex(&pooled(input).encode())}))
+            .await;
+    }
+    let (pool, asked): (Pool, Asked) = Default::default();
+    pool.lock().unwrap().extend((1..=4).map(|byte| {
+        let tx = Transaction {
+            budget: Resources([1_000_000, 1, 450_000, 1]),
+            payload: Payload::Call {
+                target: [1; 32],
+                input: vec![byte; 400_000],
+            },
+        };
+        (tx.id(chain_id), Some(tx.encode()))
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    pool_peer(
+        listener,
+        fake_state(chain_id, g.block_id(), 0xcf),
+        pool,
+        asked.clone(),
+    );
+    // Slices asked for, of those listed by size alone.
+    let raw = |asked: &Asked| {
+        let asked = asked.lock().unwrap();
+        asked
+            .iter()
+            .filter(|r| matches!(r, wire::Request::TransactionRaw { .. }))
+            .count()
+    };
+    command(&n.dir.0, &["add", "node", &address.to_string()]);
+    wait_exchanges(&n, &asked, 3).await;
+    // Two came whole within the answer's slice, two by size alone.
+    assert_eq!((exchanges(&asked).2, raw(&asked)), (4, 2));
+    n.call("mine", json!({"count":1})).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while raw(&asked) < 3 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{:?}",
+            exchanges(&asked)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    wait_exchanges(&n, &asked, exchanges(&asked).0 + 3).await;
+    assert_eq!((exchanges(&asked).2, raw(&asked)), (8, 3));
+    let status = n.call("status", json!({})).await;
+    assert_eq!(
+        (status["height"].as_u64(), status["mempool_count"].as_u64()),
+        (Some(1), Some(2))
+    );
+    let peers = n.call("peers", json!({})).await;
+    assert!(peers["items"][0]["error"].is_null(), "{peers}");
+    n.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_inventory_whose_pages_do_not_move_on_ends_the_connection() {
+    // Every page of the peer's inventory lists the same two ids and says more
+    // follow: the node does not ask forever, it ends the connection.
+    let n = Node::start(false, "pages");
+    let g = config::genesis(&n.dir.0).unwrap();
+    let (chain_id, genesis) = (g.chain_id(), g.block_id());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    fake_peer(listener, move |request, _| match request {
+        wire::Request::Hello(_) | wire::Request::State => {
+            Ok(wire::Answer::State(fake_state(chain_id, genesis, 0xce)))
+        }
+        wire::Request::Headers { .. } => Ok(wire::Answer::Headers(vec![])),
+        wire::Request::Inventory { .. } => Ok(wire::Answer::Inventory {
+            ids: vec![[1; 32], [2; 32]],
+            next: Some([2; 32]),
+        }),
+        wire::Request::Addresses => Ok(wire::Answer::Addresses(vec![])),
+        _ => Err("not served".into()),
+    });
+    command(&n.dir.0, &["add", "node", &address.to_string()]);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let peers = n.call("peers", json!({})).await;
+        if peers["items"][0]["error"] == "invalid inventory page" {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{peers}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    n.stop().await;
 }

@@ -120,7 +120,8 @@ length has, and every answer 30 seconds from its request.
   unless its operator marked it or a block below it invalid. Any other block, stored
   or not, is answered with `block not found`.
 - **`inventory`.** Up to 1,024 ids of pooled transactions, deferred ones left out,
-  or with the flag of deferred ones, in id order after `after`.
+  or with the flag of deferred ones, in id order after `after`. When more follow,
+  `next` is the last id listed.
 - **`submit`.** Refused with `transaction already included` when one of the node's
   last 1,440 canonical blocks included the transaction and it succeeded there, or
   one of the last 10 included it at all.
@@ -134,15 +135,15 @@ length has, and every answer 30 seconds from its request.
 | 2 | Slice | `offset` `u64`, `total` `u64`, the item's full length, and bytes of at most 1 MiB |
 | 3 | Received | `u64`: the bytes of a push taken so far |
 | 4 | Taken | `id` of the block or transaction, and `known` flag: the node held it already |
-| 5 | Inventory | A list of at most 1,024 ids, and `next` option of an id: the `after` of the next page, or none at the end |
+| 5 | Inventory | A list of at most 1,024 ids, and `next` option of an id: the last id listed, the `after` of the next page, or none at the end |
 | 6 | Items | A list of at most 32 items: `id`, `not_before` option of a `u64` (set for deferred ones), then `0` and the transaction as bytes, or `1` and its size `total` as a `u64` |
 | 7 | Addresses | A list of at most 32 addresses |
 
 An error answer's text is at most 1,024 bytes, cut at a character boundary.
 
-An Items answer carries transactions whole while each fits a slice and all of them
-together 8 MiB; the others it lists by size alone, to be fetched with
-`transaction_raw`.
+An Items answer carries transactions whole while all of them together fit one
+slice, 1 MiB, so that it arrives within its five seconds wherever a block's slice
+does; the others it lists by size alone, to be fetched with `transaction_raw`.
 
 ### The state
 
@@ -234,6 +235,12 @@ none, once for pooled and once for deferred transactions. Ask for the ones you l
 with `pending` or `deferred`, 32 ids at a time, and fetch any listed by size alone
 with `transaction_raw`. The reference node submits a peer's transactions to its own
 pool as relayed by that peer's address ([the mempool](../node/mining.md#the-mempool)).
+It reads a peer's inventory only until it holds as many ids as its own pool or
+deferred set can, and sends the peer nothing past the last id it read, since it
+cannot tell what the peer holds there. It sends each transaction to a peer, and
+fetches each from it, once a connection, whether or not it was taken; one refused
+with `mempool is full` or `deferred set is full` is tried again once its own tip
+has moved, at most the next block's data capacity of them each way at each tip.
 
 ## Errors
 
@@ -304,8 +311,10 @@ shown by `ting peers`; nothing depends on it.
   block's, within its transfer time
 - 125 inbound connections at once, at most 8 of them from one address range (an IPv4
   address or an IPv6 /64; the node's own machine excepted). With every slot taken, a
-  new connection takes the place of the newest one of the range holding the most, if
-  that range holds at least two more than the newcomer's; otherwise it is closed
+  new connection takes the place of the newest one of the network group holding the
+  most (an IPv4 /16 or an IPv6 /32, a local address its own range), if that group
+  holds at least two more than the newcomer's; otherwise it is closed. Many
+  addresses of one operator's network therefore cannot hold every slot
 - 200 request units a second per inbound connection after a burst of 2,000, and 120
   seconds without a request before it is closed
 - At most 32 addresses in or from one `addresses` answer

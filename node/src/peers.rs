@@ -9,8 +9,9 @@
 use crate::{
     FRAME_MAX, Result,
     chain::{
-        DEFERRED_MAX, Event, HEADERS_PAGE, Handle, INVALID, INVENTORY_PAGE, LOCATOR_MAX, NOT_ASKED,
-        RELAY_PAGE, SLICE_MAX, TOO_LARGE, is_invalid, is_policy, transfer_time,
+        DEFERRED_FULL, DEFERRED_MAX, Event, HEADERS_PAGE, Handle, INVALID, INVENTORY_PAGE,
+        LOCATOR_MAX, NOT_ASKED, POOL_FULL, RELAY_PAGE, SLICE_MAX, TOO_LARGE, is_invalid, is_policy,
+        transfer_time,
     },
     config,
     daemon::Node,
@@ -232,6 +233,11 @@ struct Link {
     /// while it is on this node's branch.
     pushed: Option<Hash>,
     swap: bool,
+    /// The exchange of pooled and of deferred transactions with the peer.
+    relay: [Relay; 2],
+    /// The tip at which transactions refused for want of room were last
+    /// tried again.
+    retried: Option<Hash>,
     asked: u64,
     marked: u64,
     connected: u64,
@@ -254,6 +260,20 @@ struct Download {
 enum Stop {
     Missing,
     Policy,
+}
+/// What one connection remembers of exchanging a pool with its peer: the
+/// transactions sent to it or fetched from it, whatever either side made of
+/// them, and of those, the ones refused for want of room, in the order they
+/// are tried again.
+#[derive(Default)]
+struct Relay {
+    exchanged: BTreeSet<Hash>,
+    refused: VecDeque<Hash>,
+}
+/// Whether a transaction was refused only because the side that was to take
+/// it had no room, which a block may make.
+fn no_room(error: &str) -> bool {
+    error == POOL_FULL || error == DEFERRED_FULL
 }
 /// What a push reads of this node's own: a block, or a pooled or deferred
 /// transaction.
@@ -294,7 +314,7 @@ impl Link {
         }
         if self.swap {
             self.swap = false;
-            self.swap_pool().await?;
+            self.swap_pool(local).await?;
         }
         let interval = if self.looking.load(Ordering::Relaxed) {
             LOOKING.as_secs()
@@ -707,11 +727,19 @@ impl Link {
     /// Pooled and deferred transactions both ways, by inventory: the ids each
     /// side holds are compared, the peer is sent what it lacks, deferred ones
     /// with their times, and what this node lacks is fetched by id and taken as
-    /// relayed by the peer. A transaction either side refuses is passed over.
-    async fn swap_pool(&mut self) -> Result<()> {
+    /// relayed by the peer. Each travels once a connection, whatever either
+    /// side made of it, so that pools which stay apart, as two full ones do,
+    /// cost nothing more until they change. One refused for want of room is
+    /// tried again once this node's tip has moved, since a block makes room:
+    /// as many bytes of them each way as the next block holds, no more than a
+    /// block can have freed.
+    async fn swap_pool(&mut self, local: &Event) -> Result<()> {
         let handle = self.node.handle.clone();
+        let retry = self.retried.replace(local.tip) != Some(local.tip);
+        let mut budget = if retry { [local.data; 2] } else { [0; 2] };
         for deferred in [false, true] {
-            let theirs = self.inventory(deferred).await?;
+            let most = self.set_size(deferred);
+            let (theirs, cut) = self.inventory(deferred).await?;
             let mut ours = BTreeSet::new();
             let mut after = None;
             loop {
@@ -729,99 +757,200 @@ impl Link {
                     break;
                 }
             }
-            let missing: Vec<Hash> = ours.difference(&theirs).copied().collect();
-            for chunk in missing.chunks(RELAY_PAGE) {
-                let ids = chunk.to_vec();
-                let request = if deferred {
-                    Request::Deferred { ids }
-                } else {
-                    Request::Pending { ids }
-                };
-                let Answer::Items(items) = handle.call_wire(request).await? else {
-                    return Err("invalid local items".into());
-                };
-                for item in items {
-                    // One larger than a slice, or than the answer had room
-                    // for, travels in slices.
-                    let _ = match item.body {
-                        Body::Whole(bytes) => {
-                            let part = Part {
-                                offset: 0,
-                                total: bytes.len() as u64,
-                                bytes,
-                            };
-                            self.conn
-                                .request(Request::Submit {
-                                    part,
-                                    not_before: item.not_before,
-                                })
-                                .await
-                        }
-                        Body::Total(_) => {
-                            self.push(Own::Transaction, item.id, item.not_before).await
-                        }
-                    };
-                }
+            // A listing cut short tells nothing of the ids past its end.
+            let listed = |id: &Hash| cut.is_none_or(|cut| *id <= cut);
+            let Relay { exchanged, refused } = &mut self.relay[usize::from(deferred)];
+            // What neither side lists any longer is forgotten, and past the
+            // end of a cut listing only what goes beyond twice what a listing
+            // holds, the highest first; the rest is not sent or fetched again.
+            exchanged.retain(|id| ours.contains(id) || theirs.contains(id) || !listed(id));
+            while exchanged.len() > 2 * (most + INVENTORY_PAGE)
+                && let Some(&highest) = exchanged.last()
+                && !listed(&highest)
+            {
+                exchanged.remove(&highest);
             }
-            let wanted: Vec<Hash> = theirs.difference(&ours).copied().collect();
-            for chunk in wanted.chunks(RELAY_PAGE) {
-                let ids = chunk.to_vec();
-                let request = if deferred {
-                    Request::Deferred { ids }
-                } else {
-                    Request::Pending { ids }
-                };
-                let items = match self.conn.request(request).await? {
-                    Answer::Items(items) => items,
-                    _ => return Err(unexpected("pending")),
-                };
-                if items.len() > chunk.len() {
-                    return Err("relayed items beyond those asked for".into());
-                }
-                for item in items {
-                    if deferred != item.not_before.is_some() {
-                        return Err("invalid relayed item".into());
-                    }
-                    let mut submit =
-                        json!({"relayed":true,"peer":self.peer,"not_before":item.not_before});
-                    // One listed by its size alone is fetched in slices, and
-                    // must be the transaction asked for.
-                    let bytes = match item.body {
-                        Body::Whole(bytes) => bytes,
-                        Body::Total(total) => match self.fetch_transaction(&item.id, total).await {
-                            Ok(bytes) => {
-                                submit["id"] = json!(hex(&item.id));
-                                bytes
-                            }
-                            Err(e) if e == "transaction not found" || e == TOO_LARGE => {
-                                continue;
-                            }
-                            Err(e) => return Err(e),
-                        },
-                    };
-                    // A peer that sent another transaction than the one it
-                    // listed is not asked again on this connection.
-                    if let Err(e) = handle.call_bytes("submit", submit, Some(bytes)).await
-                        && e == NOT_ASKED
-                    {
-                        return Err(e);
+            refused.retain(|id| exchanged.contains(id));
+            let missing: Vec<Hash> = ours
+                .iter()
+                .filter(|id| listed(id) && !theirs.contains(*id))
+                .filter(|id| exchanged.insert(**id))
+                .copied()
+                .collect();
+            let wanted: Vec<Hash> = theirs
+                .difference(&ours)
+                .filter(|id| exchanged.insert(**id))
+                .copied()
+                .collect();
+            // The refused ones the peer still lacks, or this node does; one
+            // past the end of a cut listing waits until the listing reaches it.
+            let (mut resend, mut refetch, mut waiting) = (Vec::new(), Vec::new(), Vec::new());
+            if retry {
+                for id in refused.drain(..) {
+                    if !listed(&id) {
+                        waiting.push(id);
+                    } else if ours.contains(&id) && !theirs.contains(&id) {
+                        resend.push(id);
+                    } else if theirs.contains(&id) && !ours.contains(&id) {
+                        refetch.push(id);
                     }
                 }
             }
+            let mut unbounded = u64::MAX;
+            let (sent, _) = self.send_pooled(deferred, &missing, &mut unbounded).await?;
+            let (fetched, _) = self.fetch_pooled(deferred, &wanted, &mut unbounded).await?;
+            let (resent, unsent) = self.send_pooled(deferred, &resend, &mut budget[0]).await?;
+            let (refetched, unfetched) = self
+                .fetch_pooled(deferred, &refetch, &mut budget[1])
+                .await?;
+            // Those not yet tried again come first next time.
+            self.relay[usize::from(deferred)].refused.extend(
+                [waiting, unsent, unfetched, sent, fetched, resent, refetched]
+                    .into_iter()
+                    .flatten(),
+            );
         }
         Ok(())
     }
-    /// The ids of the peer's pooled or deferred transactions, page by page,
-    /// no more than its set can hold.
-    async fn inventory(&mut self, deferred: bool) -> Result<BTreeSet<Hash>> {
-        let most = if deferred {
+    /// Sends the peer these of this node's pooled or deferred transactions,
+    /// deferred ones with their times, while `budget` bytes last. Returns those
+    /// the peer had no room for, and those the budget left out.
+    async fn send_pooled(
+        &mut self,
+        deferred: bool,
+        ids: &[Hash],
+        budget: &mut u64,
+    ) -> Result<(Vec<Hash>, Vec<Hash>)> {
+        let handle = self.node.handle.clone();
+        let (mut refused, mut left) = (Vec::new(), Vec::new());
+        for chunk in ids.chunks(RELAY_PAGE) {
+            let ids = chunk.to_vec();
+            let request = if deferred {
+                Request::Deferred { ids }
+            } else {
+                Request::Pending { ids }
+            };
+            let Answer::Items(items) = handle.call_wire(request).await? else {
+                return Err("invalid local items".into());
+            };
+            for item in items {
+                if *budget == 0 {
+                    left.push(item.id);
+                    continue;
+                }
+                // One larger than a slice, or than the answer had room for,
+                // travels in slices.
+                let (size, sent) = match item.body {
+                    Body::Whole(bytes) => {
+                        let size = bytes.len() as u64;
+                        let part = Part {
+                            offset: 0,
+                            total: size,
+                            bytes,
+                        };
+                        let not_before = item.not_before;
+                        let request = Request::Submit { part, not_before };
+                        (size, self.conn.request(request).await)
+                    }
+                    Body::Total(total) => (
+                        total,
+                        self.push(Own::Transaction, item.id, item.not_before).await,
+                    ),
+                };
+                *budget = budget.saturating_sub(size);
+                if sent.is_err_and(|e| no_room(&e)) {
+                    refused.push(item.id);
+                }
+            }
+        }
+        Ok((refused, left))
+    }
+    /// Fetches these of the peer's pooled or deferred transactions and takes
+    /// them as relayed by it, while `budget` bytes last. Returns those this
+    /// node had no room for, and those the budget left out.
+    async fn fetch_pooled(
+        &mut self,
+        deferred: bool,
+        ids: &[Hash],
+        budget: &mut u64,
+    ) -> Result<(Vec<Hash>, Vec<Hash>)> {
+        let handle = self.node.handle.clone();
+        let (mut refused, mut left) = (Vec::new(), Vec::new());
+        for chunk in ids.chunks(RELAY_PAGE) {
+            if *budget == 0 {
+                left.extend(chunk);
+                continue;
+            }
+            let ids = chunk.to_vec();
+            let request = if deferred {
+                Request::Deferred { ids }
+            } else {
+                Request::Pending { ids }
+            };
+            let items = match self.conn.request(request).await? {
+                Answer::Items(items) => items,
+                _ => return Err(unexpected("pending")),
+            };
+            if items.len() > chunk.len() {
+                return Err("relayed items beyond those asked for".into());
+            }
+            for item in items {
+                if deferred != item.not_before.is_some() {
+                    return Err("invalid relayed item".into());
+                }
+                let mut submit =
+                    json!({"relayed":true,"peer":self.peer,"not_before":item.not_before});
+                // One listed by its size alone is fetched in slices, and must
+                // be the transaction asked for.
+                let bytes = match item.body {
+                    Body::Whole(bytes) => bytes,
+                    Body::Total(_) if *budget == 0 => {
+                        left.push(item.id);
+                        continue;
+                    }
+                    Body::Total(total) => match self.fetch_transaction(&item.id, total).await {
+                        Ok(bytes) => {
+                            submit["id"] = json!(hex(&item.id));
+                            bytes
+                        }
+                        Err(e) if e == "transaction not found" || e == TOO_LARGE => {
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    },
+                };
+                *budget = budget.saturating_sub(bytes.len() as u64);
+                match handle.call_bytes("submit", submit, Some(bytes)).await {
+                    // A peer that sent another transaction than the one it
+                    // listed is not asked again on this connection.
+                    Err(e) if e == NOT_ASKED => return Err(e),
+                    Err(e) if no_room(&e) => refused.push(item.id),
+                    _ => {}
+                }
+            }
+        }
+        Ok((refused, left))
+    }
+    /// The most transactions this node's pool, or its deferred set, holds.
+    fn set_size(&self, deferred: bool) -> usize {
+        if deferred {
             DEFERRED_MAX
         } else {
             self.node.mempool
-        };
+        }
+    }
+    /// The ids of the peer's pooled or deferred transactions, page by page,
+    /// until there are as many as this node's set can hold: a peer that holds
+    /// more may, by its own configuration, and this node could take none of
+    /// the rest. Each page lists ids in order past the last page's, and names
+    /// its own last as where the next starts, so the pages move on. Returns
+    /// the ids and, for a listing cut short, its last id, past which what the
+    /// peer holds is not known.
+    async fn inventory(&mut self, deferred: bool) -> Result<(BTreeSet<Hash>, Option<Hash>)> {
+        let most = self.set_size(deferred);
         let mut ids = BTreeSet::new();
         let mut after = None;
-        loop {
+        while ids.len() < most {
             let (listed, next) = match self
                 .conn
                 .request(Request::Inventory { deferred, after })
@@ -830,18 +959,20 @@ impl Link {
                 Answer::Inventory { ids, next } => (ids, next),
                 _ => return Err(unexpected("inventory")),
             };
-            if listed.len() > INVENTORY_PAGE {
-                return Err("inventory page limit".into());
+            let ordered = after.iter().chain(&listed).is_sorted_by(|a, b| a < b);
+            if listed.len() > INVENTORY_PAGE
+                || !ordered
+                || next.is_some_and(|next| listed.last() != Some(&next))
+            {
+                return Err("invalid inventory page".into());
             }
             ids.extend(listed);
-            if ids.len() > most {
-                return Err("inventory beyond the set's size".into());
-            }
             after = next;
             if after.is_none() {
-                return Ok(ids);
+                break;
             }
         }
+        Ok((ids, after))
     }
     /// The addresses the peer shares, learned with the limits of the book.
     async fn addresses(&mut self) {
@@ -901,6 +1032,8 @@ async fn follow(
         push: true,
         pushed: None,
         swap: true,
+        relay: Default::default(),
+        retried: None,
         asked: 0,
         marked: 0,
         connected: crate::now(),

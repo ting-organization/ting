@@ -64,11 +64,18 @@ tip changes, and the node follows:
      genesis.
    - **Pending and deferred transactions**, when either pool has changed and at
      every keepalive: for each, it asks the peer for its `inventory`, the ids it
-     holds, page by page, and compares it with its own. It submits to the peer the
-     transactions the peer lacks, deferred ones with their `not_before` times. It
-     fetches the ones it lacks itself by id, 32 at a time, and submits them locally
-     as relayed by that peer. A transaction larger than one 1 MiB slice travels in
-     slices both ways ([transactions in slices](#transactions-in-slices)).
+     holds, page by page until it has as many as its own set can hold, and
+     compares it with its own. It submits to the peer the transactions the peer
+     lacks, deferred ones with their `not_before` times, up to the last id it
+     read: past it, it cannot tell what the peer holds. It fetches the ones it
+     lacks itself by id, 32 at a time, and submits them locally as relayed by that
+     peer. Each transaction travels once a connection each way, whether or not it
+     was taken: two pools that stay apart, as full ones do, cost nothing more until
+     they change. One refused for want of room is tried again once this node's
+     tip has moved, since a block makes room, at most the next block's data
+     capacity of them each way at each tip: no more than a block can have freed.
+     A transaction larger than one 1 MiB slice travels in slices both ways
+     ([transactions in slices](#transactions-in-slices)).
    - **Addresses**, with discovery on: it asks for `addresses` and adds what it
      receives to its address book, every ten seconds while it has fewer peers than it
      wants, otherwise every ten minutes.
@@ -218,7 +225,8 @@ slice imports the block.
 A transaction's size is bounded only by the data capacity, so one may exceed what a
 frame carries. A `pending` or `deferred` answer lists a transaction by its size,
 `total`, instead of whole when it is larger than one slice or more than the answer
-has room for. The node fetches such a transaction with `transaction_raw`, slice by
+has room for: one slice's worth in all, so that an answer crosses a connection as
+quickly as a block's slice. The node fetches such a transaction with `transaction_raw`, slice by
 slice within its transfer time, if it is no larger than the next block's data
 capacity, and submits it locally only if its id is the one listed.
 
