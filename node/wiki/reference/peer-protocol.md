@@ -236,8 +236,11 @@ with `pending` or `deferred`, 32 ids at a time, and fetch any listed by size alo
 with `transaction_raw`. The reference node submits a peer's transactions to its own
 pool as relayed by that peer's address ([the mempool](../node/mining.md#the-mempool)).
 It reads a peer's inventory only until it holds as many ids as its own pool or
-deferred set can, and it sends each transaction to a peer, and fetches each from
-it, once a connection, whether or not it was taken.
+deferred set can, and sends the peer nothing past the last id it read, since it
+cannot tell what the peer holds there. It sends each transaction to a peer, and
+fetches each from it, once a connection, whether or not it was taken; one refused
+with `mempool is full` or `deferred set is full` is tried again once its own tip
+has moved, at most the next block's data capacity of them each way at each tip.
 
 ## Errors
 
