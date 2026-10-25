@@ -576,6 +576,9 @@ impl Link {
                 Ok(imported) => {
                     if imported["known"] == false {
                         self.delivered = Some(crate::now());
+                        // A first download can take a round of hours: the
+                        // peer shows as delivering all along.
+                        self.report();
                     }
                     // What the chain asks of this peer moves on with it.
                     more = true;
@@ -985,7 +988,8 @@ impl Link {
             .unwrap()
             .learn_shared(&shared, self.address.ip());
     }
-    /// A completed round: the peer is proven, and its status current.
+    /// A hello answered, a block delivered or a round completed: the peer is
+    /// proven, and its status current.
     fn report(&mut self) {
         let now = crate::now();
         if now >= self.marked + 60 {
@@ -1039,6 +1043,12 @@ async fn follow(
         connected: crate::now(),
         delivered: None,
     };
+    link.report();
+    crate::log!(
+        "connected to {address}: {}, at height {}",
+        link.agent,
+        link.height
+    );
     let mut last = Instant::now();
     loop {
         tokio::time::sleep_until(last + ROUND_GAP).await;
@@ -1083,23 +1093,27 @@ async fn follow(
 /// A peer sent invalid data: its address range is banned for a day, unless
 /// it holds a configured peer or is this machine (wiki: node/sync). Its
 /// connections end: inbound ones at once, outbound ones at the next check.
-pub fn punish(node: &Node, address: SocketAddr) {
+/// Returns whether it was banned.
+pub fn punish(node: &Node, address: SocketAddr) -> bool {
     let now = crate::now();
     let mut book = node.book.lock().unwrap();
-    if book.ban(address.ip(), now + BAN) {
+    let banned = book.ban(address.ip(), now + BAN);
+    if banned {
         node.inbound
             .lock()
             .unwrap()
             .end(|ip| book.is_banned(ip, now));
     }
+    banned
 }
 
 /// Records how a connection ended, and gives what it was asked to the others.
+/// The end of a connection is written to the log, as is a configured peer's
+/// failure to connect each time its reason changes; discovered addresses are
+/// tried quietly, as many never answer.
 async fn ended(node: &Node, address: SocketAddr, source: &str, result: Result<()>) {
     if let Err(error) = &result {
-        if is_invalid(error) {
-            punish(node, address);
-        }
+        let banned = is_invalid(error) && punish(node, address);
         let mut book = node.book.lock().unwrap();
         let mut peers = node.peers.lock().unwrap();
         let key = address.to_string();
@@ -1111,6 +1125,12 @@ async fn ended(node: &Node, address: SocketAddr, source: &str, result: Result<()
             let mut status = peers
                 .remove(&key)
                 .unwrap_or_else(|| json!({"address":address,"source":source,"last_success":null}));
+            let ban = if banned { "; banned for a day" } else { "" };
+            if status["connected"].is_number() {
+                crate::log!("disconnected from {address}: {error}{ban}");
+            } else if source == "config" && status["error"] != json!(error) {
+                crate::log!("cannot connect to configured peer {address}: {error}{ban}");
+            }
             status["error"] = json!(error);
             status["last_attempt"] = json!(crate::now());
             status["connected"] = Value::Null;
@@ -1211,20 +1231,28 @@ pub async fn run(node: Node) {
         } else {
             0
         };
-        let mut ending: Vec<SocketAddr> = {
+        let mut ending: Vec<(SocketAddr, &str)> = {
             let book = node.book.lock().unwrap();
             links
                 .iter()
-                .filter(|(address, (_, source))| {
-                    book.is_banned(address.ip(), now)
-                        || (*source == "config") != configured.contains(address)
+                .filter_map(|(address, (_, source))| {
+                    if book.is_banned(address.ip(), now) {
+                        Some((*address, "banned"))
+                    } else if *source == "config" && !configured.contains(address) {
+                        Some((*address, "no longer configured"))
+                    } else if *source != "config" && configured.contains(address) {
+                        Some((*address, "connecting again as a configured peer"))
+                    } else {
+                        None
+                    }
                 })
-                .map(|(address, _)| *address)
                 .collect()
         };
         let discovered: Vec<SocketAddr> = links
             .iter()
-            .filter(|(a, (_, source))| *source == "discovered" && !ending.contains(a))
+            .filter(|(a, (_, source))| {
+                *source == "discovered" && !ending.iter().any(|(e, _)| e == *a)
+            })
             .map(|(a, _)| *a)
             .collect();
         if discovered.len() > want {
@@ -1238,10 +1266,16 @@ pub async fn run(node: Node) {
             };
             let mut by_block = discovered.clone();
             by_block.sort_by_key(last_block);
-            ending.extend(by_block.into_iter().take(discovered.len() - want));
+            ending.extend(
+                by_block
+                    .into_iter()
+                    .take(discovered.len() - want)
+                    .map(|a| (a, "enough peers")),
+            );
         }
-        for address in ending {
+        for (address, reason) in ending {
             if let Some((link, _)) = links.remove(&address) {
+                crate::log!("disconnected from {address}: {reason}");
                 link.abort();
                 node.peers.lock().unwrap().remove(&address.to_string());
                 let _ = node
@@ -1303,7 +1337,7 @@ pub async fn run(node: Node) {
                 .is_ok_and(|a: SocketAddr| configured.contains(&a) || links.contains_key(&a))
         });
         if let Err(e) = node.book.lock().unwrap().save() {
-            eprintln!("peer address book: {e}");
+            crate::log!("peer address book: {e}");
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(2)) => {}

@@ -237,10 +237,11 @@ pub fn initialize(dir: &Path, c: &Config, supplied: Option<&Path>) -> Result<Gen
 /// reference/conformance#the-seed).
 pub fn initialize_with(dir: &Path, c: &Config, g: Genesis) -> Result<Genesis> {
     let g = initialize_files(dir, c, g)?;
-    let height = crate::seed::import(dir, &g)?;
-    if height > 0 {
-        eprintln!("imported the seed: {height} blocks");
+    let blocks = crate::seed::ids(&g).len();
+    if blocks > 0 {
+        eprintln!("importing the seed: {blocks} blocks, each checked and executed");
     }
+    crate::seed::import(dir, &g)?;
     Ok(g)
 }
 /// Initializes `dir` for the network of genesis `g` without importing its

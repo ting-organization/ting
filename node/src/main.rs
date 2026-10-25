@@ -13,6 +13,8 @@ use ting_node::{
     daemon, transport,
 };
 
+mod show;
+
 #[derive(Parser)]
 #[command(
     name = "ting",
@@ -23,6 +25,9 @@ struct Cli {
     /// Node data directory (default: USERPROFILE/.ting on Windows, HOME/.ting elsewhere).
     #[arg(long, global = true, value_name = "DIRECTORY")]
     data_dir: Option<PathBuf>,
+    /// Print each result as JSON, for scripts, instead of as text.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Action,
 }
@@ -62,8 +67,10 @@ enum Action {
     /// Say hello to the node at ADDRESS over the peer protocol, as a peer on
     /// this data directory's network does, and show its answer.
     Probe { address: SocketAddr },
+    /// Add a configured peer, which the node always keeps a connection to.
     #[command(subcommand)]
     Add(PeerCommand),
+    /// Remove a configured peer.
     #[command(subcommand)]
     Remove(PeerCommand),
     /// Mine blocks with a bounded nonce search in one request, for a development chain.
@@ -95,6 +102,7 @@ enum Action {
         #[arg(long)]
         not_before: Option<u64>,
     },
+    /// Turn the REST interface, which serves the explorer and the wiki, on or off.
     #[command(subcommand)]
     Api(ApiCommand),
     /// Mark a block invalid: the node leaves it and every block above it, and
@@ -114,6 +122,7 @@ enum Action {
 }
 #[derive(Subcommand)]
 enum PeerCommand {
+    /// The node at IP:PORT.
     Node { address: SocketAddr },
 }
 #[derive(Subcommand)]
@@ -126,12 +135,12 @@ enum MinerCommand {
         #[arg(long)]
         spacing: Option<u64>,
     },
+    /// Stop mining; remembered across restarts.
     Stop,
+    /// Show whether the miner runs, what it has mined, and what its blocks carry.
     Status,
     /// Set the producer data of the blocks this node builds (hex), or clear it.
-    Producer {
-        hex: Option<String>,
-    },
+    Producer { hex: Option<String> },
     /// Set the capacity votes of the blocks this node builds: compute, state
     /// access, data and growth, each hold, increase or decrease.
     Votes {
@@ -147,11 +156,13 @@ enum Vote {
 }
 #[derive(Subcommand)]
 enum ApiCommand {
+    /// Serve REST, by default at 127.0.0.1:18441.
     Enable {
         /// Answer browser applications from any origin, such as a wallet in a web page.
         #[arg(long)]
         cors: bool,
     },
+    /// Stop serving REST; the CLI keeps working over its own channel.
     Disable,
 }
 async fn rpc(dir: &Path, method: &str, params: Value) -> Result<Value> {
@@ -231,9 +242,11 @@ async fn probe(dir: &Path, address: SocketAddr) -> Result<Value> {
         ting_node::transport::ask(&mut stream, ting_node::wire::Request::Hello(hello)).await?;
     Ok(ting_node::wire::Frame::Answer(answer).describe())
 }
-async fn start(dir: &Path) -> Result<Value> {
+/// Starts the node in the background; returns its status and whether this
+/// call started it.
+async fn start(dir: &Path) -> Result<(Value, bool)> {
     if let Ok(status) = rpc(dir, "status", json!({})).await {
-        return Ok(status);
+        return Ok((status, false));
     }
     let _ = Config::load(dir)?;
     // A node that has just stopped holds the lock until its process exits, a
@@ -275,7 +288,7 @@ async fn start(dir: &Path) -> Result<Value> {
             ));
         }
         if let Ok(status) = rpc(dir, "status", json!({})).await {
-            return Ok(status);
+            return Ok((status, true));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -327,7 +340,42 @@ fn close_stdio_inheritance() -> Result<()> {
     }
     Ok(())
 }
-async fn execute(cli: Cli) -> Result<Option<Value>> {
+/// The command as the user would type it again: `ting`, with the data
+/// directory they named, for the hints in a result's text.
+fn invocation(data_dir: Option<&Path>) -> String {
+    match data_dir {
+        Some(path) => {
+            let path = path.display().to_string();
+            if path.contains(char::is_whitespace) {
+                format!("ting --data-dir \"{path}\"")
+            } else {
+                format!("ting --data-dir {path}")
+            }
+        }
+        None => "ting".to_owned(),
+    }
+}
+/// The network of a genesis, as the node's status names it.
+fn network(g: &ting_core::protocol::Genesis) -> &'static str {
+    let id = g.chain_id();
+    if config::production_genesis().is_some_and(|p| p.chain_id() == id) {
+        "production"
+    } else if config::development_genesis().chain_id() == id {
+        "development"
+    } else {
+        "other"
+    }
+}
+/// The text of `ting status`, which also shows the peers and the miner.
+async fn status_text(dir: &Path, status: &Value) -> Result<String> {
+    let peers = rpc(dir, "peers", json!({})).await?;
+    let miner = rpc(dir, "miner", json!({"action":"status"})).await?;
+    Ok(show::status(status, &peers, &miner))
+}
+/// Runs the command; returns its result and the text that shows it, or
+/// nothing for `ting run`.
+async fn execute(cli: Cli) -> Result<Option<(Value, String)>> {
+    let ting = invocation(cli.data_dir.as_deref());
     let directory = match cli.data_dir {
         Some(path) => path,
         None => config::default_directory()?,
@@ -337,7 +385,7 @@ async fn execute(cli: Cli) -> Result<Option<Value>> {
     if !matches!(&cli.command, Action::Init { .. }) {
         Config::load(dir)?;
     }
-    let value = match cli.command {
+    let shown = match cli.command {
         Action::Init {
             name,
             control,
@@ -376,44 +424,84 @@ async fn execute(cli: Cli) -> Result<Option<Value>> {
                 ..Default::default()
             };
             let g = config::initialize_with(dir, &c, g)?;
-            json!({"initialized":dir,"chain_id":ting_core::hash::hex(&g.chain_id()),"api_enabled":api})
+            let value = json!({"initialized":dir,"chain_id":ting_core::hash::hex(&g.chain_id()),"api_enabled":api});
+            let height = ting_node::seed::ids(&g).len();
+            let text = show::init(&value, network(&g), height, &ting);
+            (value, text)
         }
         Action::Run => {
             daemon::run(dir).await?;
             return Ok(None);
         }
-        Action::Start => start(dir).await?,
-        Action::Stop => stop(dir).await?,
-        Action::Status => rpc(dir, "status", json!({})).await?,
-        Action::Peers => rpc(dir, "peers", json!({})).await?,
-        Action::Probe { address } => probe(dir, address).await?,
+        Action::Start => {
+            let (status, fresh) = start(dir).await?;
+            let summary = status_text(dir, &status).await?;
+            let log = std::fs::canonicalize(dir)
+                .unwrap_or_else(|_| dir.clone())
+                .join("node.log");
+            let text = show::started(&status, fresh, &log.display().to_string(), summary);
+            (status, text)
+        }
+        Action::Stop => (stop(dir).await?, "Stopped the node.\n".into()),
+        Action::Status => {
+            let status = rpc(dir, "status", json!({})).await?;
+            let text = status_text(dir, &status).await?;
+            (status, text)
+        }
+        Action::Peers => {
+            let peers = rpc(dir, "peers", json!({})).await?;
+            let text = show::peers(&peers);
+            (peers, text)
+        }
+        Action::Probe { address } => {
+            let answer = probe(dir, address).await?;
+            let chain_id = ting_core::hash::hex(&config::genesis(dir)?.chain_id());
+            let text = show::probe(&address.to_string(), &answer, &chain_id);
+            (answer, text)
+        }
         Action::Add(PeerCommand::Node { address }) => {
-            edit(dir, "add_peer", json!({"address":address.to_string()})).await?
+            let result = edit(dir, "add_peer", json!({"address":address.to_string()})).await?;
+            let text = show::peer_edit(&result, true, &address.to_string());
+            (result, text)
         }
         Action::Remove(PeerCommand::Node { address }) => {
-            edit(dir, "remove_peer", json!({"address":address.to_string()})).await?
+            let result = edit(dir, "remove_peer", json!({"address":address.to_string()})).await?;
+            let text = show::peer_edit(&result, false, &address.to_string());
+            (result, text)
         }
         Action::Api(action) => {
             let (enabled, cors) = match action {
                 ApiCommand::Enable { cors } => (true, cors),
                 ApiCommand::Disable => (false, false),
             };
-            edit(dir, "api", json!({"enabled":enabled,"cors":cors})).await?
+            let result = edit(dir, "api", json!({"enabled":enabled,"cors":cors})).await?;
+            let text = show::api(&result, enabled, cors);
+            (result, text)
         }
         Action::Mine { count, attempts } => {
-            rpc(dir, "mine", json!({"count":count,"attempts":attempts})).await?
+            let result = rpc(dir, "mine", json!({"count":count,"attempts":attempts})).await?;
+            let text = show::mined(&result, count, attempts);
+            (result, text)
         }
         Action::Miner(MinerCommand::Start { threads, spacing }) => {
-            edit(
+            let result = edit(
                 dir,
                 "miner",
                 json!({"action":"start","threads":threads,"spacing":spacing}),
             )
-            .await?
+            .await?;
+            let text = show::miner_started(&result);
+            (result, text)
         }
-        Action::Miner(MinerCommand::Stop) => edit(dir, "miner", json!({"action":"stop"})).await?,
+        Action::Miner(MinerCommand::Stop) => {
+            let result = edit(dir, "miner", json!({"action":"stop"})).await?;
+            let text = show::miner_stopped(&result);
+            (result, text)
+        }
         Action::Miner(MinerCommand::Status) => {
-            rpc(dir, "miner", json!({"action":"status"})).await?
+            let result = rpc(dir, "miner", json!({"action":"status"})).await?;
+            let text = show::miner(&result);
+            (result, text)
         }
         Action::Miner(MinerCommand::Votes { votes }) => {
             let votes: Vec<u8> = votes
@@ -424,16 +512,20 @@ async fn execute(cli: Cli) -> Result<Option<Value>> {
                     Vote::Decrease => 2,
                 })
                 .collect();
-            edit(dir, "miner", json!({"action":"votes","votes":votes})).await?
+            let result = edit(dir, "miner", json!({"action":"votes","votes":votes})).await?;
+            let text = show::votes_set(&result, &json!(votes));
+            (result, text)
         }
-        Action::Votes => rpc(dir, "votes", json!({})).await?,
+        Action::Votes => {
+            let result = rpc(dir, "votes", json!({})).await?;
+            let text = show::votes(&result);
+            (result, text)
+        }
         Action::Miner(MinerCommand::Producer { hex }) => {
-            edit(
-                dir,
-                "miner",
-                json!({"action":"producer","producer":hex.unwrap_or_default()}),
-            )
-            .await?
+            let hex = hex.unwrap_or_default();
+            let result = edit(dir, "miner", json!({"action":"producer","producer":hex})).await?;
+            let text = show::producer(&result, &hex);
+            (result, text)
         }
         Action::Template { transactions } => {
             let params = if transactions.is_empty() {
@@ -441,31 +533,52 @@ async fn execute(cli: Cli) -> Result<Option<Value>> {
             } else {
                 json!({"transactions":transactions})
             };
-            rpc(dir, "template", params).await?
+            let result = rpc(dir, "template", params).await?;
+            let text = show::template(&result, &ting);
+            (result, text)
         }
         Action::Solution { template, nonce } => {
-            rpc(dir, "solution", json!({"template":template,"nonce":nonce})).await?
+            let result = rpc(dir, "solution", json!({"template":template,"nonce":nonce})).await?;
+            let text = show::solution(&result);
+            (result, text)
         }
         Action::Submit { file, not_before } => {
             // The node refuses one larger than the next block's data capacity.
-            rpc(dir,"submit",json!({"hex":ting_core::hash::hex(&std::fs::read(file).map_err(|e|e.to_string())?),"not_before":not_before})).await?
+            let result = rpc(dir,"submit",json!({"hex":ting_core::hash::hex(&std::fs::read(file).map_err(|e|e.to_string())?),"not_before":not_before})).await?;
+            let text = show::submitted(&result);
+            (result, text)
         }
-        Action::Invalidate { block } => rpc(dir, "invalidate", json!({"id":block})).await?,
-        Action::Reconsider { block } => rpc(dir, "reconsider", json!({"id":block})).await?,
+        Action::Invalidate { block } => {
+            let result = rpc(dir, "invalidate", json!({"id":block})).await?;
+            let text = show::invalidated(&result);
+            (result, text)
+        }
+        Action::Reconsider { block } => {
+            let result = rpc(dir, "reconsider", json!({"id":block})).await?;
+            let text = show::reconsidered(&result);
+            (result, text)
+        }
         Action::Docs => {
             let status = rpc(dir, "status", json!({})).await?;
             let address = status["listeners"]["api"]
                 .as_str()
-                .ok_or("REST is disabled; run ting api enable")?;
-            json!({"wiki":format!("http://{address}/wiki"),"api_docs":format!("http://{address}/docs"),"openapi":format!("http://{address}/openapi.json")})
+                .ok_or_else(|| format!("REST is disabled; run {ting} api enable"))?;
+            let result = json!({"wiki":format!("http://{address}/wiki"),"api_docs":format!("http://{address}/docs"),"openapi":format!("http://{address}/openapi.json")});
+            let text = show::docs(&result);
+            (result, text)
         }
     };
-    Ok(Some(value))
+    Ok(Some(shown))
 }
 #[tokio::main]
 async fn main() {
-    match execute(Cli::parse()).await {
-        Ok(Some(value)) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+    let cli = Cli::parse();
+    let json = cli.json;
+    match execute(cli).await {
+        Ok(Some((value, _))) if json => {
+            println!("{}", serde_json::to_string_pretty(&value).unwrap())
+        }
+        Ok(Some((_, text))) => print!("{text}"),
         Ok(None) => {}
         Err(error) => {
             eprintln!("ting: {error}");

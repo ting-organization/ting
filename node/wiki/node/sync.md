@@ -104,7 +104,8 @@ peers](#finding-more-peers)).
 
 **Failures.** A connection whose request fails, or gets no reply within 30 seconds,
 ends. The blocks it was asked for go back to the other connections, and `ting peers`
-shows each peer's last success, or its last attempt and error. A configured peer is
+shows each peer's last success, or its last attempt and error; the node's log says
+why the connection ended ([what the node writes](../start/node.md#what-the-node-writes)). A configured peer is
 connected again a minute after the failed attempt; a discovered one waits a minute,
 doubling with each further failure up to an hour, and is replaced meanwhile.
 
