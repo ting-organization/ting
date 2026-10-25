@@ -200,8 +200,9 @@ pub const DEFERRED_PER_SOURCE: usize = 256;
 pub const INVENTORY_PAGE: usize = 1_024;
 pub const RELAY_PAGE: usize = 32;
 /// The most bytes of transactions a `pending` or `deferred` answer carries
-/// whole: half a frame, so that the answer fits one whatever else it holds.
-pub const RELAY_INLINE: usize = crate::FRAME_MAX / 2;
+/// whole: one slice, so that the answer crosses a connection within the frame
+/// deadline as a block's slice does, on the same links.
+pub const RELAY_INLINE: usize = SLICE_MAX;
 /// The address a submission counts against: the public REST client's, or the
 /// relaying peer's; none for the node's own CLI and local clients.
 fn source_of(p: &Value) -> Option<std::net::IpAddr> {
@@ -2882,8 +2883,8 @@ impl Chain {
     }
     /// Of `ids`, the pooled transactions, deferred ones left out, or with
     /// `deferred` the deferred ones, as a `pending` or `deferred` answer lists
-    /// them: whole while each fits a slice and all of them `RELAY_INLINE`, by
-    /// size alone otherwise, for the peer to fetch in slices.
+    /// them: whole while all of them fit `RELAY_INLINE`, one slice, by size
+    /// alone otherwise, for the peer to fetch in slices.
     fn relayed(&self, ids: &[Hash], deferred: bool) -> Vec<wire::Item> {
         let mut inline = 0usize;
         let mut items = Vec::new();
@@ -2900,13 +2901,12 @@ impl Chain {
                 }
             };
             let bytes = tx.encode();
-            let body =
-                if bytes.len() <= SLICE_MAX && inline.saturating_add(bytes.len()) <= RELAY_INLINE {
-                    inline += bytes.len();
-                    wire::Body::Whole(bytes)
-                } else {
-                    wire::Body::Total(bytes.len() as u64)
-                };
+            let body = if inline.saturating_add(bytes.len()) <= RELAY_INLINE {
+                inline += bytes.len();
+                wire::Body::Whole(bytes)
+            } else {
+                wire::Body::Total(bytes.len() as u64)
+            };
             items.push(wire::Item {
                 id: *id,
                 not_before,

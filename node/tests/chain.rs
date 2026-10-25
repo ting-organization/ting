@@ -3802,3 +3802,70 @@ fn a_deferred_transaction_that_fits_no_block_leaves_the_set() {
         (json!(0), json!(0))
     );
 }
+#[test]
+fn a_pending_answer_carries_one_slice_whole_and_lists_the_rest_by_size() {
+    // Four pooled transactions of 300 kB: three fit one slice whole, and the
+    // fourth is listed by its size, to be fetched in slices, so that the
+    // answer is a frame no larger than a block's slice.
+    use ting_core::{
+        meter::Resources,
+        protocol::{Payload, Transaction},
+    };
+    use ting_node::chain::{RELAY_PAGE, SLICE_MAX};
+    let dir = Directory::new();
+    dir.config(false, "relay");
+    let mut chain = open(&dir);
+    let chain_id = chain.genesis.chain_id();
+    let large: Vec<Transaction> = (1..=4)
+        .map(|byte| Transaction {
+            budget: Resources([1_000_000, 1, 400_000, 1]),
+            payload: Payload::Call {
+                target: [1; 32],
+                input: vec![byte; 300_000],
+            },
+        })
+        .collect();
+    for tx in &large {
+        chain.submit(&tx.encode()).unwrap();
+    }
+    let ids: Vec<_> = large.iter().map(|tx| tx.id(chain_id)).collect();
+    let wire::Answer::Items(items) = chain
+        .answer_wire(&wire::Request::Pending { ids: ids.clone() })
+        .unwrap()
+    else {
+        panic!("not items");
+    };
+    assert_eq!(items.iter().map(|i| i.id).collect::<Vec<_>>(), ids);
+    let whole: Vec<usize> = items
+        .iter()
+        .filter_map(|i| match &i.body {
+            wire::Body::Whole(bytes) => Some(bytes.len()),
+            wire::Body::Total(_) => None,
+        })
+        .collect();
+    assert_eq!(whole.len(), 3);
+    assert!(whole.iter().sum::<usize>() <= SLICE_MAX);
+    assert_eq!(
+        items[3].body,
+        wire::Body::Total(large[3].encode().len() as u64)
+    );
+    let frame = wire::Frame::Answer(wire::Answer::Items(items)).encode();
+    assert!(
+        frame.len() <= SLICE_MAX + 64 * RELAY_PAGE,
+        "{}",
+        frame.len()
+    );
+    // The one listed by size comes whole in one slice of its own.
+    let wire::Answer::Slice { bytes, total, .. } = chain
+        .answer_wire(&wire::Request::TransactionRaw {
+            id: ids[3],
+            offset: 0,
+            length: SLICE_MAX as u32,
+        })
+        .unwrap()
+    else {
+        panic!("not a slice");
+    };
+    assert_eq!(bytes, large[3].encode());
+    assert_eq!(total, bytes.len() as u64);
+}

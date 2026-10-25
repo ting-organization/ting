@@ -13,7 +13,7 @@ use crate::{Result, config::atomic_write};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    net::{IpAddr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
 };
 
@@ -152,17 +152,21 @@ pub fn shareable(address: SocketAddr, peer: IpAddr) -> bool {
     }
 }
 /// The network group of a public address (an IPv4 /16, an IPv6 /32), from
-/// which a node keeps at most one discovered peer. Local addresses have none.
-fn group(ip: IpAddr) -> Option<Vec<u8>> {
+/// which a node keeps at most one discovered peer, and by which inbound
+/// connections give way to newcomers. Local addresses have none.
+pub fn group(ip: IpAddr) -> Option<IpAddr> {
     if reach(ip) != Reach::Public {
         return None;
     }
-    Some(match ip {
-        IpAddr::V4(ip) => ip.octets()[..2].to_vec(),
-        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
-            Some(v4) => v4.octets()[..2].to_vec(),
-            None => ip.octets()[..4].to_vec(),
-        },
+    Some(match ip.to_canonical() {
+        IpAddr::V4(ip) => {
+            let o = ip.octets();
+            IpAddr::V4(Ipv4Addr::new(o[0], o[1], 0, 0))
+        }
+        IpAddr::V6(ip) => {
+            let s = ip.segments();
+            IpAddr::V6(Ipv6Addr::new(s[0], s[1], 0, 0, 0, 0, 0, 0))
+        }
     })
 }
 
@@ -438,7 +442,7 @@ impl AddressBook {
         now: u64,
         seed: u64,
     ) -> Vec<SocketAddr> {
-        let mut groups: BTreeSet<Vec<u8>> = busy.iter().filter_map(|a| group(a.ip())).collect();
+        let mut groups: BTreeSet<IpAddr> = busy.iter().filter_map(|a| group(a.ip())).collect();
         let mut candidates: Vec<&Entry> = self
             .entries
             .values()

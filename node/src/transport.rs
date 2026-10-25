@@ -29,7 +29,7 @@ use tokio::{
 
 pub type PeerStats = Arc<Mutex<BTreeMap<String, Value>>>;
 /// Open inbound connections and their remote addresses, so that a ban ends
-/// the ones it covers at once and no one address range takes every slot.
+/// the ones it covers at once and no one network takes every slot.
 #[derive(Default)]
 pub struct Inbound {
     next: u64,
@@ -39,21 +39,33 @@ pub struct Inbound {
 /// node/sync), this machine aside.
 const INBOUND_MAX: usize = 125;
 const INBOUND_PER_RANGE: usize = 8;
+/// What inbound connections give way by: a public address's network group (an
+/// IPv4 /16, an IPv6 /32), and a local one's range.
+fn network(ip: IpAddr) -> IpAddr {
+    discovery::group(ip).unwrap_or_else(|| discovery::range(ip))
+}
 impl Inbound {
     /// Takes a connection from `ip` if the limits allow: under its range's
     /// share, and with every slot taken, in place of the newest connection of
-    /// the range holding the most, if that range holds at least two more than
-    /// `ip`'s; so ranges of one connection each are never churned.
+    /// the network holding the most, if that network holds at least two more
+    /// than `ip`'s. Many addresses of one network therefore cannot hold every
+    /// slot, and networks of one connection each are never churned.
     pub fn admit(&mut self, ip: IpAddr) -> Option<(u64, oneshot::Receiver<()>)> {
-        let mut held: BTreeMap<IpAddr, usize> = BTreeMap::new();
-        for (open, _) in self.open.values() {
-            *held.entry(discovery::range(*open)).or_default() += 1;
-        }
-        let own = held.get(&discovery::range(ip)).copied().unwrap_or(0);
-        if own >= INBOUND_PER_RANGE && !discovery::loopback(ip) {
+        let range = discovery::range(ip);
+        let ranged = self
+            .open
+            .values()
+            .filter(|(open, _)| discovery::range(*open) == range)
+            .count();
+        if ranged >= INBOUND_PER_RANGE && !discovery::loopback(ip) {
             return None;
         }
         if self.open.len() >= INBOUND_MAX {
+            let mut held: BTreeMap<IpAddr, usize> = BTreeMap::new();
+            for (open, _) in self.open.values() {
+                *held.entry(network(*open)).or_default() += 1;
+            }
+            let own = held.get(&network(ip)).copied().unwrap_or(0);
             let (&largest, &most) = held.iter().max_by_key(|(_, n)| **n)?;
             if most <= own + 1 {
                 return None;
@@ -62,7 +74,7 @@ impl Inbound {
                 .open
                 .iter()
                 .rev()
-                .find(|(_, (open, _))| discovery::range(*open) == largest)
+                .find(|(_, (open, _))| network(*open) == largest)
                 .map(|(key, _)| *key)?;
             if let Some((_, end)) = self.open.remove(&newest) {
                 let _ = end.send(());
@@ -815,19 +827,53 @@ mod tests {
         }
         assert_eq!(inbound.open.len(), INBOUND_MAX);
         // Full: a newcomer takes the place of the newest connection of the
-        // range holding the most, here this machine's.
+        // network holding the most, here this machine's.
         assert!(inbound.admit(ip("9.9.1.1")).is_some());
         assert_eq!(inbound.open.len(), INBOUND_MAX);
         assert!(ends.last_mut().unwrap().try_recv().is_ok());
         assert!(ends[0].try_recv().is_err());
-        // One whose range already holds as many as any other is refused.
+        // One whose network already holds as many as any other is refused:
+        // networks of one connection each are never churned.
         let mut full = Inbound::default();
         for i in 0..INBOUND_MAX {
-            let octets = (i as u32 + 1).to_be_bytes();
-            let address = IpAddr::from([11, octets[1], octets[2], octets[3]]);
-            assert!(full.admit(address).is_some());
+            assert!(full.admit(IpAddr::from([11, i as u8, 0, 1])).is_some());
         }
         assert!(full.admit(ip("12.0.0.1")).is_none());
+    }
+
+    #[test]
+    fn many_addresses_of_one_network_cannot_hold_every_inbound_slot() {
+        // Every slot taken by addresses of one network, one connection each,
+        // as one operator's IPv4 /16 or IPv6 /32 provides them: each newcomer
+        // from elsewhere takes the place of the newest of them, and the network
+        // cannot take it back.
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let crowds: [fn(usize) -> IpAddr; 2] = [
+            |i| IpAddr::from([11, 0, (i / 250) as u8, (i % 250) as u8 + 1]),
+            |i| IpAddr::from([0x2a00, 1, i as u16, 0, 0, 0, 0, 1]),
+        ];
+        for crowd in crowds {
+            let mut inbound = Inbound::default();
+            let mut ends: Vec<_> = (0..INBOUND_MAX)
+                .map(|i| inbound.admit(crowd(i)).unwrap().1)
+                .collect();
+            let newcomers: Vec<_> = (0..8)
+                .map(|k| inbound.admit(IpAddr::from([20 + k, 0, 0, 1])).unwrap().1)
+                .collect();
+            assert_eq!(inbound.open.len(), INBOUND_MAX);
+            for end in &mut ends[INBOUND_MAX - 8..] {
+                assert!(end.try_recv().is_ok());
+            }
+            assert!(ends[0].try_recv().is_err());
+            // The crowd comes back from yet another of its addresses, and from
+            // a network of its own: neither takes a newcomer's place.
+            assert!(inbound.admit(crowd(INBOUND_MAX)).is_none());
+            assert!(inbound.admit(ip("30.0.0.1")).is_some());
+            assert!(ends[INBOUND_MAX - 9].try_recv().is_ok());
+            for mut end in newcomers {
+                assert!(end.try_recv().is_err());
+            }
+        }
     }
 
     #[test]

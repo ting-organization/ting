@@ -232,6 +232,9 @@ struct Link {
     /// while it is on this node's branch.
     pushed: Option<Hash>,
     swap: bool,
+    /// The pooled and the deferred transactions sent to the peer or fetched
+    /// from it on this connection, whatever either side made of them.
+    exchanged: [BTreeSet<Hash>; 2],
     asked: u64,
     marked: u64,
     connected: u64,
@@ -707,7 +710,9 @@ impl Link {
     /// Pooled and deferred transactions both ways, by inventory: the ids each
     /// side holds are compared, the peer is sent what it lacks, deferred ones
     /// with their times, and what this node lacks is fetched by id and taken as
-    /// relayed by the peer. A transaction either side refuses is passed over.
+    /// relayed by the peer. A transaction either side refuses is passed over,
+    /// and each travels once a connection, so that pools which stay apart, as
+    /// two full ones do, cost nothing more until they change.
     async fn swap_pool(&mut self) -> Result<()> {
         let handle = self.node.handle.clone();
         for deferred in [false, true] {
@@ -729,7 +734,20 @@ impl Link {
                     break;
                 }
             }
-            let missing: Vec<Hash> = ours.difference(&theirs).copied().collect();
+            // What neither side lists any longer is forgotten; the rest of
+            // what was exchanged is not sent or fetched again.
+            let exchanged = &mut self.exchanged[usize::from(deferred)];
+            exchanged.retain(|id| ours.contains(id) || theirs.contains(id));
+            let missing: Vec<Hash> = ours
+                .difference(&theirs)
+                .filter(|id| exchanged.insert(**id))
+                .copied()
+                .collect();
+            let wanted: Vec<Hash> = theirs
+                .difference(&ours)
+                .filter(|id| exchanged.insert(**id))
+                .copied()
+                .collect();
             for chunk in missing.chunks(RELAY_PAGE) {
                 let ids = chunk.to_vec();
                 let request = if deferred {
@@ -763,7 +781,6 @@ impl Link {
                     };
                 }
             }
-            let wanted: Vec<Hash> = theirs.difference(&ours).copied().collect();
             for chunk in wanted.chunks(RELAY_PAGE) {
                 let ids = chunk.to_vec();
                 let request = if deferred {
@@ -812,7 +829,10 @@ impl Link {
         Ok(())
     }
     /// The ids of the peer's pooled or deferred transactions, page by page,
-    /// no more than its set can hold.
+    /// until there are as many as this node's set can hold: a peer that holds
+    /// more may, by its own configuration, and this node could take none of
+    /// the rest. Each page lists ids in order past the last page's, and names
+    /// its own last as where the next starts, so the pages move on.
     async fn inventory(&mut self, deferred: bool) -> Result<BTreeSet<Hash>> {
         let most = if deferred {
             DEFERRED_MAX
@@ -821,7 +841,7 @@ impl Link {
         };
         let mut ids = BTreeSet::new();
         let mut after = None;
-        loop {
+        while ids.len() < most {
             let (listed, next) = match self
                 .conn
                 .request(Request::Inventory { deferred, after })
@@ -830,18 +850,20 @@ impl Link {
                 Answer::Inventory { ids, next } => (ids, next),
                 _ => return Err(unexpected("inventory")),
             };
-            if listed.len() > INVENTORY_PAGE {
-                return Err("inventory page limit".into());
+            let ordered = after.iter().chain(&listed).is_sorted_by(|a, b| a < b);
+            if listed.len() > INVENTORY_PAGE
+                || !ordered
+                || next.is_some_and(|next| listed.last() != Some(&next))
+            {
+                return Err("invalid inventory page".into());
             }
             ids.extend(listed);
-            if ids.len() > most {
-                return Err("inventory beyond the set's size".into());
-            }
             after = next;
             if after.is_none() {
-                return Ok(ids);
+                break;
             }
         }
+        Ok(ids)
     }
     /// The addresses the peer shares, learned with the limits of the book.
     async fn addresses(&mut self) {
@@ -901,6 +923,7 @@ async fn follow(
         push: true,
         pushed: None,
         swap: true,
+        exchanged: Default::default(),
         asked: 0,
         marked: 0,
         connected: crate::now(),
