@@ -328,15 +328,17 @@ like any other.
 
 **Leaving the seeds.** A seed node is where a node starts, not a peer it keeps: were
 every node to stay connected to the seeds, they would fill up as the network grows,
-and a new node, which knows no other address, could not join. A connection to a
-seed takes none of the `max_peers` slots, so a node starts other peers beside the
-seeds however few slots it has. Once a seed has answered and at least half of
-`max_peers` of the node's other connections, configured or discovered, are as high
-as any connection reports, the seeds' included, its connections to the seed nodes
-end: a peer still behind, as another new node is, cannot serve it yet. The node
-then picks a seed again only once fewer than a quarter of `max_peers` other peers
-are connected, or none, so that a peer that drops for a while does not bring the
-seeds back. A node that reaches only the seeds keeps them. A configured seed is a
+and a new node, which knows no other address, could not join. A connection to a seed
+takes none of the `max_peers` slots, so a node starts other peers beside the seeds
+however few slots it has. What a peer claims of its own height counts for nothing
+here: only the height of its tip once the node holds that header, whose work it has
+checked. Once the node holds a seed's tip and headers past genesis, and holds the
+tips of at least half of `max_peers` of its other connections, configured or
+discovered, at least as high as its best header, its connections to the seed nodes
+end: a peer still behind, as another new node is, cannot serve it yet. The node then
+picks a seed again only once fewer than a quarter of `max_peers` other peers are
+connected, or none, so that a peer that drops for a while does not bring the seeds
+back. A node that reaches only the seeds keeps them. A configured seed is a
 configured peer like any other, and an address a peer shared is marked as a seed's
 when the seed's name resolves to it. A seed's address is never dropped from a full
 book.

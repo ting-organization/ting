@@ -1191,6 +1191,96 @@ async fn a_new_link_asks_for_addresses_before_its_first_blocks() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_counts_only_as_high_as_the_headers_it_shows() {
+    // Two fake peers: one shows three valid headers up to its tip, the other
+    // claims a far greater height with a tip it never shows. The node holds
+    // the first one's tip at height 3, and the second one's at none, which is
+    // what deciding to leave the seeds goes by.
+    let n = Node::start(false, "checked");
+    let g = config::genesis(&n.dir.0).unwrap();
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = Vec::new();
+    let start = ting_node::now();
+    for i in 0..3 {
+        let mut block = runtime
+            .build_candidate(&g, &history, vec![], start + i, [0; 4], vec![])
+            .unwrap();
+        while !consensus::valid_pow(&block.header) {
+            block.header.nonce += 1;
+        }
+        runtime
+            .validate_and_apply_block(&g, &history, &block)
+            .unwrap();
+        history.push(block.header.clone());
+    }
+    let chain_id = g.chain_id();
+    let tip = history[2].id();
+    let honest = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let boaster = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (honest_address, boaster_address) =
+        (honest.local_addr().unwrap(), boaster.local_addr().unwrap());
+    let quiet = |request: &wire::Request| match request {
+        wire::Request::Raw { .. } => Err("block not found".into()),
+        wire::Request::Inventory { .. } => Ok(wire::Answer::Inventory {
+            ids: vec![],
+            next: None,
+        }),
+        wire::Request::Addresses => Ok(wire::Answer::Addresses(vec![])),
+        _ => Err("not served".into()),
+    };
+    fake_peer(honest, move |request, _| match request {
+        wire::Request::Hello(_) | wire::Request::State => {
+            Ok(wire::Answer::State(fake_state(chain_id, tip, 0xb1)))
+        }
+        wire::Request::Headers { .. } => Ok(wire::Answer::Headers(
+            history
+                .iter()
+                .map(|h| h.encode().try_into().unwrap())
+                .collect(),
+        )),
+        other => quiet(other),
+    });
+    fake_peer(boaster, move |request, _| match request {
+        wire::Request::Hello(_) | wire::Request::State => {
+            let mut state = fake_state(chain_id, [9; 32], 0xb2);
+            state.height = 1_000_000_000;
+            Ok(wire::Answer::State(state))
+        }
+        wire::Request::Headers { .. } => Ok(wire::Answer::Headers(vec![])),
+        other => quiet(other),
+    });
+    for address in [honest_address, boaster_address] {
+        command(&n.dir.0, &["add", "node", &address.to_string()]);
+    }
+    let status = |peers: &Value, address: SocketAddr| {
+        peers["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["address"] == address.to_string())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let peers = n.call("peers", json!({})).await;
+        let (honest, boaster) = (
+            status(&peers, honest_address),
+            status(&peers, boaster_address),
+        );
+        // Each has completed a round, so the node has looked its tip up.
+        if honest["checked_height"] == 3 && boaster["last_success"].is_u64() {
+            assert_eq!(boaster["height"], 1_000_000_000, "{boaster}");
+            assert_eq!(boaster["checked_height"], Value::Null, "{boaster}");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{peers}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    n.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nodes_discover_each_other_through_a_common_peer() {
     // A and C are each configured with B only. B learns their listening
     // addresses when they connect, synchronizes with them, and shares each
