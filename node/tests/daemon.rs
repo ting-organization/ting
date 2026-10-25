@@ -263,7 +263,23 @@ use tokio::{
     net::TcpStream,
 };
 
+/// A command's output, its result printed as JSON.
 fn cli(dir: &Path, args: &[&str]) -> std::process::Output {
+    launch(dir, &[&["--json"], args].concat())
+}
+/// A command's text, as a person reads it.
+fn text(dir: &Path, args: &[&str]) -> String {
+    let output = launch(dir, args);
+    assert!(
+        output.status.success(),
+        "CLI {:?}: {}{}",
+        args,
+        String::from_utf8_lossy(&output.stderr),
+        node_log(dir)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+fn launch(dir: &Path, args: &[&str]) -> std::process::Output {
     // Rust's Windows process spawner can inherit pipes from concurrent spawns.
     // Serialize test subprocess launches; peer/HTTP traffic remains concurrent.
     static LAUNCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -287,6 +303,22 @@ fn command(dir: &Path, args: &[&str]) -> Value {
         node_log(dir)
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+/// Waits until a node's log holds `text`.
+async fn wait_log(dir: &Path, text: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let log = std::fs::read_to_string(dir.join("node.log")).unwrap_or_default();
+        if log.contains(text) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the log never said {text:?}{}",
+            node_log(dir)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 /// The end of a node's log, for a failure's message.
 fn node_log(dir: &Path) -> String {
@@ -2131,18 +2163,210 @@ async fn a_node_syncs_the_seed_from_a_peer_restarts_and_carries_on() {
     command(&b.dir.0, &["add", "node", &a.info.p2p.to_string()]);
     b.wait_height(n).await;
     assert_eq!(b.call("status", json!({})).await["tip"], tip);
+    // B follows A, which counts it as a peer that connected to it. A may
+    // have connected back to B's announced address as well.
+    assert_eq!(a.call("peers", json!({})).await["inbound"], 1);
+    let shown = text(&a.dir.0, &["status"]);
+    assert!(shown.contains(" outbound, 1 inbound\n"), "{shown}");
+    // Its log tells the download from the connection to the catching up.
+    wait_log(&b.dir.0, &format!("connected to {}", a.info.p2p)).await;
+    wait_log(&b.dir.0, "downloading blocks from height 1").await;
+    wait_log(&b.dir.0, &format!("caught up at height {n}, tip {tip}")).await;
     b.stop().await;
     b.restart();
     assert_eq!(b.height().await, n);
     command(&b.dir.0, &["add", "node", &a.info.p2p.to_string()]);
     command(&a.dir.0, &["mine"]);
     b.wait_height(n + 1).await;
-    assert_eq!(
-        b.call("status", json!({})).await["tip"],
-        a.call("status", json!({})).await["tip"]
-    );
+    let next = a.call("status", json!({})).await["tip"].clone();
+    assert_eq!(b.call("status", json!({})).await["tip"], next);
+    // Caught up, it writes each new block.
+    let block = format!("block {} {}", n + 1, next.as_str().unwrap());
+    wait_log(&b.dir.0, &block).await;
+    wait_log(&a.dir.0, &block).await;
     a.stop().await;
     b.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_shows_as_connected_while_its_blocks_arrive() {
+    // A first download is one round, however long it lasts, and the peer
+    // shows as connected all along: from its hello, and as each of its
+    // blocks arrives. This fake peer sends the first of its three blocks and
+    // never the others, so that the round lasts until the reply deadline.
+    let b = Node::start(false, "downloading");
+    let g = config::genesis(&b.dir.0).unwrap();
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = Vec::new();
+    let mut blocks = Vec::new();
+    let start = ting_node::now();
+    for i in 0..3 {
+        let mut block = runtime
+            .build_candidate(&g, &history, vec![], start + i, [0; 4], vec![])
+            .unwrap();
+        while !consensus::valid_pow(&block.header) {
+            block.header.nonce += 1;
+        }
+        runtime
+            .validate_and_apply_block(&g, &history, &block)
+            .unwrap();
+        history.push(block.header.clone());
+        blocks.push(block);
+    }
+    let chain_id = g.chain_id();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let blocks = blocks.clone();
+            tokio::spawn(async move {
+                let mut sent_headers = false;
+                while let Ok(wire::Frame::Request(request)) =
+                    transport::read_wire(&mut stream, None, ting_node::FRAME_MAX).await
+                {
+                    let answer = match &request {
+                        wire::Request::Hello(_) | wire::Request::State => {
+                            wire::Answer::State(fake_state(chain_id, blocks[2].header.id(), 0xab))
+                        }
+                        wire::Request::Headers { .. } if !sent_headers => {
+                            sent_headers = true;
+                            wire::Answer::Headers(
+                                blocks
+                                    .iter()
+                                    .map(|b| b.header.encode().try_into().unwrap())
+                                    .collect(),
+                            )
+                        }
+                        wire::Request::Headers { .. } => wire::Answer::Headers(vec![]),
+                        wire::Request::Raw { id, .. } if *id == blocks[0].header.id() => {
+                            let bytes = blocks[0].encode();
+                            wire::Answer::Slice {
+                                offset: 0,
+                                total: bytes.len() as u64,
+                                bytes,
+                            }
+                        }
+                        // The other blocks are never sent.
+                        wire::Request::Raw { .. } => continue,
+                        wire::Request::Inventory { .. } => wire::Answer::Inventory {
+                            ids: vec![],
+                            next: None,
+                        },
+                        wire::Request::Addresses => wire::Answer::Addresses(vec![]),
+                        _ => return,
+                    };
+                    let frame = wire::Frame::Answer(answer);
+                    if transport::write_wire(&mut stream, &frame).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    command(&b.dir.0, &["add", "node", &fake.to_string()]);
+    wait_log(&b.dir.0, &format!("connected to {fake}: fake, at height 3")).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let peer = loop {
+        let peers = b.call("peers", json!({})).await;
+        let peer = peers["items"][0].clone();
+        if peer["last_block"].is_number() {
+            break peer;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the peer delivering a block never showed: {peers}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(peer["address"], fake.to_string());
+    assert!(peer["connected"].is_number(), "{peer}");
+    assert!(peer["error"].is_null(), "{peer}");
+    assert_eq!(peer["agent"], "fake");
+    assert_eq!(peer["height"], 3);
+    let shown = text(&b.dir.0, &["peers"]);
+    assert!(shown.contains(&format!("{fake}  fake ")), "{shown}");
+    assert!(
+        shown.contains("1 outbound of up to 8, 0 inbound"),
+        "{shown}"
+    );
+    b.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hello_alone_does_not_prove_a_peer() {
+    // The peer shows from its hello, but only a delivered block or a round
+    // proves it. This one answers the hello and fails the first request, so
+    // its address stays unproven and backs off as any failed one does.
+    let n = Node::start(false, "unproven");
+    let g = config::genesis(&n.dir.0).unwrap();
+    let chain_id = g.chain_id();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake = listener.local_addr().unwrap();
+    fake_peer(listener, move |request, _| match request {
+        wire::Request::Hello(_) => Ok(wire::Answer::State(fake_state(
+            chain_id,
+            g.block_id(),
+            0xac,
+        ))),
+        _ => Err("not served".into()),
+    });
+    command(&n.dir.0, &["add", "node", &fake.to_string()]);
+    wait_log(&n.dir.0, &format!("connected to {fake}: fake")).await;
+    wait_log(&n.dir.0, &format!("disconnected from {fake}: not served")).await;
+    let peers = n.call("peers", json!({})).await;
+    assert_eq!(peers["items"][0]["error"], "not served", "{peers}");
+    assert_eq!(peers["items"][0]["last_success"], Value::Null, "{peers}");
+    n.stop().await;
+    let book: Value =
+        serde_json::from_slice(&std::fs::read(n.dir.0.join("peers.json")).unwrap()).unwrap();
+    let entry = book["addresses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["address"] == fake.to_string())
+        .unwrap_or_else(|| panic!("{book}"));
+    assert_eq!(entry["verified"], Value::Null, "{book}");
+    assert!(entry["failures"].as_u64().unwrap() >= 1, "{book}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commands_print_text_or_with_json_their_result() {
+    // A person reads each result as text; `--json` prints the result itself.
+    let n = Node::start(true, "texts");
+    let height = n.height().await;
+    let status = text(&n.dir.0, &["status"]);
+    assert!(status.starts_with("texts · other · "), "{status}");
+    assert!(
+        status.contains(&format!("\nChain      height {height}\n")),
+        "{status}"
+    );
+    assert!(status.contains("\nPeers      0 connected\n"), "{status}");
+    assert!(
+        status.contains("\nREST       http://127.0.0.1:"),
+        "{status}"
+    );
+    let mined = text(&n.dir.0, &["mine"]);
+    let tip = n.call("status", json!({})).await["tip"].clone();
+    assert_eq!(
+        mined,
+        format!("Mined block {} {}\n", height + 1, tip.as_str().unwrap())
+    );
+    assert!(text(&n.dir.0, &["peers"]).starts_with("No peers connected.\n"));
+    assert!(text(&n.dir.0, &["docs"]).contains("\nWiki      http://127.0.0.1:"));
+    assert_eq!(
+        text(
+            &n.dir.0,
+            &["miner", "votes", "hold", "increase", "hold", "hold"]
+        ),
+        "Votes set: compute hold, state access increase, data hold, growth hold; \
+         templates from now on carry them.\n"
+    );
+    assert_eq!(command(&n.dir.0, &["status"])["height"], height + 1);
+    n.stop().await;
+    assert_eq!(
+        text(&n.dir.0, &["api", "disable"]),
+        "Saved in config.json: REST is off when the node starts.\n"
+    );
 }
 
 /// A transaction of the test chain, one for each `input`.

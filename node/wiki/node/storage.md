@@ -175,8 +175,9 @@ events, and any undo and redo data. Their frames stay in the block files,
 unreferenced, as the files are only ever appended to. Should such a branch ever be
 extended past the tip, it is fetched again like any other branch.
 
-The node's status shows `settled_height`, the height at or below which canonical
-blocks are settled, and `held_headers`, the index entries in memory.
+The node's status, `ting status --json` or `GET /v1/status`, shows `settled_height`,
+the height at or below which canonical blocks are settled, and `held_headers`, the
+index entries in memory.
 
 ## Connecting the best branch
 

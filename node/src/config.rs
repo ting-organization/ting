@@ -221,6 +221,18 @@ pub fn production_genesis() -> Option<Genesis> {
 pub fn development_genesis() -> Genesis {
     Genesis::development()
 }
+/// Which network a genesis defines: the production network, a development
+/// chain, or another.
+pub fn network(genesis: &Genesis) -> &'static str {
+    let id = genesis.chain_id();
+    if production_genesis().is_some_and(|g| g.chain_id() == id) {
+        "production"
+    } else if development_genesis().chain_id() == id {
+        "development"
+    } else {
+        "other"
+    }
+}
 /// Initializes `dir` for a development chain, or for the network whose
 /// genesis file is `supplied`.
 pub fn initialize(dir: &Path, c: &Config, supplied: Option<&Path>) -> Result<Genesis> {
@@ -237,10 +249,11 @@ pub fn initialize(dir: &Path, c: &Config, supplied: Option<&Path>) -> Result<Gen
 /// reference/conformance#the-seed).
 pub fn initialize_with(dir: &Path, c: &Config, g: Genesis) -> Result<Genesis> {
     let g = initialize_files(dir, c, g)?;
-    let height = crate::seed::import(dir, &g)?;
-    if height > 0 {
-        eprintln!("imported the seed: {height} blocks");
+    let blocks = crate::seed::ids(&g).len();
+    if blocks > 0 {
+        eprintln!("importing the seed: {blocks} blocks, each checked and executed");
     }
+    crate::seed::import(dir, &g)?;
     Ok(g)
 }
 /// Initializes `dir` for the network of genesis `g` without importing its

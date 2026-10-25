@@ -20,7 +20,8 @@ fn invoke(home: Option<&Path>, cwd: &Path, directory: Option<&Path>, args: &[&st
     if let Some(directory) = directory {
         command.arg("--data-dir").arg(directory);
     }
-    command.args(args);
+    // Results as JSON, which the tests read.
+    command.arg("--json").args(args);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

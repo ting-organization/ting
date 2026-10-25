@@ -1352,7 +1352,7 @@ impl Store {
         // such as one a power loss left zero-filled, ends it, and its block
         // and any after it are fetched again (wiki: node/storage).
         let truncate = |file: &mut std::fs::File| -> Result<Option<Vec<u8>>> {
-            eprintln!("block file: a damaged unindexed frame at {offset} is truncated");
+            crate::log!("block file: a damaged unindexed frame at {offset} is truncated");
             file.set_len(offset)
                 .and_then(|()| file.sync_all())
                 .map_err(err)?;

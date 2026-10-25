@@ -4,7 +4,7 @@ use crate::{
     config::{self, Config, Running},
     discovery::{self, AddressBook},
     mining::{self, Miner, Search, Selector},
-    peers, reads,
+    peers, progress, reads,
     transport::{self, Inbound, PeerStats},
 };
 use serde_json::{Value, json};
@@ -60,7 +60,7 @@ pub type SearchFactory = Arc<dyn Fn(u32) -> Arc<dyn Search> + Send + Sync>;
 async fn terminated() {
     let interrupted = async {
         if let Err(e) = tokio::signal::ctrl_c().await {
-            eprintln!("shutdown signal: {e}");
+            crate::log!("shutdown signal: {e}");
             std::future::pending::<()>().await;
         }
     };
@@ -72,7 +72,7 @@ async fn terminated() {
                 tokio::select! {_=interrupted=>{},_=term.recv()=>{}}
             }
             Err(e) => {
-                eprintln!("termination signal: {e}");
+                crate::log!("termination signal: {e}");
                 interrupted.await;
             }
         }
@@ -87,8 +87,16 @@ pub async fn seed_addresses(seeds: &[&str]) -> Vec<std::net::SocketAddr> {
     for seed in seeds {
         let lookup = tokio::net::lookup_host(*seed);
         match tokio::time::timeout(Duration::from_secs(5), lookup).await {
-            Ok(Ok(found)) => addresses.extend(found),
-            _ => eprintln!("seed {seed} did not resolve"),
+            Ok(Ok(found)) => {
+                let before = addresses.len();
+                addresses.extend(found);
+                let n = addresses.len() - before;
+                crate::log!(
+                    "seed node {seed}: {n} address{}",
+                    if n == 1 { "" } else { "es" }
+                );
+            }
+            _ => crate::log!("seed node {seed} did not resolve"),
         }
     }
     addresses
@@ -164,6 +172,7 @@ impl Node {
                 );
                 Ok(json!({
                     "items":items,
+                    "inbound":self.inbound.lock().unwrap().peers(),
                     "discovery":config["discovery"],
                     "max_peers":config["max_peers"],
                     "known":self.book.lock().unwrap().len(),
@@ -304,7 +313,7 @@ fn launch_api(listener: TcpListener, node: Node, cors: bool) -> ApiServer {
             let _ = stopped.await;
         });
         if let Err(e) = server.await {
-            eprintln!("REST service: {e}");
+            crate::log!("REST service: {e}");
         }
     });
     ApiServer { stop, task }
@@ -455,7 +464,8 @@ pub async fn run_with(dir: &Path, mining: Mining) -> Result<()> {
         ));
     }
     println!(
-        "Ting ready: control={} peers={} REST={}",
+        "{} Ting ready: control={} peers={} REST={}",
+        crate::log::utc(crate::now()),
         info.control,
         info.p2p,
         info.api
@@ -464,6 +474,7 @@ pub async fn run_with(dir: &Path, mining: Mining) -> Result<()> {
     let control_task = tokio::spawn(transport::control_server(control, node.clone()));
     let peer_task = tokio::spawn(transport::peer_server(p2p, node.clone()));
     let sync_task = tokio::spawn(peers::run(node.clone()));
+    let progress_task = tokio::spawn(progress::run(node.clone()));
     let api_task = tokio::spawn(api_manager(
         node.clone(),
         dir.into(),
@@ -475,12 +486,13 @@ pub async fn run_with(dir: &Path, mining: Mining) -> Result<()> {
     control_task.abort();
     peer_task.abort();
     sync_task.abort();
+    progress_task.abort();
     node.stop_miner().await;
     let _ = api_task.await;
     let _ = worker.join();
     // Addresses learned since the last round are hints worth keeping.
     if let Err(e) = node.book.lock().unwrap().save() {
-        eprintln!("peer address book: {e}");
+        crate::log!("peer address book: {e}");
     }
     std::fs::remove_file(dir.join("runtime.json")).map_err(|e| e.to_string())?;
     // The data directory stays locked until the process exits: aborted tasks
