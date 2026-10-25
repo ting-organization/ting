@@ -133,9 +133,10 @@ pub fn status(status: &Value, peers: &Value, miner: &Value) -> String {
     let network = text(&status["network"]);
     let height = number(&status["height"]);
     let best = number(&status["best_height"]);
-    let connected = peers["items"].as_array().map_or(0, |items| {
-        items.iter().filter(|p| p["connected"].is_number()).count()
-    }) as u64;
+    // This node's own connections, and the peers that follow it.
+    let outbound = peers["items"].as_array().map_or(0, |items| up_count(items));
+    let inbound = number(&peers["inbound"]);
+    let connected = outbound + inbound;
     let chain = if status["replaying"] == true {
         format!("height {}, rebuilding undo data", count(height))
     } else if best > height + 2 {
@@ -177,7 +178,19 @@ pub fn status(status: &Value, peers: &Value, miner: &Value) -> String {
     let mut lines = vec![
         ("Chain", chain),
         ("Tip", text(&status["tip"]).to_owned()),
-        ("Peers", format!("{} connected", count(connected))),
+        (
+            "Peers",
+            if inbound > 0 {
+                format!(
+                    "{} connected: {} outbound, {} inbound",
+                    count(connected),
+                    count(outbound),
+                    count(inbound)
+                )
+            } else {
+                format!("{} connected", count(connected))
+            },
+        ),
         ("Pool", pool),
         (
             "Capacity",
@@ -264,7 +277,11 @@ pub fn peers(peers: &Value) -> String {
     };
     let mut out = String::new();
     if up.is_empty() {
-        out += "No peers connected.\n";
+        out += if number(&peers["inbound"]) > 0 {
+            "No outbound peers connected.\n"
+        } else {
+            "No peers connected.\n"
+        };
     } else {
         let body: Vec<Vec<String>> = up
             .iter()
@@ -305,9 +322,10 @@ pub fn peers(peers: &Value) -> String {
         }
     }
     out + &format!(
-        "\n{} connected of up to {} · {} known · discovery {}\n",
+        "\n{} outbound of up to {}, {} inbound · {} known · discovery {}\n",
         count(up_count(&items)),
         count(number(&peers["max_peers"])),
+        count(number(&peers["inbound"])),
         plural(number(&peers["known"]), "address", "addresses"),
         if peers["discovery"] == true {
             "on"
@@ -320,24 +338,17 @@ fn up_count(items: &[Value]) -> u64 {
     items.iter().filter(|p| p["connected"].is_number()).count() as u64
 }
 
-/// `ting probe`: what the node at `address` answered.
-pub fn probe(address: &str, result: &Value, chain_id: &str) -> String {
+/// `ting probe`: what the node at `address` answered. A node answers a
+/// hello with its state only on this node's chain; it refuses another
+/// chain's, which the command reports as an error.
+pub fn probe(address: &str, result: &Value) -> String {
     let state = &result["answer"];
-    if let Some(error) = state["error"].as_str() {
-        return format!("{address} answered with an error: {error}\n");
-    }
-    let chain = if text(&state["chain_id"]) == chain_id {
-        "the same as this node's".to_owned()
-    } else {
-        format!("another chain, {}", text(&state["chain_id"]))
-    };
     let ids = |v: &Value| v.as_array().map_or(0, Vec::len) as u64;
     format!(
-        "{address} answered: {}, peer protocol {}\n\n",
+        "{address} answered on this network: {}, peer protocol {}\n\n",
         text(&state["agent"]),
         number(&state["version"])
     ) + &rows(&[
-        ("Chain", chain),
         ("Height", count(number(&state["height"]))),
         ("Tip", text(&state["tip"]).to_owned()),
         (
@@ -727,6 +738,10 @@ mod tests {
         assert!(synced.contains("Chain      height 5,420, in sync\n"));
         let alone = super::status(&status(325, 325), &none, &off);
         assert!(alone.contains("Chain      height 325, waiting for peers\n"));
+        // Peers that connected to it count as well.
+        let followed = super::status(&status(325, 325), &json!({"items":[],"inbound":2}), &off);
+        assert!(followed.contains("Chain      height 325, in sync\n"));
+        assert!(followed.contains("Peers      2 connected: 0 outbound, 2 inbound\n"));
     }
 
     #[test]
@@ -747,11 +762,15 @@ mod tests {
              198.51.100.7:18442 (configured): connection refused, 1d ago\n  \
              198.51.100.8:18442 (configured): not tried yet\n\
              \n\
-             1 connected of up to 8 · 3 addresses known · discovery on\n"
+             1 outbound of up to 8, 0 inbound · 3 addresses known · discovery on\n"
         );
         assert!(
             peers(&json!({"discovery":true,"known":0,"max_peers":8,"items":[]}))
                 .starts_with("No peers connected.\n")
+        );
+        assert!(
+            peers(&json!({"discovery":true,"known":0,"max_peers":8,"items":[],"inbound":2}))
+                .starts_with("No outbound peers connected.\n")
         );
     }
 }

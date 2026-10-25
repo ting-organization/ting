@@ -706,14 +706,7 @@ impl Chain {
     /// Which network the node is on, by its genesis: the production network,
     /// a development chain, or another.
     fn network(&self) -> &'static str {
-        let id = self.genesis.chain_id();
-        if crate::config::production_genesis().is_some_and(|g| g.chain_id() == id) {
-            "production"
-        } else if crate::config::development_genesis().chain_id() == id {
-            "development"
-        } else {
-            "other"
-        }
+        crate::config::network(&self.genesis)
     }
     pub fn tip(&self) -> Hash {
         self.canonical

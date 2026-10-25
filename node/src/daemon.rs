@@ -172,6 +172,7 @@ impl Node {
                 );
                 Ok(json!({
                     "items":items,
+                    "inbound":self.inbound.lock().unwrap().peers(),
                     "discovery":config["discovery"],
                     "max_peers":config["max_peers"],
                     "known":self.book.lock().unwrap().len(),

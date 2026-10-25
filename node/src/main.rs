@@ -355,17 +355,6 @@ fn invocation(data_dir: Option<&Path>) -> String {
         None => "ting".to_owned(),
     }
 }
-/// The network of a genesis, as the node's status names it.
-fn network(g: &ting_core::protocol::Genesis) -> &'static str {
-    let id = g.chain_id();
-    if config::production_genesis().is_some_and(|p| p.chain_id() == id) {
-        "production"
-    } else if config::development_genesis().chain_id() == id {
-        "development"
-    } else {
-        "other"
-    }
-}
 /// The text of `ting status`, which also shows the peers and the miner.
 async fn status_text(dir: &Path, status: &Value) -> Result<String> {
     let peers = rpc(dir, "peers", json!({})).await?;
@@ -373,8 +362,10 @@ async fn status_text(dir: &Path, status: &Value) -> Result<String> {
     Ok(show::status(status, &peers, &miner))
 }
 /// Runs the command; returns its result and the text that shows it, or
-/// nothing for `ting run`.
+/// nothing for `ting run`. With `--json` the text is left out where it takes
+/// requests of its own, so that the command asks the node only for the result.
 async fn execute(cli: Cli) -> Result<Option<(Value, String)>> {
+    let json = cli.json;
     let ting = invocation(cli.data_dir.as_deref());
     let directory = match cli.data_dir {
         Some(path) => path,
@@ -426,7 +417,7 @@ async fn execute(cli: Cli) -> Result<Option<(Value, String)>> {
             let g = config::initialize_with(dir, &c, g)?;
             let value = json!({"initialized":dir,"chain_id":ting_core::hash::hex(&g.chain_id()),"api_enabled":api});
             let height = ting_node::seed::ids(&g).len();
-            let text = show::init(&value, network(&g), height, &ting);
+            let text = show::init(&value, config::network(&g), height, &ting);
             (value, text)
         }
         Action::Run => {
@@ -435,6 +426,9 @@ async fn execute(cli: Cli) -> Result<Option<(Value, String)>> {
         }
         Action::Start => {
             let (status, fresh) = start(dir).await?;
+            if json {
+                return Ok(Some((status, String::new())));
+            }
             let summary = status_text(dir, &status).await?;
             let log = std::fs::canonicalize(dir)
                 .unwrap_or_else(|_| dir.clone())
@@ -445,6 +439,9 @@ async fn execute(cli: Cli) -> Result<Option<(Value, String)>> {
         Action::Stop => (stop(dir).await?, "Stopped the node.\n".into()),
         Action::Status => {
             let status = rpc(dir, "status", json!({})).await?;
+            if json {
+                return Ok(Some((status, String::new())));
+            }
             let text = status_text(dir, &status).await?;
             (status, text)
         }
@@ -455,8 +452,7 @@ async fn execute(cli: Cli) -> Result<Option<(Value, String)>> {
         }
         Action::Probe { address } => {
             let answer = probe(dir, address).await?;
-            let chain_id = ting_core::hash::hex(&config::genesis(dir)?.chain_id());
-            let text = show::probe(&address.to_string(), &answer, &chain_id);
+            let text = show::probe(&address.to_string(), &answer);
             (answer, text)
         }
         Action::Add(PeerCommand::Node { address }) => {

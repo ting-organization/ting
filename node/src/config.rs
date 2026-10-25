@@ -221,6 +221,18 @@ pub fn production_genesis() -> Option<Genesis> {
 pub fn development_genesis() -> Genesis {
     Genesis::development()
 }
+/// Which network a genesis defines: the production network, a development
+/// chain, or another.
+pub fn network(genesis: &Genesis) -> &'static str {
+    let id = genesis.chain_id();
+    if production_genesis().is_some_and(|g| g.chain_id() == id) {
+        "production"
+    } else if development_genesis().chain_id() == id {
+        "development"
+    } else {
+        "other"
+    }
+}
 /// Initializes `dir` for a development chain, or for the network whose
 /// genesis file is `supplied`.
 pub fn initialize(dir: &Path, c: &Config, supplied: Option<&Path>) -> Result<Genesis> {

@@ -162,9 +162,11 @@ The log shows the full block ids. It holds:
   left, and a line when it catches up. Its best header can rise during the download
   as further headers arrive.
 - Once caught up, each new tip.
-- With no peer connected for 30 seconds, while the node has addresses to try or is
-  on the production network, a line saying so, and another every ten minutes for as
-  long as none is.
+- With no peer connected either way for 30 seconds, a line saying where the node is
+  looking, and another every ten minutes for as long as none is: the seed nodes and
+  known addresses on the production network, known addresses on another, and only
+  the configured peers with discovery off. A node with nowhere to look, such as a
+  development chain of its own, writes none.
 - Invalid blocks and the peers banned for them, reorganizations, and anything that
   stops the chain.
 

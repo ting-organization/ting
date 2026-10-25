@@ -240,6 +240,8 @@ struct Link {
     retried: Option<Hash>,
     asked: u64,
     marked: u64,
+    /// When the peer last delivered a block or completed a round.
+    succeeded: Option<u64>,
     connected: u64,
     delivered: Option<u64>,
 }
@@ -988,16 +990,23 @@ impl Link {
             .unwrap()
             .learn_shared(&shared, self.address.ip());
     }
-    /// A hello answered, a block delivered or a round completed: the peer is
-    /// proven, and its status current.
+    /// A block delivered or a round completed: the peer is proven, and its
+    /// status current.
     fn report(&mut self) {
         let now = crate::now();
         if now >= self.marked + 60 {
             self.marked = now;
             self.node.book.lock().unwrap().succeeded(self.address, now);
         }
+        self.succeeded = Some(now);
+        self.publish();
+    }
+    /// The peer's status, as `ting peers` shows it. A hello alone publishes
+    /// it without proving the peer: one that answers and then fails still
+    /// backs off as any failed peer does (wiki: node/sync#finding-more-peers).
+    fn publish(&self) {
         let status = json!({"address":self.address,"source":self.source,"agent":self.agent,
-            "connected":self.connected,"last_success":now,"height":self.height,
+            "connected":self.connected,"last_success":self.succeeded,"height":self.height,
             "last_block":self.delivered,"error":null});
         self.node
             .peers
@@ -1040,10 +1049,11 @@ async fn follow(
         retried: None,
         asked: 0,
         marked: 0,
+        succeeded: None,
         connected: crate::now(),
         delivered: None,
     };
-    link.report();
+    link.publish();
     crate::log!(
         "connected to {address}: {}, at height {}",
         link.agent,

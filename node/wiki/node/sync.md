@@ -320,7 +320,9 @@ ones in random order. Among public addresses it keeps at most one discovered pee
 per network group (an IPv4 /16, an IPv6 /32), so a single operator's address range
 cannot take every slot. A discovered peer whose connection fails is replaced, and
 its address is not tried again for a minute, doubling with each further failure up
-to an hour.
+to an hour. A delivered block counts as a completed round, so a long first download
+that fails partway still proves the peer; a `hello` alone does not, and a peer that
+answers it and then fails backs off like any other.
 
 **Probing.** When every slot is taken, the node tests one untried address every two
 minutes with a connection that only exchanges `hello`. An address that answers can

@@ -1,7 +1,7 @@
 //! The node's account of its chain as it runs (wiki:
 //! start/node#what-the-node-writes): where the chain stands when the node
 //! starts, how a download toward the best header goes and when it catches
-//! up, each new tip after that, and a while with no peer to follow.
+//! up, each new tip after that, and a while with no peer either way.
 use crate::{daemon::Node, log::duration};
 use serde_json::json;
 use std::time::Duration;
@@ -25,6 +25,26 @@ struct Download {
     from: u64,
     started: Instant,
     written: Instant,
+}
+
+/// Where a node with no peer looks for one, by whether discovery is on,
+/// whether it is on the production network, and the addresses its book
+/// holds, configured ones among them; none when it has nowhere to look.
+fn trying(
+    discovery: bool,
+    production: bool,
+    known: usize,
+    configured: usize,
+) -> Option<&'static str> {
+    if discovery && production {
+        Some("the seed nodes and known addresses")
+    } else if discovery && known > 0 {
+        Some("known addresses")
+    } else if configured > 0 {
+        Some("the configured peers")
+    } else {
+        None
+    }
 }
 
 /// Writes the chain's progress until the node stops.
@@ -113,20 +133,30 @@ pub async fn run(node: Node) {
             }
         }
         last = event;
-        // A node with nowhere to look, as a development chain of its own,
-        // is not alone.
+        // Peers either way: its own connections and those of peers that
+        // follow it. A node with nowhere to look, as a development chain of
+        // its own, is not alone.
         let connected = node
             .peers
             .lock()
             .unwrap()
             .values()
             .filter(|status| status["connected"].is_number())
-            .count();
-        let looking = network == "production" || !node.book.lock().unwrap().is_empty();
-        if connected > 0 || !looking {
+            .count()
+            + node.inbound.lock().unwrap().peers();
+        let trying = {
+            let book = node.book.lock().unwrap();
+            trying(
+                node.discovery,
+                network == "production",
+                book.len(),
+                book.configured(),
+            )
+        };
+        let Some(trying) = trying.filter(|_| connected == 0) else {
             alone = None;
             continue;
-        }
+        };
         let (since, said) = alone.get_or_insert((now, None));
         let due = match said {
             None => now >= *since + ALONE,
@@ -134,15 +164,30 @@ pub async fn run(node: Node) {
         };
         if due {
             crate::log!(
-                "no peers connected for {}; looking for them through {}",
-                duration(since.elapsed().as_secs()),
-                if network == "production" {
-                    "the seed nodes and known addresses"
-                } else {
-                    "the configured and known addresses"
-                }
+                "no peers connected for {}; trying {trying}",
+                duration(since.elapsed().as_secs())
             );
             *said = Some(now);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trying;
+
+    #[test]
+    fn a_node_alone_says_where_it_looks_and_only_where_it_does() {
+        assert_eq!(
+            trying(true, true, 0, 0),
+            Some("the seed nodes and known addresses")
+        );
+        assert_eq!(trying(true, false, 3, 1), Some("known addresses"));
+        // With discovery off it looks up no seed node and tries no address
+        // it learned: only its configured peers, if it has any.
+        assert_eq!(trying(false, true, 5, 1), Some("the configured peers"));
+        assert_eq!(trying(false, true, 5, 0), None);
+        // A development chain of its own has nowhere to look.
+        assert_eq!(trying(true, false, 0, 0), None);
     }
 }

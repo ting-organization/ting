@@ -2163,6 +2163,11 @@ async fn a_node_syncs_the_seed_from_a_peer_restarts_and_carries_on() {
     command(&b.dir.0, &["add", "node", &a.info.p2p.to_string()]);
     b.wait_height(n).await;
     assert_eq!(b.call("status", json!({})).await["tip"], tip);
+    // B follows A, which counts it as a peer that connected to it. A may
+    // have connected back to B's announced address as well.
+    assert_eq!(a.call("peers", json!({})).await["inbound"], 1);
+    let shown = text(&a.dir.0, &["status"]);
+    assert!(shown.contains(" outbound, 1 inbound\n"), "{shown}");
     // Its log tells the download from the connection to the catching up.
     wait_log(&b.dir.0, &format!("connected to {}", a.info.p2p)).await;
     wait_log(&b.dir.0, "downloading blocks from height 1").await;
@@ -2280,8 +2285,48 @@ async fn a_peer_shows_as_connected_while_its_blocks_arrive() {
     assert_eq!(peer["height"], 3);
     let shown = text(&b.dir.0, &["peers"]);
     assert!(shown.contains(&format!("{fake}  fake ")), "{shown}");
-    assert!(shown.contains("1 connected of up to 8"), "{shown}");
+    assert!(
+        shown.contains("1 outbound of up to 8, 0 inbound"),
+        "{shown}"
+    );
     b.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hello_alone_does_not_prove_a_peer() {
+    // The peer shows from its hello, but only a delivered block or a round
+    // proves it. This one answers the hello and fails the first request, so
+    // its address stays unproven and backs off as any failed one does.
+    let n = Node::start(false, "unproven");
+    let g = config::genesis(&n.dir.0).unwrap();
+    let chain_id = g.chain_id();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake = listener.local_addr().unwrap();
+    fake_peer(listener, move |request, _| match request {
+        wire::Request::Hello(_) => Ok(wire::Answer::State(fake_state(
+            chain_id,
+            g.block_id(),
+            0xac,
+        ))),
+        _ => Err("not served".into()),
+    });
+    command(&n.dir.0, &["add", "node", &fake.to_string()]);
+    wait_log(&n.dir.0, &format!("connected to {fake}: fake")).await;
+    wait_log(&n.dir.0, &format!("disconnected from {fake}: not served")).await;
+    let peers = n.call("peers", json!({})).await;
+    assert_eq!(peers["items"][0]["error"], "not served", "{peers}");
+    assert_eq!(peers["items"][0]["last_success"], Value::Null, "{peers}");
+    n.stop().await;
+    let book: Value =
+        serde_json::from_slice(&std::fs::read(n.dir.0.join("peers.json")).unwrap()).unwrap();
+    let entry = book["addresses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["address"] == fake.to_string())
+        .unwrap_or_else(|| panic!("{book}"));
+    assert_eq!(entry["verified"], Value::Null, "{book}");
+    assert!(entry["failures"].as_u64().unwrap() >= 1, "{book}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
