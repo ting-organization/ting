@@ -29,76 +29,153 @@ use tokio::{
 
 pub type PeerStats = Arc<Mutex<BTreeMap<String, Value>>>;
 /// Open inbound connections and their remote addresses, so that a ban ends
-/// the ones it covers at once and no one network takes every slot.
-#[derive(Default)]
+/// the ones it covers at once, no one network takes every slot, and a full
+/// node still takes newcomers.
 pub struct Inbound {
     next: u64,
-    open: BTreeMap<u64, (IpAddr, oneshot::Sender<()>)>,
+    open: BTreeMap<u64, Slot>,
+    /// Most connections at once.
+    max: usize,
+    /// New blocks and transactions delivered so far, by which the latest
+    /// deliveries are known.
+    deliveries: u64,
 }
-/// Most inbound connections at once, and from one address range (wiki:
-/// node/sync), this machine aside.
-const INBOUND_MAX: usize = 125;
+/// An open inbound connection: where it comes from, what ends it, and when it
+/// last delivered a new block and a new transaction, as the count of
+/// deliveries then, 0 if never.
+struct Slot {
+    ip: IpAddr,
+    end: oneshot::Sender<()>,
+    block: u64,
+    transaction: u64,
+}
+/// Most inbound connections at once unless configured otherwise, and most
+/// from one address range (wiki: node/sync), this machine aside.
+pub const INBOUND_MAX: usize = 125;
 const INBOUND_PER_RANGE: usize = 8;
+/// With every slot taken and no network crowding the others, the connections
+/// that keep theirs: the latest this many to deliver a new block, the latest
+/// this many to deliver a new transaction, and then the longest connected half
+/// of the rest.
+const PROTECTED: usize = 4;
 /// What inbound connections give way by: a public address's network group (an
 /// IPv4 /16, an IPv6 /32), and a local one's range.
 fn network(ip: IpAddr) -> IpAddr {
     discovery::group(ip).unwrap_or_else(|| discovery::range(ip))
 }
 impl Inbound {
+    /// Room for `max` connections at once.
+    pub fn new(max: usize) -> Self {
+        Self {
+            next: 0,
+            open: BTreeMap::new(),
+            max,
+            deliveries: 0,
+        }
+    }
     /// Takes a connection from `ip` if the limits allow: under its range's
-    /// share, and with every slot taken, in place of the newest connection of
-    /// the network holding the most, if that network holds at least two more
-    /// than `ip`'s. Many addresses of one network therefore cannot hold every
-    /// slot, and networks of one connection each are never churned.
+    /// share, and with every slot taken, in place of another. That is the
+    /// newest connection of the network holding the most, if that network
+    /// holds at least two more than `ip`'s, so that many addresses of one
+    /// network cannot hold every slot; otherwise the one least worth keeping.
     pub fn admit(&mut self, ip: IpAddr) -> Option<(u64, oneshot::Receiver<()>)> {
         let range = discovery::range(ip);
         let ranged = self
             .open
             .values()
-            .filter(|(open, _)| discovery::range(*open) == range)
+            .filter(|slot| discovery::range(slot.ip) == range)
             .count();
         if ranged >= INBOUND_PER_RANGE && !discovery::loopback(ip) {
             return None;
         }
-        if self.open.len() >= INBOUND_MAX {
-            let mut held: BTreeMap<IpAddr, usize> = BTreeMap::new();
-            for (open, _) in self.open.values() {
-                *held.entry(network(*open)).or_default() += 1;
-            }
-            let own = held.get(&network(ip)).copied().unwrap_or(0);
-            let (&largest, &most) = held.iter().max_by_key(|(_, n)| **n)?;
-            if most <= own + 1 {
-                return None;
-            }
-            let newest = self
-                .open
-                .iter()
-                .rev()
-                .find(|(_, (open, _))| network(*open) == largest)
-                .map(|(key, _)| *key)?;
-            if let Some((_, end)) = self.open.remove(&newest) {
-                let _ = end.send(());
+        if self.open.len() >= self.max {
+            let leaving = self.crowded(ip).or_else(|| self.least_useful())?;
+            if let Some(slot) = self.open.remove(&leaving) {
+                let _ = slot.end.send(());
             }
         }
         Some(self.open(ip))
     }
+    /// The newest connection of the network holding the most, if that network
+    /// holds at least two more than `ip`'s.
+    fn crowded(&self, ip: IpAddr) -> Option<u64> {
+        let mut held: BTreeMap<IpAddr, usize> = BTreeMap::new();
+        for slot in self.open.values() {
+            *held.entry(network(slot.ip)).or_default() += 1;
+        }
+        let own = held.get(&network(ip)).copied().unwrap_or(0);
+        let (&largest, &most) = held.iter().max_by_key(|(_, n)| **n)?;
+        if most <= own + 1 {
+            return None;
+        }
+        self.open
+            .iter()
+            .rev()
+            .find(|(_, slot)| network(slot.ip) == largest)
+            .map(|(key, _)| *key)
+    }
+    /// The connection least worth keeping, after Bitcoin's eviction: those
+    /// that delivered new blocks and transactions latest, and of the rest the
+    /// longest connected half, are kept, and of the others the newest of the
+    /// network holding the most gives way; of networks holding as many, the
+    /// one whose newest is newest. None while every connection is kept.
+    fn least_useful(&self) -> Option<u64> {
+        // Oldest first.
+        let mut rest: Vec<(u64, &Slot)> = self.open.iter().map(|(k, s)| (*k, s)).collect();
+        let deliveries: [fn(&Slot) -> u64; 2] = [|s| s.block, |s| s.transaction];
+        for delivered in deliveries {
+            let mut latest: Vec<(u64, u64)> = rest
+                .iter()
+                .filter(|(_, slot)| delivered(slot) > 0)
+                .map(|(key, slot)| (delivered(slot), *key))
+                .collect();
+            latest.sort_unstable_by(|a, b| b.cmp(a));
+            latest.truncate(PROTECTED);
+            rest.retain(|(key, _)| !latest.iter().any(|(_, kept)| kept == key));
+        }
+        let mut held: BTreeMap<IpAddr, (usize, u64)> = BTreeMap::new();
+        for (key, slot) in &rest[rest.len() / 2..] {
+            let (count, newest) = held.entry(network(slot.ip)).or_default();
+            *count += 1;
+            *newest = *key;
+        }
+        held.into_values().max().map(|(_, newest)| newest)
+    }
     fn open(&mut self, ip: IpAddr) -> (u64, oneshot::Receiver<()>) {
         let (end, ended) = oneshot::channel();
         self.next += 1;
-        self.open.insert(self.next, (ip, end));
+        let slot = Slot {
+            ip,
+            end,
+            block: 0,
+            transaction: 0,
+        };
+        self.open.insert(self.next, slot);
         (self.next, ended)
+    }
+    /// Records that the connection `key` delivered a block this node did not
+    /// have, or with `block` false, such a transaction.
+    pub fn delivered(&mut self, key: u64, block: bool) {
+        self.deliveries += 1;
+        if let Some(slot) = self.open.get_mut(&key) {
+            if block {
+                slot.block = self.deliveries;
+            } else {
+                slot.transaction = self.deliveries;
+            }
+        }
     }
     /// Ends every connection from an address `banned` covers.
     pub fn end(&mut self, banned: impl Fn(IpAddr) -> bool) {
         let ending: Vec<u64> = self
             .open
             .iter()
-            .filter(|(_, (ip, _))| banned(*ip))
+            .filter(|(_, slot)| banned(slot.ip))
             .map(|(key, _)| *key)
             .collect();
         for key in ending {
-            if let Some((_, end)) = self.open.remove(&key) {
-                let _ = end.send(());
+            if let Some(slot) = self.open.remove(&key) {
+                let _ = slot.end.send(());
             }
         }
     }
@@ -492,7 +569,7 @@ pub async fn peer_server(listener: TcpListener, node: Node) {
         let node = node.clone();
         tokio::spawn(async move {
             let _registered = Registered(&node.inbound, key);
-            serve(stream, remote, node.clone(), ended).await;
+            serve(stream, remote, node.clone(), key, ended).await;
         });
     }
 }
@@ -593,14 +670,15 @@ async fn pushed(
             .await?,
     )
 }
-/// One inbound connection: `hello`, then requests answered in order for as
-/// long as the peer keeps sending them. A peer that asked for announcements in
-/// its hello is also told, between answers, when this node's tip or pool
-/// changes.
+/// One inbound connection, `key` in `Inbound`: `hello`, then requests answered
+/// in order for as long as the peer keeps sending them. A peer that asked for
+/// announcements in its hello is also told, between answers, when this node's
+/// tip or pool changes.
 async fn serve(
     mut stream: TcpStream,
     remote: SocketAddr,
     node: Node,
+    key: u64,
     mut ended: oneshot::Receiver<()>,
 ) {
     // The hello, whole, within the frame deadline: a connection that says
@@ -711,6 +789,7 @@ async fn serve(
             filled = Instant::now();
         }
         tokens -= cost;
+        let block = matches!(request, wire::Request::Import(_));
         let result = match request {
             wire::Request::Hello(_) => Err(wire::UNKNOWN_REQUEST.into()),
             wire::Request::Addresses => {
@@ -754,6 +833,11 @@ async fn serve(
         if let Ok(wire::Answer::Slice { bytes, .. }) = &result {
             tokens -= carried(bytes.len());
         }
+        // A peer that brings what this node lacks keeps its slot when every
+        // slot is taken.
+        if let Ok(wire::Answer::Taken { known: false, .. }) = &result {
+            node.inbound.lock().unwrap().delivered(key, block);
+        }
         let failed = match &result {
             Err(e) if is_invalid(e) => {
                 peers::punish(&node, remote);
@@ -788,7 +872,7 @@ mod tests {
 
     #[test]
     fn a_ban_ends_the_open_connections_it_covers_and_no_others() {
-        let inbound = Mutex::new(Inbound::default());
+        let inbound = Mutex::new(Inbound::new(INBOUND_MAX));
         let (bad, good) = ("8.8.1.1".parse().unwrap(), "9.9.1.1".parse().unwrap());
         let (first, mut first_ended) = inbound.lock().unwrap().open(bad);
         let (second, mut second_ended) = inbound.lock().unwrap().open(bad);
@@ -805,7 +889,7 @@ mod tests {
 
     #[test]
     fn one_address_range_cannot_take_every_inbound_slot() {
-        let mut inbound = Inbound::default();
+        let mut inbound = Inbound::new(INBOUND_MAX);
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
         // Eight from one address, or one IPv6 /64; the ninth is refused.
         for _ in 0..INBOUND_PER_RANGE {
@@ -832,13 +916,85 @@ mod tests {
         assert_eq!(inbound.open.len(), INBOUND_MAX);
         assert!(ends.last_mut().unwrap().try_recv().is_ok());
         assert!(ends[0].try_recv().is_err());
-        // One whose network already holds as many as any other is refused:
-        // networks of one connection each are never churned.
-        let mut full = Inbound::default();
-        for i in 0..INBOUND_MAX {
-            assert!(full.admit(IpAddr::from([11, i as u8, 0, 1])).is_some());
+    }
+
+    #[test]
+    fn a_full_node_takes_newcomers_in_place_of_its_least_useful_peers() {
+        // Every slot taken by networks of one connection each, as honest
+        // growth leaves a seed node, however many slots there are: a newcomer
+        // still comes in, in place of the newest connection.
+        let network = |i: usize| IpAddr::from([11 + (i / 256) as u8, (i % 256) as u8, 0, 1]);
+        for max in [INBOUND_MAX, 1_000] {
+            let mut inbound = Inbound::new(max);
+            let mut open: Vec<_> = (0..max)
+                .map(|i| inbound.admit(network(i)).unwrap())
+                .collect();
+            let mut first = inbound.admit(network(max)).unwrap();
+            assert_eq!(inbound.open.len(), max);
+            assert!(open[max - 1].1.try_recv().is_ok());
+            // One that delivers a new transaction keeps its place: the next
+            // newcomer takes that of the newest that delivered nothing.
+            inbound.delivered(first.0, false);
+            let mut second = inbound.admit(network(max + 1)).unwrap();
+            assert!(open[max - 2].1.try_recv().is_ok());
+            // The latest four to deliver a transaction keep theirs, and the
+            // latest four to deliver a block: four more transactions leave
+            // the first newcomer to the others.
+            for (key, _) in &open[max - 6..max - 2] {
+                inbound.delivered(*key, false);
+            }
+            inbound.delivered(second.0, true);
+            assert!(inbound.admit(network(max + 2)).is_some());
+            assert!(first.1.try_recv().is_ok() && second.1.try_recv().is_err());
+            for (_, end) in &mut open[..max - 2] {
+                assert!(end.try_recv().is_err());
+            }
+            // Newcomers that follow each other, none delivering, take each
+            // other's places and leave every other connection be.
+            let mut newcomers: Vec<_> = (3..20)
+                .map(|i| inbound.admit(network(max + i)).unwrap().1)
+                .collect();
+            let mut last = newcomers.pop().unwrap();
+            assert!(last.try_recv().is_err());
+            for mut end in newcomers {
+                assert!(end.try_recv().is_ok());
+            }
+            assert_eq!(inbound.open.len(), max);
+            for (_, end) in &mut open[..max - 2] {
+                assert!(end.try_recv().is_err());
+            }
         }
-        assert!(full.admit(ip("12.0.0.1")).is_none());
+    }
+
+    #[test]
+    fn a_newcomer_from_the_network_holding_the_most_still_comes_in() {
+        // Two connections of one network, the oldest, and eight of others:
+        // a third of that network comes in all the same, as nodes of one
+        // hosting provider do. The longest connected half keeps its places,
+        // so the newest of the others gives way.
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let mut inbound = Inbound::new(10);
+        let mut open: Vec<_> = ["11.0.0.1", "11.0.1.1"]
+            .into_iter()
+            .map(ip)
+            .chain((12..20).map(|n| IpAddr::from([n, 0, 0, 1])))
+            .map(|address| inbound.admit(address).unwrap().1)
+            .collect();
+        let mut third = inbound.admit(ip("11.0.2.1")).unwrap().1;
+        assert!(open[9].try_recv().is_ok());
+        for end in &mut open[..9] {
+            assert!(end.try_recv().is_err());
+        }
+        // A fourth takes the place of the third, the newest of the others;
+        // one from elsewhere, that of the network's newest, since the network
+        // holds at least two more than its own.
+        let mut fourth = inbound.admit(ip("11.0.3.1")).unwrap().1;
+        assert!(third.try_recv().is_ok());
+        assert!(inbound.admit(ip("30.0.0.1")).is_some());
+        assert!(fourth.try_recv().is_ok());
+        for end in &mut open[..9] {
+            assert!(end.try_recv().is_err());
+        }
     }
 
     #[test]
@@ -853,7 +1009,7 @@ mod tests {
             |i| IpAddr::from([0x2a00, 1, i as u16, 0, 0, 0, 0, 1]),
         ];
         for crowd in crowds {
-            let mut inbound = Inbound::default();
+            let mut inbound = Inbound::new(INBOUND_MAX);
             let mut ends: Vec<_> = (0..INBOUND_MAX)
                 .map(|i| inbound.admit(crowd(i)).unwrap().1)
                 .collect();
@@ -865,11 +1021,13 @@ mod tests {
                 assert!(end.try_recv().is_ok());
             }
             assert!(ends[0].try_recv().is_err());
-            // The crowd comes back from yet another of its addresses, and from
-            // a network of its own: neither takes a newcomer's place.
-            assert!(inbound.admit(crowd(INBOUND_MAX)).is_none());
-            assert!(inbound.admit(ip("30.0.0.1")).is_some());
+            // The crowd comes back from yet another of its addresses: it takes
+            // the place of its own newest, not a newcomer's. Another newcomer
+            // takes the crowd's newest place again.
+            let mut back = inbound.admit(crowd(INBOUND_MAX)).unwrap().1;
             assert!(ends[INBOUND_MAX - 9].try_recv().is_ok());
+            assert!(inbound.admit(ip("30.0.0.1")).is_some());
+            assert!(back.try_recv().is_ok() && ends[INBOUND_MAX - 10].try_recv().is_err());
             for mut end in newcomers {
                 assert!(end.try_recv().is_err());
             }

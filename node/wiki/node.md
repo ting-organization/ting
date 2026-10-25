@@ -161,6 +161,7 @@ excluded from status output, logs and peer messages.
 | `peers` | `[]` | Peers to synchronize with, as `IP:port`; at most 32 |
 | `discovery` | `true` | Whether the node [finds more peers](node/sync.md#finding-more-peers) through its peers |
 | `max_peers` | `8` | Peers it keeps connections to, configured ones included; 1 to 64 |
+| `max_inbound` | `125` | Connections it takes from peers at once, read at start; 1 to 1,024. A seed node's operator may raise it ([limits](reference/peer-protocol.md#limits)) |
 | `undo_window` | `43200` | Canonical blocks whose undo data the node keeps, 30 days; `0` keeps everything ([per-block changes](node/storage.md#per-block-changes)) |
 | `db_cache_mib` | `256` | The database's page cache in MiB, at least 1 ([the database](node/storage.md#the-database)) |
 | `votes` | `[0, 0, 0, 0]` | Capacity votes in C, S, D, G order: 0 hold, 1 increase, 2 decrease |
@@ -172,10 +173,10 @@ excluded from status output, logs and peer messages.
 | `mempool_mib` | `16` | MiB of encoded transactions the mempool holds at most, or the data of four blocks at the next block's capacity when that is more; at least 1 |
 
 A file with an unknown field or a value out of bounds is refused. `api_cors`,
-`discovery`, `max_peers`, `undo_window`, `db_cache_mib`, the miner fields,
-`producer_hex` and the mempool fields may be left out and take their defaults. The
-node writes the file atomically, through a synced temporary file that is then
-renamed.
+`discovery`, `max_peers`, `max_inbound`, `undo_window`, `db_cache_mib`, the miner
+fields, `producer_hex` and the mempool fields may be left out and take their
+defaults. The node writes the file atomically, through a synced temporary file that
+is then renamed.
 
 The CLI changes peers, REST, the miner and producer data whether or not the node is
 running: it asks a running node, and otherwise edits the file while holding

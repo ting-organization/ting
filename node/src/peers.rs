@@ -4,8 +4,9 @@
 //! it asks for the peer's new headers and the blocks it lacks, pushes its own
 //! new blocks when it has more work, and exchanges pooled transactions. `run`
 //! keeps the connections: it opens them, opens them again after a failure,
-//! bans a peer that sent invalid data, and connects one more peer while the
-//! tip has not moved for a while.
+//! bans a peer that sent invalid data, ends its links to seeds once it has
+//! enough other peers, and connects one more peer while the tip has not moved
+//! for a while.
 use crate::{
     FRAME_MAX, Result,
     chain::{
@@ -15,7 +16,7 @@ use crate::{
     },
     config,
     daemon::Node,
-    discovery::{self, BAN},
+    discovery::{self, AddressBook, BAN},
     hash_arg,
     transport::{self, ITSELF},
     wire::{self, Answer, Body, Part, Request},
@@ -300,6 +301,17 @@ impl Link {
     }
     /// Does what is due; returns whether more is waiting at once.
     async fn round(&mut self, local: &Event) -> Result<bool> {
+        // Addresses come first: a node that knows only a seed learns of
+        // other peers before its first blocks, which can take long.
+        let interval = if self.looking.load(Ordering::Relaxed) {
+            LOOKING.as_secs()
+        } else {
+            ASK_INTERVAL
+        };
+        if self.node.discovery && crate::now() >= self.asked + interval {
+            self.asked = crate::now();
+            self.addresses().await;
+        }
         let mut more = false;
         if self.pull {
             self.pull = false;
@@ -315,15 +327,6 @@ impl Link {
         if self.swap {
             self.swap = false;
             self.swap_pool(local).await?;
-        }
-        let interval = if self.looking.load(Ordering::Relaxed) {
-            LOOKING.as_secs()
-        } else {
-            ASK_INTERVAL
-        };
-        if self.node.discovery && crate::now() >= self.asked + interval {
-            self.asked = crate::now();
-            self.addresses().await;
         }
         if let Some(error) = &self.conn.broken {
             return Err(error.clone());
@@ -1125,6 +1128,28 @@ async fn ended(node: &Node, address: SocketAddr, source: &str, result: Result<()
 
 type Ended = (SocketAddr, Result<()>);
 
+/// Whether the node can do without the seeds (wiki:
+/// node/sync#finding-more-peers): whether at least half of `max_peers` of its
+/// connections `linked`, configured or discovered, are to peers other than
+/// seeds and connected, as `peers` shows them.
+fn past_seeds(
+    linked: impl IntoIterator<Item = SocketAddr>,
+    book: &AddressBook,
+    peers: &BTreeMap<String, Value>,
+    max_peers: u32,
+) -> bool {
+    let others = linked
+        .into_iter()
+        .filter(|a| !book.is_seed(a))
+        .filter(|a| {
+            peers
+                .get(&a.to_string())
+                .is_some_and(|s| s["connected"].is_u64())
+        })
+        .count();
+    others >= (max_peers as usize).div_ceil(2)
+}
+
 /// Keeps the outbound connections, checking every two seconds.
 pub async fn run(node: Node) {
     let looking = Arc::new(AtomicBool::new(true));
@@ -1199,8 +1224,8 @@ pub async fn run(node: Node) {
             }
         }
         // Connections that should end: to a banned address, to a configured
-        // peer no longer configured, or one discovered peer too many once the
-        // tip moves again.
+        // peer no longer configured, to a seed once the node holds enough
+        // others, or one discovered peer too many once the tip moves again.
         let current = events.borrow().tip;
         if current != tip {
             (tip, tip_since) = (current, now);
@@ -1221,6 +1246,24 @@ pub async fn run(node: Node) {
                 })
                 .map(|(address, _)| *address)
                 .collect()
+        };
+        // A seed is where a node starts, not a peer to keep: once the node
+        // holds enough other connections, its links to seeds end, and the
+        // seeds keep room for nodes that are new.
+        let leave_seeds = {
+            let book = node.book.lock().unwrap();
+            let peers = node.peers.lock().unwrap();
+            let linked = links.keys().copied().filter(|a| !ending.contains(a));
+            let leave = past_seeds(linked, &book, &peers, config.max_peers);
+            if leave {
+                let seeds: Vec<SocketAddr> = links
+                    .keys()
+                    .copied()
+                    .filter(|a| book.is_seed(a) && !ending.contains(a))
+                    .collect();
+                ending.extend(seeds);
+            }
+            leave
         };
         let discovered: Vec<SocketAddr> = links
             .iter()
@@ -1271,7 +1314,11 @@ pub async fn run(node: Node) {
                 let connected = links.values().filter(|(_, s)| *s == "discovered").count();
                 let missing = want.saturating_sub(connected);
                 for address in book.pick(missing, &busy, now, discovery::seed()) {
-                    start.push((address, "discovered"));
+                    // Picked after every other address, a seed comes only
+                    // when nothing else is left to try.
+                    if !(leave_seeds && book.is_seed(&address)) {
+                        start.push((address, "discovered"));
+                    }
                 }
                 if missing == 0
                     && probes.is_empty()
@@ -1312,4 +1359,45 @@ pub async fn run(node: Node) {
     }
     tasks.abort_all();
     probes.abort_all();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use discovery::Source;
+
+    #[test]
+    fn a_node_leaves_the_seeds_once_half_its_peers_are_others() {
+        let a = |i: u8| SocketAddr::from(([8, i, 1, 1], 18442));
+        let mut book = AddressBook::default();
+        let seeds = [a(1), a(2)];
+        for seed in seeds {
+            book.learn_seed(seed);
+        }
+        book.configure(&[a(3)]);
+        for i in 4..=8 {
+            book.learn(a(i), Source::Peer);
+        }
+        let connected = |addresses: &[SocketAddr]| -> BTreeMap<String, Value> {
+            addresses
+                .iter()
+                .map(|a| (a.to_string(), json!({"address":a,"connected":1})))
+                .collect()
+        };
+        // The seeds and three others connected, a configured one among them,
+        // and two more still connecting: the seeds stay.
+        let linked: Vec<SocketAddr> = (1..=7).map(a).collect();
+        let peers = connected(&[a(1), a(2), a(3), a(4), a(5)]);
+        assert!(!past_seeds(linked.clone(), &book, &peers, 8));
+        // A fourth connected, half of eight: the seeds go.
+        let peers = connected(&[a(1), a(2), a(3), a(4), a(5), a(6)]);
+        assert!(past_seeds(linked.clone(), &book, &peers, 8));
+        // A peer that failed is not connected, whatever its status says.
+        let mut failed = peers.clone();
+        failed.insert(a(6).to_string(), json!({"connected":null,"error":"gone"}));
+        assert!(!past_seeds(linked.clone(), &book, &failed, 8));
+        // A node that reaches only the seeds keeps them, however few it wants.
+        assert!(!past_seeds(seeds, &book, &peers, 1));
+        assert!(past_seeds([a(1), a(4)], &book, &peers, 1));
+    }
 }

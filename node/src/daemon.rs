@@ -429,7 +429,7 @@ pub async fn run_with(dir: &Path, mining: Mining) -> Result<()> {
         book: Arc::new(Mutex::new(book)),
         discovery: c.discovery,
         mempool: c.mempool_transactions,
-        inbound: Arc::new(Mutex::new(Inbound::default())),
+        inbound: Arc::new(Mutex::new(Inbound::new(c.max_inbound as usize))),
         nonce: discovery::seed(),
         miner: Arc::new(Mutex::new(None)),
         search: mining.search,
@@ -437,13 +437,14 @@ pub async fn run_with(dir: &Path, mining: Mining) -> Result<()> {
         changes,
     };
     // On the production network, the built-in seeds are looked up in the
-    // background; their addresses join the book like any other.
+    // background; their addresses join the book as seeds', picked after every
+    // other (wiki: node/sync#finding-more-peers).
     let production = config::production_genesis().map(|g| g.chain_id());
     if c.discovery && production == Some(config::genesis(dir)?.chain_id()) {
         let book = node.book.clone();
         tokio::spawn(async move {
             for address in seed_addresses(config::SEEDS).await {
-                book.lock().unwrap().learn(address, discovery::Source::Seed);
+                book.lock().unwrap().learn_seed(address);
             }
         });
     }

@@ -1091,6 +1091,66 @@ async fn peer_genesis_control_auth_and_frame_bounds_are_enforced() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_node_takes_a_newcomer_in_place_of_its_newest_connection() {
+    // With room for two inbound connections, a third still comes in: the
+    // first is the longest connected half and keeps its place, and the second
+    // gives way.
+    let n = Node::start_configured("full", |c| c.max_inbound = 2);
+    let chain_id = chain_id_of(&n).await;
+    let mut open = Vec::new();
+    for _ in 0..3 {
+        let (stream, answer) = greet(n.info.p2p, hello(chain_id)).await;
+        assert!(matches!(answer, Ok(wire::Answer::State(_))), "{answer:?}");
+        open.push(stream);
+    }
+    let mut byte = [0u8; 1];
+    let closed = tokio::time::timeout(Duration::from_secs(10), open[1].read(&mut byte)).await;
+    assert!(matches!(closed, Ok(Ok(0)) | Ok(Err(_))), "{closed:?}");
+    for k in [0, 2] {
+        let answer = transport::ask(&mut open[k], wire::Request::State).await;
+        assert!(matches!(answer, Ok(wire::Answer::State(_))), "{answer:?}");
+    }
+    n.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_link_asks_for_addresses_before_its_first_blocks() {
+    // A node that knows only a seed learns of other peers at once, however
+    // long the seed's blocks then take to download.
+    let n = Node::start(false, "asks first");
+    let chain_id = chain_id_of(&n).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake = listener.local_addr().unwrap();
+    let asked: Asked = Default::default();
+    let log = asked.clone();
+    fake_peer(listener, move |request, _| {
+        log.lock().unwrap().push(request.clone());
+        match request {
+            wire::Request::Hello(_) | wire::Request::State => {
+                Ok(wire::Answer::State(fake_state(chain_id, [7; 32], 0xcc)))
+            }
+            wire::Request::Headers { .. } => Ok(wire::Answer::Headers(vec![])),
+            wire::Request::Inventory { .. } => Ok(wire::Answer::Inventory {
+                ids: vec![],
+                next: None,
+            }),
+            wire::Request::Addresses => Ok(wire::Answer::Addresses(vec![])),
+            _ => Err("not served".into()),
+        }
+    });
+    command(&n.dir.0, &["add", "node", &fake.to_string()]);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while asked.lock().unwrap().len() < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "not asked");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let asked = asked.lock().unwrap().clone();
+    assert!(matches!(asked[0], wire::Request::Hello(_)), "{asked:?}");
+    assert_eq!(asked[1], wire::Request::Addresses, "{asked:?}");
+    n.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nodes_discover_each_other_through_a_common_peer() {
     // A and C are each configured with B only. B learns their listening
     // addresses when they connect, synchronizes with them, and shares each
