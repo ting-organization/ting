@@ -284,9 +284,10 @@ A node on the production network needs no configured peer: the node carries the
 names of the network's seed nodes, looks them up as it starts, and learns from
 them. On any network, one configured peer is enough. A node learns further
 addresses from its peers and keeps connections to up to `max_peers` of them, eight
-unless configured otherwise. This follows the address exchange of Bitcoin, kept
-small: no separate discovery protocol, no distributed hash table, nothing beyond the
-connections above.
+unless configured otherwise. Every new connection asks for addresses first, before
+headers and blocks, so a node that knows only a seed learns of other peers at once.
+This follows the address exchange of Bitcoin, kept small: no separate discovery
+protocol, no distributed hash table, nothing beyond the connections above.
 
 **Where addresses come from.** A node keeps an address book of other nodes'
 listening addresses, filled from four sources:
@@ -316,17 +317,35 @@ address. An address reaches only peers that could reach it too:
 listening address, whatever `max_peers` says, and again a minute after a failed
 attempt. Up to `max_peers` connections in all, the node adds discovered peers from
 its book: those it has completed a round with first, most recent first, then untried
-ones in random order. Among public addresses it keeps at most one discovered peer
-per network group (an IPv4 /16, an IPv6 /32), so a single operator's address range
-cannot take every slot. A discovered peer whose connection fails is replaced, and
-its address is not tried again for a minute, doubling with each further failure up
-to an hour. A delivered block counts as a completed round, so a long first download
-that fails partway still proves the peer; a `hello` alone does not, and a peer that
-answers it and then fails backs off like any other.
+ones in random order, and the seed nodes after every other. Among public addresses
+it keeps at most one discovered peer per network group (an IPv4 /16, an IPv6 /32),
+so a single operator's address range cannot take every slot. A discovered peer
+whose connection fails is replaced, and its address is not tried again for a
+minute, doubling with each further failure up to an hour. A delivered block counts
+as a completed round, so a long first download that fails partway still proves the
+peer; a `hello` alone does not, and a peer that answers it and then fails backs off
+like any other.
+
+**Leaving the seeds.** A seed node is where a node starts, not a peer it keeps: were
+every node to stay connected to the seeds, they would fill up as the network grows,
+and a new node, which knows no other address, could not join. A connection to a seed
+takes none of the `max_peers` slots, so a node starts other peers beside the seeds
+however few slots it has. What a peer claims of its own height counts for nothing
+here: only the height of its tip once the node holds that header, whose work it has
+checked. Once the node holds a seed's tip and headers past genesis, and holds the
+tips of at least half of `max_peers` of its other connections, configured or
+discovered, at least as high as its best header, its connections to the seed nodes
+end: a peer still behind, as another new node is, cannot serve it yet. The node then
+picks a seed again only once fewer than a quarter of `max_peers` other peers are
+connected, or none, so that a peer that drops for a while does not bring the seeds
+back. A node that reaches only the seeds keeps them. A configured seed is a
+configured peer like any other, and an address a peer shared is marked as a seed's
+when the seed's name resolves to it. A seed's address is never dropped from a full
+book.
 
 **Probing.** When every slot is taken, the node tests one untried address every two
-minutes with a connection that only exchanges `hello`. An address that answers can
-then be shared, so new nodes become known even in a full network.
+minutes with a connection that only exchanges `hello`, never a seed's. An address
+that answers can then be shared, so new nodes become known even in a full network.
 
 **Connecting to itself.** Each run of a node picks a random 64-bit nonce and sends it
 in `hello`. A peer that receives its own nonce refuses the connection, and a node
@@ -359,7 +378,13 @@ network it costs one extra connection.
 ## Limits
 
 - At most 32 configured peers, and connections to up to `max_peers` peers (1 to 64,
-  default 8; one more while the tip is stale)
+  default 8; one more while the tip is stale), the seed nodes aside
+- Connections from up to `max_inbound` peers (1 to 1,024, default 125, read at
+  start), at most 8 from one address range. A full node still takes a new
+  connection, in place of the one least worth keeping: the peers that delivered new
+  blocks latest, the longest connected, the connections of the node's own machine
+  and those less than ten seconds old keep theirs. An operator raises
+  `max_inbound` for a seed node, and the process's open-file limit with it
 - An address book of at most 1,024 addresses
 
 The transport's own limits, on connections, requests and frames, are on

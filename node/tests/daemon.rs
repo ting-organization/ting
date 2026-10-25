@@ -1123,6 +1123,164 @@ async fn peer_genesis_control_auth_and_frame_bounds_are_enforced() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_node_takes_a_newcomer_in_place_of_its_newest_connection() {
+    // With room for two inbound connections, a third still comes in: the
+    // first is the longest connected half and keeps its place, and the second
+    // gives way.
+    let n = Node::start_configured("full", |c| c.max_inbound = 2);
+    let chain_id = chain_id_of(&n).await;
+    let mut open = Vec::new();
+    for _ in 0..3 {
+        let (stream, answer) = greet(n.info.p2p, hello(chain_id)).await;
+        assert!(matches!(answer, Ok(wire::Answer::State(_))), "{answer:?}");
+        open.push(stream);
+    }
+    let mut byte = [0u8; 1];
+    let closed = tokio::time::timeout(Duration::from_secs(10), open[1].read(&mut byte)).await;
+    assert!(matches!(closed, Ok(Ok(0)) | Ok(Err(_))), "{closed:?}");
+    for k in [0, 2] {
+        let answer = transport::ask(&mut open[k], wire::Request::State).await;
+        assert!(matches!(answer, Ok(wire::Answer::State(_))), "{answer:?}");
+    }
+    // A connection that gives way before its hello closes at once, not when
+    // its hello's deadline passes, so that the sockets of connections given
+    // way do not pile up.
+    let mut silent = TcpStream::connect(n.info.p2p).await.unwrap();
+    let (_newest, answer) = greet(n.info.p2p, hello(chain_id)).await;
+    assert!(matches!(answer, Ok(wire::Answer::State(_))), "{answer:?}");
+    let closed = tokio::time::timeout(Duration::from_secs(2), silent.read(&mut byte)).await;
+    assert!(matches!(closed, Ok(Ok(0)) | Ok(Err(_))), "{closed:?}");
+    n.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_link_asks_for_addresses_before_its_first_blocks() {
+    // A node that knows only a seed learns of other peers at once, however
+    // long the seed's blocks then take to download.
+    let n = Node::start(false, "asks first");
+    let chain_id = chain_id_of(&n).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake = listener.local_addr().unwrap();
+    let asked: Asked = Default::default();
+    let log = asked.clone();
+    fake_peer(listener, move |request, _| {
+        log.lock().unwrap().push(request.clone());
+        match request {
+            wire::Request::Hello(_) | wire::Request::State => {
+                Ok(wire::Answer::State(fake_state(chain_id, [7; 32], 0xcc)))
+            }
+            wire::Request::Headers { .. } => Ok(wire::Answer::Headers(vec![])),
+            wire::Request::Inventory { .. } => Ok(wire::Answer::Inventory {
+                ids: vec![],
+                next: None,
+            }),
+            wire::Request::Addresses => Ok(wire::Answer::Addresses(vec![])),
+            _ => Err("not served".into()),
+        }
+    });
+    command(&n.dir.0, &["add", "node", &fake.to_string()]);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while asked.lock().unwrap().len() < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "not asked");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let asked = asked.lock().unwrap().clone();
+    assert!(matches!(asked[0], wire::Request::Hello(_)), "{asked:?}");
+    assert_eq!(asked[1], wire::Request::Addresses, "{asked:?}");
+    n.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_counts_only_as_high_as_the_headers_it_shows() {
+    // Two fake peers: one shows three valid headers up to its tip, the other
+    // claims a far greater height with a tip it never shows. The node holds
+    // the first one's tip at height 3, and the second one's at none, which is
+    // what deciding to leave the seeds goes by.
+    let n = Node::start(false, "checked");
+    let g = config::genesis(&n.dir.0).unwrap();
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = Vec::new();
+    let start = ting_node::now();
+    for i in 0..3 {
+        let mut block = runtime
+            .build_candidate(&g, &history, vec![], start + i, [0; 4], vec![])
+            .unwrap();
+        while !consensus::valid_pow(&block.header) {
+            block.header.nonce += 1;
+        }
+        runtime
+            .validate_and_apply_block(&g, &history, &block)
+            .unwrap();
+        history.push(block.header.clone());
+    }
+    let chain_id = g.chain_id();
+    let tip = history[2].id();
+    let honest = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let boaster = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (honest_address, boaster_address) =
+        (honest.local_addr().unwrap(), boaster.local_addr().unwrap());
+    let quiet = |request: &wire::Request| match request {
+        wire::Request::Raw { .. } => Err("block not found".into()),
+        wire::Request::Inventory { .. } => Ok(wire::Answer::Inventory {
+            ids: vec![],
+            next: None,
+        }),
+        wire::Request::Addresses => Ok(wire::Answer::Addresses(vec![])),
+        _ => Err("not served".into()),
+    };
+    fake_peer(honest, move |request, _| match request {
+        wire::Request::Hello(_) | wire::Request::State => {
+            Ok(wire::Answer::State(fake_state(chain_id, tip, 0xb1)))
+        }
+        wire::Request::Headers { .. } => Ok(wire::Answer::Headers(
+            history
+                .iter()
+                .map(|h| h.encode().try_into().unwrap())
+                .collect(),
+        )),
+        other => quiet(other),
+    });
+    fake_peer(boaster, move |request, _| match request {
+        wire::Request::Hello(_) | wire::Request::State => {
+            let mut state = fake_state(chain_id, [9; 32], 0xb2);
+            state.height = 1_000_000_000;
+            Ok(wire::Answer::State(state))
+        }
+        wire::Request::Headers { .. } => Ok(wire::Answer::Headers(vec![])),
+        other => quiet(other),
+    });
+    for address in [honest_address, boaster_address] {
+        command(&n.dir.0, &["add", "node", &address.to_string()]);
+    }
+    let status = |peers: &Value, address: SocketAddr| {
+        peers["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["address"] == address.to_string())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let peers = n.call("peers", json!({})).await;
+        let (honest, boaster) = (
+            status(&peers, honest_address),
+            status(&peers, boaster_address),
+        );
+        // Each has completed a round, so the node has looked its tip up.
+        if honest["checked_height"] == 3 && boaster["last_success"].is_u64() {
+            assert_eq!(boaster["height"], 1_000_000_000, "{boaster}");
+            assert_eq!(boaster["checked_height"], Value::Null, "{boaster}");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{peers}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    n.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nodes_discover_each_other_through_a_common_peer() {
     // A and C are each configured with B only. B learns their listening
     // addresses when they connect, synchronizes with them, and shares each

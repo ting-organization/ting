@@ -18,7 +18,10 @@ reference node does with it.
 
 The production network's seed nodes are `node1.ting-node.com:18442` and
 `node2.ting-node.com:18442`. A node learns of the others through the
-[`addresses`](#requests) request.
+[`addresses`](#requests) request. A reference node asks for them first on every
+new connection, and leaves the seeds once it has enough other peers, so that the
+seeds keep room for new nodes
+([finding more peers](../node/sync.md#finding-more-peers)).
 
 ## A connection
 
@@ -309,12 +312,25 @@ shown by `ting peers`; nothing depends on it.
 - Blocks and transactions larger than 1 MiB travel in slices of at most 1 MiB; a
   block of at most its height's data capacity and a transaction of at most the next
   block's, within its transfer time
-- 125 inbound connections at once, at most 8 of them from one address range (an IPv4
-  address or an IPv6 /64; the node's own machine excepted). With every slot taken, a
-  new connection takes the place of the newest one of the network group holding the
-  most (an IPv4 /16 or an IPv6 /32, a local address its own range), if that group
-  holds at least two more than the newcomer's; otherwise it is closed. Many
-  addresses of one operator's network therefore cannot hold every slot
+- 125 inbound connections at once unless the node's operator sets `max_inbound` (1
+  to 1,024), at most 8 of them from one address range (an IPv4 address or an IPv6
+  /64; the node's own machine excepted). With every slot taken, a new connection
+  takes the place of another that is at least ten seconds old, so that a new node
+  has the time to say `hello` and ask for `addresses`; and a connection whose
+  network group (an IPv4 /16 or an IPv6 /32, a local address its own range) took
+  another's place less than ten seconds ago is closed, so that one address or a few
+  networks cannot keep the newest place changing hands. The place taken is that of
+  the newest one of the network group holding the most, if that group holds at
+  least two more than the newcomer's, so many addresses of one operator's network
+  cannot hold every slot. Otherwise it is that of the connection least worth
+  keeping, after Bitcoin's eviction: the four connections that most recently pushed
+  a block the node did not have, and the longest connected half of the rest, keep
+  theirs, and of the others, the newest of the network group holding the most gives
+  way; of groups holding as many, the one whose newest connection is newest. A
+  newcomer from elsewhere never takes the place of a connection from the node's own
+  machine this way, and one from the node's own machine waits for nothing. A full
+  node therefore still takes new nodes. A connection that gives way is closed at
+  once, without an answer, even before its `hello`
 - 200 request units a second per inbound connection after a burst of 2,000, and 120
   seconds without a request before it is closed
 - At most 32 addresses in or from one `addresses` answer

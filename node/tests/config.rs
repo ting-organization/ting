@@ -28,6 +28,7 @@ fn optional_fields_take_their_defaults_and_every_bound_is_enforced() {
     let c = load(&dir, &base()).unwrap();
     assert!(c.discovery && !c.api_cors && !c.miner_enabled);
     assert_eq!((c.max_peers, c.miner_threads, c.miner_spacing), (8, 1, 0));
+    assert_eq!(c.max_inbound, 125);
     assert_eq!((c.db_cache_mib, c.cache_bytes()), (256, 256 << 20));
     assert_eq!(c.producer_hex, None);
     assert!(
@@ -44,13 +45,15 @@ fn optional_fields_take_their_defaults_and_every_bound_is_enforced() {
     let mut missing = base();
     missing.as_object_mut().unwrap().remove("peers");
     assert!(load(&dir, &missing).is_err());
-    let faults: [(&str, Value); 14] = [
+    let faults: [(&str, Value); 16] = [
         ("version", json!(2)),
         ("control", json!("10.0.0.1:18440")),
         ("name", json!("n".repeat(129))),
         ("peers", json!(vec!["10.0.0.1:1"; 33])),
         ("max_peers", json!(0)),
         ("max_peers", json!(65)),
+        ("max_inbound", json!(0)),
+        ("max_inbound", json!(1025)),
         ("votes", json!([0, 0, 0, 3])),
         ("miner_threads", json!(0)),
         ("miner_threads", json!(65)),
@@ -65,11 +68,13 @@ fn optional_fields_take_their_defaults_and_every_bound_is_enforced() {
         file[field] = value.clone();
         assert!(load(&dir, &file).is_err(), "{field} = {value}");
     }
-    let edges: [(&str, Value); 8] = [
+    let edges: [(&str, Value); 10] = [
         ("name", json!("n".repeat(128))),
         ("peers", json!(vec!["10.0.0.1:1"; 32])),
         ("max_peers", json!(1)),
         ("max_peers", json!(64)),
+        ("max_inbound", json!(1)),
+        ("max_inbound", json!(1024)),
         ("miner_threads", json!(64)),
         ("producer_hex", json!("00".repeat(4096))),
         ("producer_hex", json!("")),

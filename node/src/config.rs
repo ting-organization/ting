@@ -56,6 +56,10 @@ pub struct Config {
     pub discovery: bool,
     #[serde(default = "eight")]
     pub max_peers: u32,
+    /// Most inbound connections at once (wiki: reference/peer-protocol#limits),
+    /// read at start; a seed node's operator may raise it.
+    #[serde(default = "inbound")]
+    pub max_inbound: u32,
     pub votes: [u8; 4],
     /// The built-in CPU miner: whether it runs from start, with how many
     /// threads, and the least number of seconds between its own blocks.
@@ -103,6 +107,11 @@ fn yes() -> bool {
 fn eight() -> u32 {
     8
 }
+fn inbound() -> u32 {
+    crate::transport::INBOUND_MAX as u32
+}
+/// The most `max_inbound` may say.
+pub const INBOUND_LIMIT: u32 = 1_024;
 fn one() -> u32 {
     1
 }
@@ -121,6 +130,7 @@ impl Default for Config {
             peers: vec![],
             discovery: true,
             max_peers: 8,
+            max_inbound: inbound(),
             votes: [0; 4],
             miner_enabled: false,
             miner_threads: 1,
@@ -140,6 +150,7 @@ impl Config {
             || self.name.len() > 128
             || self.peers.len() > 32
             || !(1..=64).contains(&self.max_peers)
+            || !(1..=INBOUND_LIMIT).contains(&self.max_inbound)
             || self.votes.iter().any(|v| *v > 2)
             || !(1..=64).contains(&self.miner_threads)
             || self.db_cache_mib == 0
@@ -147,7 +158,7 @@ impl Config {
             || self.mempool_mib == 0
         {
             return Err(
-                "invalid configuration (control must be loopback, maximum 32 peers, max_peers 1..64, votes 0..2, miner threads 1..64, db_cache_mib, mempool_transactions and mempool_mib at least 1)"
+                "invalid configuration (control must be loopback, maximum 32 peers, max_peers 1..64, max_inbound 1..1024, votes 0..2, miner threads 1..64, db_cache_mib, mempool_transactions and mempool_mib at least 1)"
                     .into(),
             );
         }

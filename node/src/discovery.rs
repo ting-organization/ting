@@ -281,6 +281,26 @@ impl AddressBook {
         }
         self.insert(address, source)
     }
+    /// Adds a seed node's address, or marks a known one as a seed's unless it
+    /// is configured: a seed is where a node starts, picked after every other
+    /// address.
+    pub fn learn_seed(&mut self, address: SocketAddr) {
+        match self.entries.get_mut(&address) {
+            Some(entry) if !matches!(entry.source, Source::Config | Source::Seed) => {
+                entry.source = Source::Seed;
+                self.dirty = true;
+            }
+            Some(_) => {}
+            None => {
+                self.learn(address, Source::Seed);
+            }
+        }
+    }
+    pub fn is_seed(&self, address: &SocketAddr) -> bool {
+        self.entries
+            .get(address)
+            .is_some_and(|e| e.source == Source::Seed)
+    }
     /// Bans an address's range until `until`, dropping every address in it;
     /// returns whether it did. A range holding a configured peer is never
     /// banned, nor is this machine: banning it would ban every node on it.
@@ -354,13 +374,15 @@ impl AddressBook {
         self.dirty = true;
         true
     }
-    /// Drops the least useful address: never a configured one, an unproven
-    /// one before a proven one, the most failed and longest unproven first.
+    /// Drops the least useful address: never a configured one or a seed's, an
+    /// unproven one before a proven one, the most failed and longest unproven
+    /// first. A seed's is proven no more once the node leaves it, and is
+    /// looked up only at start.
     fn evict(&mut self) -> bool {
         let worst = self
             .entries
             .values()
-            .filter(|e| e.source != Source::Config)
+            .filter(|e| !matches!(e.source, Source::Config | Source::Seed))
             .min_by_key(|e| {
                 (
                     e.verified.is_some(),
@@ -441,7 +463,8 @@ impl AddressBook {
     }
     /// Up to `want` addresses to connect to, besides `busy`: proven
     /// ones first, most recently proven first, then unproven ones in random
-    /// order; each from a network group none of the others is in.
+    /// order, and seeds after every other; each from a network group none of
+    /// the others is in.
     pub fn pick(
         &self,
         want: usize,
@@ -458,7 +481,7 @@ impl AddressBook {
             })
             .collect();
         Shuffle(seed).shuffle(&mut candidates);
-        candidates.sort_by_key(|e| std::cmp::Reverse(e.verified));
+        candidates.sort_by_key(|e| (e.source == Source::Seed, std::cmp::Reverse(e.verified)));
         let mut chosen = Vec::new();
         for entry in candidates {
             if chosen.len() == want {
@@ -473,13 +496,15 @@ impl AddressBook {
         }
         chosen
     }
-    /// One unproven address to test with a short connection when every
-    /// connection slot is taken, so new nodes still become shareable.
+    /// One unproven address, not a seed's, to test with a short connection
+    /// when every connection slot is taken, so new nodes still become
+    /// shareable.
     pub fn probe(&self, busy: &BTreeSet<SocketAddr>, now: u64, seed: u64) -> Option<SocketAddr> {
         let mut candidates: Vec<_> = self
             .entries
             .values()
-            .filter(|e| e.verified.is_none() && !busy.contains(&e.address) && Self::retry(e, now))
+            .filter(|e| e.verified.is_none() && e.source != Source::Seed)
+            .filter(|e| !busy.contains(&e.address) && Self::retry(e, now))
             .map(|e| e.address)
             .collect();
         Shuffle(seed).shuffle(&mut candidates);
@@ -601,7 +626,44 @@ mod tests {
     }
 
     #[test]
-    fn a_full_book_evicts_unproven_addresses_never_configured_ones() {
+    fn seeds_are_picked_after_every_other_address() {
+        let mut book = AddressBook::default();
+        let (seed, proven, unproven) = (a("8.8.1.1:1"), a("9.9.1.1:1"), a("7.7.1.1:1"));
+        book.learn(seed, Source::Seed);
+        book.learn(proven, Source::Peer);
+        book.learn(unproven, Source::Inbound);
+        // The seed was proven last, and still comes after an untried address.
+        book.succeeded(proven, 50);
+        book.succeeded(seed, 100);
+        let none = BTreeSet::new();
+        assert_eq!(book.pick(8, &none, 120, 3), vec![proven, unproven, seed]);
+        assert_eq!(book.pick(2, &none, 120, 3), vec![proven, unproven]);
+        // A node with nothing else to try picks the seeds.
+        assert_eq!(
+            book.pick(8, &BTreeSet::from([proven, unproven]), 120, 3),
+            vec![seed]
+        );
+        // A seed's address known from a peer is a seed's all the same, unless
+        // it is configured.
+        let (other_seed, configured) = (a("6.6.1.1:1"), a("5.5.1.1:1"));
+        book.learn(other_seed, Source::Inbound);
+        book.succeeded(other_seed, 110);
+        book.configure(&[configured]);
+        for address in [other_seed, configured] {
+            book.learn_seed(address);
+        }
+        assert!(book.is_seed(&other_seed) && !book.is_seed(&configured));
+        assert_eq!(book.pick(8, &none, 120, 3)[2..], [other_seed, seed]);
+        // A seed is never probed: it needs no proving to be shared.
+        book.learn_seed(a("4.4.1.1:1"));
+        let busy = BTreeSet::from([configured]);
+        assert_eq!(book.probe(&busy, 120, 3), Some(unproven));
+        let busy = BTreeSet::from([configured, unproven]);
+        assert_eq!(book.probe(&busy, 120, 3), None);
+    }
+
+    #[test]
+    fn a_full_book_evicts_unproven_addresses_never_configured_ones_or_seeds() {
         let mut book = AddressBook::default();
         book.configure(&[a("8.0.0.1:1")]);
         let proven = a("8.0.0.2:1");
@@ -614,6 +676,19 @@ mod tests {
         assert!(book.get(&a("8.0.0.1:1")).is_some() && book.get(&proven).is_some());
         book.configure(&[]);
         assert!(book.get(&a("8.0.0.1:1")).is_none());
+        // A seed's address stays, however long ago it was proven, while
+        // addresses proven since take each other's places.
+        let mut book = AddressBook::default();
+        let seed = a("8.0.0.3:1");
+        book.learn_seed(seed);
+        book.succeeded(seed, 1);
+        for i in 0..2000 {
+            let address = a(&format!("9.{}.{}.1:1", i / 256, i % 256));
+            book.learn(address, Source::Peer);
+            book.succeeded(address, 100);
+        }
+        assert_eq!(book.len(), BOOK_MAX);
+        assert!(book.is_seed(&seed));
     }
 
     #[test]

@@ -34,6 +34,8 @@ pub struct Node {
     pub token: Arc<str>,
     pub shutdown: Arc<AtomicBool>,
     pub info: Arc<Mutex<Running>>,
+    /// Each outbound connection's status. Whoever holds both locks takes
+    /// `book` first.
     pub peers: PeerStats,
     /// Addresses of other nodes, and whether to discover more (read at start).
     pub book: Arc<Mutex<AddressBook>>,
@@ -153,23 +155,28 @@ impl Node {
             "mine" => self.mine(params).await,
             "peers" => {
                 let config = self.handle.call("config", json!({})).await?;
-                let stats = self.peers.lock().unwrap();
-                let mut items: Vec<Value> = config["peers"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|address| {
-                        stats.get(address.as_str().unwrap()).cloned().unwrap_or(
-                            json!({"address":address,"source":"config","error":null,"last_success":null}),
-                        )
-                    })
-                    .collect();
-                items.extend(
-                    stats
-                        .values()
-                        .filter(|v| v["source"] == "discovered")
-                        .cloned(),
-                );
+                // The statuses are let go before the book is taken: the peer
+                // loop takes the book first.
+                let items = {
+                    let stats = self.peers.lock().unwrap();
+                    let mut items: Vec<Value> = config["peers"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|address| {
+                            stats.get(address.as_str().unwrap()).cloned().unwrap_or(
+                                json!({"address":address,"source":"config","error":null,"last_success":null}),
+                            )
+                        })
+                        .collect();
+                    items.extend(
+                        stats
+                            .values()
+                            .filter(|v| v["source"] == "discovered")
+                            .cloned(),
+                    );
+                    items
+                };
                 Ok(json!({
                     "items":items,
                     "inbound":self.inbound.lock().unwrap().peers(),
@@ -438,7 +445,7 @@ pub async fn run_with(dir: &Path, mining: Mining) -> Result<()> {
         book: Arc::new(Mutex::new(book)),
         discovery: c.discovery,
         mempool: c.mempool_transactions,
-        inbound: Arc::new(Mutex::new(Inbound::default())),
+        inbound: Arc::new(Mutex::new(Inbound::new(c.max_inbound as usize))),
         nonce: discovery::seed(),
         miner: Arc::new(Mutex::new(None)),
         search: mining.search,
@@ -446,13 +453,14 @@ pub async fn run_with(dir: &Path, mining: Mining) -> Result<()> {
         changes,
     };
     // On the production network, the built-in seeds are looked up in the
-    // background; their addresses join the book like any other.
+    // background; their addresses join the book as seeds', picked after every
+    // other (wiki: node/sync#finding-more-peers).
     let production = config::production_genesis().map(|g| g.chain_id());
     if c.discovery && production == Some(config::genesis(dir)?.chain_id()) {
         let book = node.book.clone();
         tokio::spawn(async move {
             for address in seed_addresses(config::SEEDS).await {
-                book.lock().unwrap().learn(address, discovery::Source::Seed);
+                book.lock().unwrap().learn_seed(address);
             }
         });
     }

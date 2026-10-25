@@ -3007,6 +3007,17 @@ impl Chain {
                 Ok(json!({"id":hex(&h.id()),"known":false,"max":limits.0[2]}))
             }
             // Sync's own requests, from this node's peer connections only.
+            // The height of a header this node holds and has not found
+            // invalid, such as a peer's tip: what the peer claims, checked.
+            "header_height" => {
+                let id = hash_arg(str_param(&p, "id")?)?;
+                let height = self
+                    .index
+                    .get(&id)
+                    .filter(|e| e.status != Kept::Invalid)
+                    .map(|e| e.header.height);
+                Ok(json!({"height":height}))
+            }
             // A peer's page of headers, in their encodings one after another.
             "headers_from" => {
                 let peer = str_param(&p, "peer")?.to_string();
