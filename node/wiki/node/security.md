@@ -116,7 +116,10 @@ listed on [Explore the chain](../start/explore.md#the-rest-api).
   block pushed unasked is stored only when its branch overtakes the tip and it is
   executed at once; one that does not is held in memory, 64 MiB at most for all
   connections ([pushed blocks](sync.md#pushed-blocks)). What a node asks for along the
-  best header's branch it stores, as Bitcoin does.
+  best header's branch it stores, as Bitcoin does. Nor can a peer grow the node's
+  header tree with such alternatives: headers sync keeps a chain only once it
+  overtakes the best header, and checks any other without keeping it
+  ([headers first](sync.md#headers-first)).
 - With discovery on, a node tells its peers the addresses of nodes it has recently
   synchronized with, and announces its own listening port. With
   `"discovery": false` it does neither. Its address can still spread: a node that

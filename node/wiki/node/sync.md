@@ -146,30 +146,42 @@ Every header is checked as it arrives, against its parent: proof of work, the
 difficulty target, the timestamp rules and the clock, the votes and the capacity
 limits of its branch. What happens next depends on the work its chain carries:
 
-- **Within a day's work of the tip**, that is, short of the tip's work by at most
-  the work of 1,440 blocks at the tip's target, the header goes into the node's
-  header tree, held in memory until its block settles
+- **More than the best header's** by the [fork-choice
+  margin](../consensus/proof-of-work.md), half the work of the header's own block,
+  as a chain that extends the best header does whatever its difficulty: the header
+  goes into the node's header tree, held in memory until its block settles
   ([the block index](storage.md#the-block-index)).
-- **Further behind**, its chain is checked by a *presync* for that peer instead. The
-  headers keep streaming in and are checked one by one, but none is kept: the node
-  holds only the running state a check needs (the last header, the last eleven
-  timestamps, the work so far and the vote tallies of the last voting epochs) and,
-  every 600 headers, one bit of a salted hash of the header. When the chain reaches
-  the threshold, the node asks the peer for the same headers again from where the
-  chain forked, checks them again, compares the kept bits, and indexes them, 14,400
-  at a time, once enough bits have matched. A peer that sends a different chain the
-  second time is caught by a bit that does not match.
+- **Any less**, as a sibling of the best header or a branch forked further back
+  that has not caught up, its chain is checked by a *presync* for that peer
+  instead. The headers keep streaming in and are checked one by one, but none is
+  kept: the node holds only the running state a check needs (the last header, the
+  last eleven timestamps, the work so far and the vote tallies of the last voting
+  epochs) and, every 600 headers, one bit of a salted hash of the header. When the
+  chain carries that much work, the node asks the peer for the same headers again
+  from where the chain forked, checks them again, compares the kept bits, and
+  indexes them, 14,400 at a time, once enough bits have matched. A peer that sends a
+  different chain the second time is caught by a bit that does not match.
 
-A chain from far back, such as one forked near genesis and kept at the easiest
-difficulty, can be made cheaply, header by header. Presync lets a node check such a
-chain at the cost of the headers' checks alone, without its memory growing with the
-chain: what a presync keeps grows with the time since the fork, never with the
-number of headers, and the clock bounds the headers it accepts at six a second of
-that time. A page of headers is one chain, so it begins at most one presync: a header
-from far back that does not follow the one the page began ends the page, and a page
-that repeats such a header costs no more than one that holds it once. A real
-competing chain, however long, is indexed once it shows its work, so there is no
-depth limit and no checkpoint.
+Proof of work bounds what a header costs, not how many alternatives to one block
+there are: every child of one block has the same target, so each sibling of the best
+header costs one block of work, and a chain forked near genesis at the easiest
+difficulty is cheaper still. Only a chain that would replace the best branch is
+kept; any other is checked at the cost of the headers' checks alone, without the
+node's memory growing with it: what a presync keeps grows with the time since the
+fork, never with the number of headers, and the clock bounds the headers it accepts
+at six a second of that time. A chain kept costs half a block of work more than the
+best header each time, and the headers it adds ahead of the network's schedule grow
+harder by the [difficulty rule](../consensus/difficulty.md#the-retarget). A page of
+headers is one chain, so it begins at most one presync: a header that does not
+follow the one the page began ends the page, and a page that repeats such a header,
+or lists siblings one after another, costs no more than one that holds it once.
+
+A natural fork thus costs one more exchange: a sibling of the tip is checked and not
+kept, and once its peer shows a block on it, its branch is asked for again from where
+it forked, indexed, and its blocks fetched. A real competing chain, however long, is
+indexed once it shows its work, so there is no depth limit and no checkpoint, and a
+chain not kept is shown again by its peer at its next announcement, or within 30
+seconds.
 
 A `headers` answer starts after the highest locator entry on the answering node's
 canonical branch, wherever that entry sits in the list, so two nodes on competing

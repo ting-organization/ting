@@ -1,10 +1,10 @@
 //! Checking a header chain that does not yet show enough work, without keeping
 //! it (wiki: node/sync). Headers are validated as they stream past and only a
 //! salted bit every `PERIOD` headers is kept, so a cheap chain costs memory in
-//! proportion to elapsed time, not to its length. Once the chain reaches the
-//! work threshold, the same headers are fetched again from where it forked,
+//! proportion to elapsed time, not to its length. Once the chain overtakes the
+//! best header, the same headers are fetched again from where it forked,
 //! matched against the bits, and only then indexed.
-use crate::chain::INVALID;
+use crate::chain::{INVALID, overtakes};
 use num_bigint::BigUint;
 use std::collections::BTreeMap;
 use ting_core::{
@@ -94,7 +94,9 @@ pub struct Presync {
     /// The most headers the clock allows: 6 a second of median-time advance
     /// since the fork, plus the two hours a timestamp may lead the clock.
     most: u64,
-    threshold: BigUint,
+    /// The best header's work when the check began: the chain is fetched again
+    /// once it overtakes it by the fork-choice margin of its last header.
+    best: BigUint,
     phase: Phase,
 }
 
@@ -102,7 +104,7 @@ pub struct Presync {
 pub enum Outcome {
     /// Checked; more are wanted after the last.
     Continue,
-    /// The chain reached the threshold: fetch it again from `start`.
+    /// The chain overtook the best header: fetch it again from `start`.
     Refetch,
     /// Headers that are now indexed, with their work and limits, in order;
     /// `done` when the re-fetch has passed the first pass's last header.
@@ -110,7 +112,7 @@ pub enum Outcome {
 }
 
 impl Presync {
-    pub fn new(start: Hash, walk: Walk, threshold: BigUint, start_time: u64, now: u64) -> Self {
+    pub fn new(start: Hash, walk: Walk, best: BigUint, start_time: u64, now: u64) -> Self {
         let mut salt = [0; 32];
         let _ = getrandom::fill(&mut salt);
         let mut offset = [0; 8];
@@ -130,7 +132,7 @@ impl Presync {
             offset: u64::from_le_bytes(offset) % PERIOD,
             bits: Vec::new(),
             most,
-            threshold,
+            best,
             phase: Phase::Presync,
         }
     }
@@ -167,7 +169,7 @@ impl Presync {
                 if self.count > self.most {
                     return Err("more headers than the clock allows".into());
                 }
-                if self.walk.work >= self.threshold {
+                if overtakes(&self.walk.work, header, &self.best) {
                     self.phase = Phase::Redownload {
                         walk: Box::new(self.first.clone()),
                         count: 0,

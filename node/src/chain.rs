@@ -109,9 +109,11 @@ pub fn is_policy(error: &str) -> bool {
     )
 }
 
-/// A header chain is indexed once its work comes within this many blocks of
-/// the tip's work (about a day); below that it is checked without being kept
-/// (`presync`), so a cheap chain from far back costs no memory.
+/// A block a peer pushes, or the node's own, is taken only when its chain's
+/// work comes within this many blocks of the tip's work (about a day). Headers
+/// sync indexes a chain only once it overtakes the best header
+/// (`best_work`); below that it is checked without being kept
+/// (`presync`), so a cheap chain costs no memory.
 const THRESHOLD_BLOCKS: u32 = 1_440;
 /// Headers per `headers` answer.
 pub const HEADERS_PAGE: usize = 2_000;
@@ -339,7 +341,7 @@ fn replay(
 /// one length, the one stamped earlier carries slightly more work under ASERT;
 /// without the margin a withholding miner would win every such race
 /// (rules §8).
-fn overtakes(work: &BigUint, header: &Header, tip: &BigUint) -> bool {
+pub(crate) fn overtakes(work: &BigUint, header: &Header, tip: &BigUint) -> bool {
     *work > tip + consensus::work(&header.target) / 2u32
 }
 /// Block ids by height along a branch from genesis. Those at or below the
@@ -975,8 +977,8 @@ impl Chain {
         *self.voting.borrow_mut() = Some((tip, answer.clone()));
         Ok(answer)
     }
-    /// The work a header chain needs before it is indexed: within
-    /// `THRESHOLD_BLOCKS` of the tip's work.
+    /// The work a pushed block's chain needs before the block is taken:
+    /// within `THRESHOLD_BLOCKS` of the tip's work.
     fn threshold(&self) -> BigUint {
         let block = self.index.get(&self.tip()).map_or_else(
             || consensus::work(&self.genesis.initial_target),
@@ -989,6 +991,19 @@ impl Chain {
         } else {
             BigUint::default()
         }
+    }
+    /// The work a header chain must overtake, by the fork-choice margin of
+    /// its last block, before headers sync indexes it (wiki:
+    /// node/sync#headers-first): the best header's, or the tip's. Every child
+    /// of one block has one target, so siblings of the best header, however
+    /// many, each cost a block of work: a chain that would not replace the
+    /// best branch is checked by a presync without being kept, and indexed
+    /// once its work shows.
+    fn best_work(&self) -> BigUint {
+        let best = self.index.best_header().unwrap_or(self.tip());
+        self.index
+            .get(&best)
+            .map_or_else(BigUint::default, |e| e.work.clone())
     }
     fn checked_header(&self, header: &Header) -> Result<(consensus::Ancestry, Resources)> {
         // At a seed height, the seed's block alone, before anything else.
@@ -1244,13 +1259,17 @@ impl Chain {
         Ok(())
     }
     /// Checks a header against its indexed parent and indexes it. A header
-    /// whose chain stays below the work threshold is refused here: such a
-    /// chain is checked by `headers_from` without being kept.
+    /// whose chain does not overtake the best header, by the fork-choice
+    /// margin of its own block, is refused here: such a chain is checked by
+    /// `headers_from` without being kept.
     fn accept_header(&mut self, header: &Header, recovered: bool) -> Result<()> {
         if self.index.contains(&header.id()) {
             return Ok(());
         }
         let (work, limits) = self.check_new_header(header, recovered)?;
+        if !recovered && !overtakes(&work, header, &self.best_work()) {
+            return Err(BEHIND.into());
+        }
         self.index_header(header.clone(), work, limits);
         self.sync_best();
         Ok(())
@@ -2346,10 +2365,10 @@ impl Chain {
         result.map_err(|error| self.fail(error))
     }
     /// Headers a peer sent, in order (wiki: node/sync). Each is indexed when
-    /// its chain comes within the work threshold of the tip; below it, the
-    /// chain is checked by a presync for that peer, fetched again once it
-    /// reaches the threshold, and indexed then. Returns where the peer's next
-    /// answer should start, and whether the chain is being fetched again.
+    /// its chain overtakes the best header; short of that, the chain is
+    /// checked by a presync for that peer, fetched again once it overtakes,
+    /// and indexed then. Returns where the peer's next answer should start,
+    /// and whether the chain is being fetched again.
     fn headers_from(&mut self, peer: &str, headers: &[Header]) -> Result<Value> {
         let mut indexed = 0usize;
         let mut next: Option<Hash> = None;
@@ -2425,7 +2444,7 @@ impl Chain {
                     let mut state = Presync::new(
                         start,
                         self.walk_from(start)?,
-                        self.threshold(),
+                        self.best_work(),
                         start_time,
                         now(),
                     );

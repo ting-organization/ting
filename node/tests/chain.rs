@@ -171,7 +171,7 @@ fn a_heavier_branch_that_fails_on_the_way_leaves_the_tip_where_it_was() {
     // Two blocks overtake the tip: it is disconnected, the first of them fails,
     // and the tip is connected again. Nothing was replaced.
     let b = forged(&g, 2);
-    headers_from(&mut chain, &headers_of(&b)).unwrap();
+    sync_headers(&mut chain, &headers_of(&b));
     chain.import(&b[1].encode(), true).unwrap();
     chain.import(&b[0].encode(), true).unwrap();
     assert_eq!(chain.tip(), a[0].header.id());
@@ -198,7 +198,7 @@ fn a_reorganization_that_fails_part_way_returns_to_the_tip_it_left() {
     while !consensus::valid_pow(&last.header) {
         last.header.nonce += 1;
     }
-    headers_from(&mut chain, &headers_of(&b)).unwrap();
+    sync_headers(&mut chain, &headers_of(&b));
     for block in &b[..3] {
         chain.import(&block.encode(), true).unwrap();
     }
@@ -257,11 +257,12 @@ fn a_reorganization_that_forks_again_reports_from_its_lowest_height() {
     for block in &a {
         chain.import(&block.encode(), true).unwrap();
     }
-    for blocks in [&x, &y] {
-        headers_from(&mut chain, &headers_of(blocks)).unwrap();
-    }
+    // X's headers overtake A and are indexed; Y's, of X's work, are not
+    // while X's are the best, and its blocks are stored as they come.
+    sync_headers(&mut chain, &headers_of(&x));
+    assert_eq!(sync_headers(&mut chain, &headers_of(&y))["indexed"], 0);
     // Every body but X's first, so that nothing is connected before it.
-    for block in x[1..].iter().chain(&y).rev() {
+    for block in x[1..].iter().chain(&y) {
         chain.import(&block.encode(), true).unwrap();
     }
     assert_eq!(chain.tip(), a[4].header.id());
@@ -282,6 +283,20 @@ fn headers_from(chain: &mut Chain, headers: &[Header]) -> Result<serde_json::Val
 }
 fn headers_of(blocks: &[Block]) -> Vec<Header> {
     blocks.iter().map(|b| b.header.clone()).collect()
+}
+/// A peer's chain of headers as a connection hands it to the node: asked for
+/// again from where it forks once a presync shows its work, as a peer is.
+fn sync_headers(chain: &mut Chain, headers: &[Header]) -> serde_json::Value {
+    let answer = headers_from(chain, headers).unwrap();
+    if answer["refetch"] != true {
+        return answer;
+    }
+    let start = answer["next"].as_str().unwrap();
+    let from = headers
+        .iter()
+        .position(|h| hex(&h.parent) == start)
+        .unwrap();
+    headers_from(chain, &headers[from..]).unwrap()
 }
 /// A peer request the chain answers itself.
 fn ask(chain: &mut Chain, request: wire::Request) -> Result<wire::Answer, String> {
@@ -3420,8 +3435,9 @@ fn a_chain_far_behind_is_checked_without_being_kept_until_it_overtakes() {
     let g = chain.genesis.clone();
     // Two branches from genesis, both mined on schedule, so every block
     // carries the initial target's work: A, 1,450 blocks, connected first;
-    // B, 1,460, which overtakes it. A header chain is indexed once within
-    // 1,440 blocks of the tip's work, so B's first headers are not.
+    // B, 1,460, which overtakes it. A header chain is indexed once it
+    // overtakes the best header, so B's are not until its 1,451st, and a
+    // block more than 1,440 blocks of work behind the tip is not taken.
     let build = |n: usize, producer: &str| -> Vec<Block> {
         let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
         let mut history = vec![];
@@ -3444,7 +3460,8 @@ fn a_chain_far_behind_is_checked_without_being_kept_until_it_overtakes() {
     );
     let headers = |range: std::ops::Range<usize>| headers_of(&b[range]);
     // Checked as it streams, nothing kept: five headers do not reach the
-    // threshold, the next five do, and the peer is asked again from genesis.
+    // threshold, nor do the next 1,445; the one after does, and the peer is
+    // asked again from genesis.
     let first = headers_from(&mut chain, &headers(0..5)).unwrap();
     assert_eq!(
         (first["indexed"].clone(), first["refetch"].clone()),
@@ -3478,7 +3495,12 @@ fn a_chain_far_behind_is_checked_without_being_kept_until_it_overtakes() {
     };
     let held = headers_from(&mut chain, std::slice::from_ref(&early.header)).unwrap();
     assert_eq!(held["next"], serde_json::Value::Null);
-    let reached = headers_from(&mut chain, &headers(5..20)).unwrap();
+    let short = headers_from(&mut chain, &headers(5..1_450)).unwrap();
+    assert_eq!(
+        (short["indexed"].clone(), short["refetch"].clone()),
+        (json!(0), json!(false))
+    );
+    let reached = headers_from(&mut chain, &headers(1_450..1_455)).unwrap();
     assert_eq!(reached["refetch"], true);
     assert_eq!(reached["next"], hex(&g.block_id()));
     let after = status(&mut chain);
@@ -4708,4 +4730,137 @@ fn a_pushed_run_across_an_epoch_boundary_runs_under_the_limits_its_votes_decide(
         ting_node::chain::BEHIND
     );
     assert_eq!(chain.tip(), b[4].header.id());
+}
+/// `header` again with other producer data and its parent `parent`, mined
+/// anew: a header of the same work on another branch.
+fn other_header(header: &Header, parent: Option<Hash>, n: u64) -> Header {
+    let mut other = header.clone();
+    if let Some(parent) = parent {
+        other.parent = parent;
+    }
+    other.producer_hash = ting_core::hash::hash("other", &n.to_le_bytes());
+    other.nonce = 0;
+    while !consensus::valid_pow(&other) {
+        other.nonce += 1;
+    }
+    other
+}
+use ting_core::hash::Hash;
+#[test]
+fn headers_that_do_not_overtake_the_best_header_leave_the_index_as_it_was() {
+    // Siblings of the tip, one block of work each, sent as headers: 4,000 of
+    // them in two pages leave the index as it was, each page checking one
+    // header. Pairs that overtake the tip by a block each, a sibling and its
+    // child: the first is indexed, as the best header now; the 99 others
+    // carry no more work than it and are not.
+    let dir = Directory::new();
+    dir.config(false, "headers");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    // Headers that extend the best header are indexed whatever their own
+    // work: stamped now, years after genesis, the difficulty eases to its
+    // limit after the first, and each later one has a quarter of its work.
+    let now = ting_node::now();
+    let (runtime, mut history) = replayed(&g, &[]);
+    let eased: Vec<Header> = (0..3)
+        .map(|i| {
+            let mut b = runtime
+                .build_candidate(&g, &history, vec![], now + i, [0; 4], vec![])
+                .unwrap();
+            while !consensus::valid_pow(&b.header) {
+                b.header.nonce += 1;
+            }
+            runtime.validate_and_apply_block(&g, &history, &b).unwrap();
+            history.push(b.header.clone());
+            b.header
+        })
+        .collect();
+    assert!(consensus::work(&eased[1].target) < consensus::work(&eased[0].target) / 2u32);
+    let fresh = Directory::new();
+    fresh.config(false, "eased");
+    assert_eq!(
+        headers_from(&mut open(&fresh), &eased).unwrap()["indexed"],
+        3
+    );
+    let a = branch(&g, 30, "A");
+    for block in &a {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let before = status(&mut chain);
+    let tip = &a[29].header;
+    let siblings: Vec<Header> = (0..4_000).map(|n| other_header(tip, None, n)).collect();
+    let started = std::time::Instant::now();
+    for page in siblings.chunks(2_000) {
+        let answer = headers_from(&mut chain, page).unwrap();
+        assert_eq!(answer["indexed"], 0, "{answer}");
+        assert_eq!(answer["next"], serde_json::Value::Null, "{answer}");
+    }
+    let took = started.elapsed();
+    let now = status(&mut chain);
+    for field in ["held_headers", "best_height", "stored_blocks", "tip"] {
+        assert_eq!(now[field], before[field], "{field}");
+    }
+    assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+    // A child of the tip, as a template for the children of its siblings:
+    // they share its target and its parent's timestamps.
+    let (runtime, mut history) = replayed(&g, &a);
+    let child = mine(&runtime, &g, &mut history, vec![], "A").header;
+    let mut indexed = 0;
+    for n in 0..100 {
+        let first = other_header(tip, None, 10_000 + n);
+        let second = other_header(&child, Some(first.id()), 20_000 + n);
+        indexed += sync_headers(&mut chain, &[first, second])["indexed"]
+            .as_u64()
+            .unwrap();
+    }
+    assert_eq!(indexed, 2);
+    let now = status(&mut chain);
+    assert_eq!(
+        now["held_headers"].as_u64().unwrap(),
+        before["held_headers"].as_u64().unwrap() + 2
+    );
+    assert_eq!(now["best_height"], 31);
+}
+#[test]
+fn a_side_header_waits_unkept_until_its_branch_overtakes_and_is_then_fetched() {
+    // A natural fork shown by headers: B3, a sibling of the tip A3, is
+    // checked and not kept; once a peer shows C4 on it, the branch is asked
+    // for again from A2, indexed, and its blocks are asked for and connect.
+    let dir = Directory::new();
+    dir.config(false, "fork headers");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let a = branch(&g, 3, "A");
+    for block in &a {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let before = status(&mut chain);
+    let (runtime, mut history) = replayed(&g, &a[..2]);
+    let b3 = mine(&runtime, &g, &mut history, vec![], "B");
+    let c4 = mine(&runtime, &g, &mut history, vec![], "B");
+    let alone = headers_from(&mut chain, std::slice::from_ref(&b3.header)).unwrap();
+    assert_eq!(alone["indexed"], 0);
+    let now = status(&mut chain);
+    for field in ["held_headers", "best_height"] {
+        assert_eq!(now[field], before[field], "{field}");
+    }
+    let both = headers_from(&mut chain, &headers_of(&[b3.clone(), c4.clone()])).unwrap();
+    assert_eq!(
+        (both["refetch"].clone(), both["next"].clone()),
+        (json!(true), json!(hex(&a[1].header.id())))
+    );
+    let again = headers_from(&mut chain, &headers_of(&[b3.clone(), c4.clone()])).unwrap();
+    assert_eq!(again["indexed"], 2);
+    assert_eq!(status(&mut chain)["best_height"], 4);
+    let wanted = chain.request("blocks_wanted", json!({"peer":"p"})).unwrap();
+    assert_eq!(
+        wanted["ids"],
+        json!([hex(&b3.header.id()), hex(&c4.header.id())])
+    );
+    for block in [&b3, &c4] {
+        chain
+            .request("import", json!({"hex":hex(&block.encode()),"peer":"p"}))
+            .unwrap();
+    }
+    assert_eq!(chain.tip(), c4.header.id());
 }

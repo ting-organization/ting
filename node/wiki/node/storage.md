@@ -148,8 +148,10 @@ sets the window in blocks; `0` keeps everything.
 The node keeps an index of the blocks it knows: for each, its header, its
 accumulated work, the limits it runs under and what the node holds of it. Choosing,
 downloading and connecting the best branch work from it. The index holds in memory
-the most recent canonical blocks, every side branch, and the headers whose blocks are
-not stored yet. Canonical blocks further down are **settled**: the index reads them
+the most recent canonical blocks, every stored side branch, and the headers whose
+blocks are not stored yet, which headers sync indexes only for a chain that overtook
+the best header ([headers first](sync.md#headers-first)). Canonical blocks further
+down are **settled**: the index reads them
 from the database when it needs them, their header and work from `headers` and
 their limits from `block_limits`. Its memory therefore does not grow with the length
 of the chain.
