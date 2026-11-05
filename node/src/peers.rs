@@ -1198,6 +1198,31 @@ async fn ended(node: &Node, address: SocketAddr, source: &str, result: Result<()
 }
 
 type Ended = (SocketAddr, Result<()>);
+type Links = BTreeMap<SocketAddr, (AbortHandle, &'static str)>;
+
+/// The links of `links` whose tasks have finished, taken out, each with its
+/// source and how it ended. A task that panicked ends as a connection that
+/// failed: its peer no longer shows as connected, and is connected again as
+/// any is after a failure. A link that was aborted was taken out then.
+fn finished(
+    tasks: &mut JoinSet<Ended>,
+    links: &mut Links,
+) -> Vec<(SocketAddr, &'static str, Result<()>)> {
+    let mut done = Vec::new();
+    while let Some(joined) = tasks.try_join_next_with_id() {
+        let (address, result) = match joined {
+            Ok((_, ended)) => ended,
+            Err(error) => match links.iter().find(|(_, (link, _))| link.id() == error.id()) {
+                Some((address, _)) => (*address, Err(format!("connection task failed: {error}"))),
+                None => continue,
+            },
+        };
+        if let Some((_, source)) = links.remove(&address) {
+            done.push((address, source, result));
+        }
+    }
+    done
+}
 
 /// Whether the node does without the seeds (wiki:
 /// node/sync#finding-more-peers), having done so before if `left`, by its
@@ -1310,15 +1335,11 @@ pub async fn run(node: Node) {
             .collect();
         let now = crate::now();
         node.book.lock().unwrap().configure(&config.peers);
-        while let Some(done) = tasks.try_join_next() {
-            if let Ok((address, result)) = done
-                && let Some((_, source)) = links.remove(&address)
-            {
-                if matches!(&result, Err(e) if e == ITSELF) {
-                    itself.insert(address);
-                }
-                ended(&node, address, source, result).await;
+        for (address, source, result) in finished(&mut tasks, &mut links) {
+            if matches!(&result, Err(e) if e == ITSELF) {
+                itself.insert(address);
             }
+            ended(&node, address, source, result).await;
         }
         while let Some(done) = probes.try_join_next() {
             if let Ok((address, result)) = done {
@@ -1689,5 +1710,38 @@ mod tests {
             (a(4), "discovered"),
         ];
         assert_eq!(slotted(links, &book), [a(4)]);
+    }
+
+    #[tokio::test]
+    async fn a_link_whose_task_panicked_ends_as_one_that_failed() {
+        let (a, b) = (
+            SocketAddr::from(([8, 1, 1, 1], 18442)),
+            SocketAddr::from(([8, 2, 1, 1], 18442)),
+        );
+        let mut tasks: JoinSet<Ended> = JoinSet::new();
+        let mut links: Links = BTreeMap::new();
+        links.insert(a, (tasks.spawn(async { panic!("a bug") }), "config"));
+        links.insert(b, (tasks.spawn(std::future::pending()), "discovered"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let done = loop {
+            let done = finished(&mut tasks, &mut links);
+            if !done.is_empty() || Instant::now() > deadline {
+                break done;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        // The panicked one is taken out as failed, so that it is connected
+        // again; the other goes on.
+        assert_eq!(done.len(), 1);
+        let (address, source, result) = &done[0];
+        assert_eq!((*address, *source), (a, "config"));
+        assert!(result.as_ref().is_err_and(|e| e.contains("panicked")));
+        assert_eq!(links.keys().copied().collect::<Vec<_>>(), [b]);
+        // One aborted, as a link that ends for a reason is, was taken out
+        // when it was, and is passed over.
+        links.remove(&b).unwrap().0.abort();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(finished(&mut tasks, &mut links).is_empty());
+        assert!(tasks.is_empty());
     }
 }
