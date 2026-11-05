@@ -9,8 +9,9 @@
 //! address range cannot fill them all, and no one address or network holds
 //! more than its share of the book. Every peer asking for addresses is given
 //! the same answer for an hour. A peer that sent invalid data is banned
-//! for a day, with its address range: its addresses are dropped and not learned
-//! again, it may not connect, and its open connections end.
+//! for a day, with its address range: its addresses are dropped, a seed's
+//! aside, and not learned again, it may not connect, and its open connections
+//! end.
 use crate::{Result, config::atomic_write};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -434,7 +435,7 @@ impl AddressBook {
     }
     /// Adds a seed node's address, or marks a known one as a seed's unless it
     /// is configured: a seed is where a node starts, picked after every other
-    /// address.
+    /// address. A banned one is kept too, to be connected once the ban ends.
     pub fn learn_seed(&mut self, address: SocketAddr) {
         match self.entries.get_mut(&address) {
             Some(entry) if !matches!(entry.source, Source::Config | Source::Seed) => {
@@ -443,7 +444,9 @@ impl AddressBook {
             }
             Some(_) => {}
             None => {
-                self.learn(address, Source::Seed);
+                if usable(address) {
+                    self.insert(address, Source::Seed);
+                }
             }
         }
     }
@@ -452,6 +455,11 @@ impl AddressBook {
             .get(address)
             .is_some_and(|e| e.source == Source::Seed)
     }
+    /// Whether the node may connect to one of the seed nodes' addresses at
+    /// `now`: one that is not banned, and not waiting after failures.
+    pub fn seed_due(&self, now: u64) -> bool {
+        self.seeds().any(|a| self.due(&a, now))
+    }
     /// The seed nodes' addresses.
     pub fn seeds(&self) -> impl Iterator<Item = SocketAddr> + '_ {
         self.entries
@@ -459,9 +467,10 @@ impl AddressBook {
             .filter(|e| e.source == Source::Seed)
             .map(|e| e.address)
     }
-    /// Bans an address's range until `until`, dropping every address in it;
-    /// returns whether it did. A range holding a configured peer is never
-    /// banned, nor is this machine: banning it would ban every node on it.
+    /// Bans an address's range until `until`, dropping every address in it but
+    /// a seed's, which is not connected until the ban ends; returns whether it
+    /// did. A range holding a configured peer is never banned, nor is this
+    /// machine: banning it would ban every node on it.
     pub fn ban(&mut self, ip: IpAddr, until: u64) -> bool {
         let range = range(ip);
         if loopback(ip)
@@ -496,7 +505,8 @@ impl AddressBook {
         self.banned.insert(range, until);
         self.ban_ends.insert((until, range));
         let before = self.entries.len();
-        self.entries.retain(|a, _| self::range(a.ip()) != range);
+        self.entries
+            .retain(|a, e| e.source == Source::Seed || self::range(a.ip()) != range);
         self.dirty |= self.entries.len() != before;
         for shared in self.shared.values_mut() {
             shared.list.retain(|a| self::range(a.ip()) != range);
@@ -544,8 +554,8 @@ impl AddressBook {
     }
     /// Drops the least useful address: never a configured one or a seed's, an
     /// unproven one before a proven one, the most failed and longest unproven
-    /// first. A seed's is proven no more once the node leaves it, and is
-    /// looked up only at start.
+    /// first. A seed's is proven no more once the node leaves it, and it is
+    /// where the node goes back to.
     fn evict(&mut self) -> bool {
         self.give_way(|_| true, true)
     }
@@ -613,16 +623,18 @@ impl AddressBook {
                     .saturating_add((RETRY_BASE << (entry.failures - 1).min(6)).min(RETRY_MAX))
     }
     /// Whether a connection to an address may be tried: at once, or after a
-    /// failure once the wait is over. A configured peer waits a minute, any
-    /// other a minute doubling with each further failure up to an hour.
+    /// failure once the wait is over, and not while it is banned. A configured
+    /// peer waits a minute, any other a minute doubling with each further
+    /// failure up to an hour.
     pub fn due(&self, address: &SocketAddr, now: u64) -> bool {
-        self.entries.get(address).is_none_or(|e| {
-            if e.source == Source::Config {
-                e.failures == 0 || now >= e.attempted.saturating_add(RETRY_BASE)
-            } else {
-                Self::retry(e, now)
-            }
-        })
+        !self.is_banned(address.ip(), now)
+            && self.entries.get(address).is_none_or(|e| {
+                if e.source == Source::Config {
+                    e.failures == 0 || now >= e.attempted.saturating_add(RETRY_BASE)
+                } else {
+                    Self::retry(e, now)
+                }
+            })
     }
     /// Up to `SHARE_MAX` addresses, in random order, for a peer at `peer`:
     /// those with a recent completed round that the peer can reach, except
@@ -645,6 +657,7 @@ impl AddressBook {
                     .is_some_and(|v| now.saturating_sub(v) <= SHARE_FRESH)
             })
             .filter(|e| e.failures == 0 && shareable(e.address, peer))
+            .filter(|e| !self.is_banned(e.address.ip(), now))
             .map(|e| e.address)
             .collect();
         let kept = self.shared.get(&reach(peer)).filter(|kept| {
@@ -682,7 +695,10 @@ impl AddressBook {
             .entries
             .values()
             .filter(|e| {
-                e.source != Source::Config && !busy.contains(&e.address) && Self::retry(e, now)
+                e.source != Source::Config
+                    && !busy.contains(&e.address)
+                    && Self::retry(e, now)
+                    && !self.is_banned(e.address.ip(), now)
             })
             .collect();
         Shuffle(seed).shuffle(&mut candidates);
@@ -927,6 +943,35 @@ mod tests {
         book.configure(&[configured, bad]);
         assert!(!book.is_banned(bad.ip(), now) && book.get(&bad).is_some());
         assert!(book.ban_ends.is_empty());
+    }
+
+    #[test]
+    fn a_ban_keeps_a_seeds_address_to_connect_to_once_it_ends() {
+        // A proven seed shares a /64 with a peer that sent invalid data: the
+        // ban covers it, so it is not connected, picked or shared, but it
+        // stays in the book and is connected again once the ban ends.
+        let now = crate::now();
+        let mut book = AddressBook::default();
+        let (seed, neighbour) = (a("[2a00:1:2:3::1]:18442"), a("[2a00:1:2:3::2]:18442"));
+        book.learn_seed(seed);
+        book.succeeded(seed, now - 10);
+        book.learn(neighbour, Source::Inbound);
+        assert!(book.ban(ip("2a00:1:2:3::bad"), now + BAN));
+        assert!(book.is_seed(&seed) && book.get(&neighbour).is_none());
+        let none = BTreeSet::new();
+        assert!(book.pick(8, &none, now, 3).is_empty());
+        assert!(!book.due(&seed, now) && !book.seed_due(now));
+        assert!(book.share(ip("9.9.9.9"), None, now, 7).is_empty());
+        assert_eq!(book.pick(8, &none, now + BAN, 3), [seed]);
+        assert!(book.due(&seed, now + BAN) && book.seed_due(now + BAN));
+        // A seed's name that resolves into a banned range is kept the same
+        // way; any other address there is still not learned.
+        let mut book = AddressBook::default();
+        book.ban(ip("8.8.1.1"), now + BAN);
+        book.learn_seed(a("8.8.1.1:18442"));
+        assert!(!book.learn(a("8.8.1.1:1"), Source::Peer));
+        assert!(book.is_seed(&a("8.8.1.1:18442")));
+        assert!(!book.seed_due(now) && book.seed_due(now + BAN));
     }
 
     #[test]

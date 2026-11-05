@@ -264,7 +264,9 @@ The peer that sent invalid data is also banned for a day, with its address range
 its IPv4 address, or the /64 of its IPv6 address, which one subscriber usually holds
 whole. While the ban lasts:
 
-- addresses in the range leave the address book and are not learned again;
+- addresses in the range leave the address book and are not learned again, except
+  a seed node's, which is not connected while the ban lasts and is connected as
+  before once it ends, so that a ban never costs a node its way back to the network;
 - connections from the range are refused, and open connections from it end at once;
 - open connections to the range end within two seconds.
 
@@ -291,10 +293,10 @@ either side does not take.
 ## Finding more peers
 
 A node on the production network needs no configured peer: the node carries the
-names of the network's seed nodes, looks them up as it starts, and learns from
-them. On any network, one configured peer is enough. A node learns further
-addresses from its peers and keeps connections to up to `max_peers` of them, eight
-unless configured otherwise. Every new connection asks for addresses first, before
+names of the network's seed nodes, looks them up as it starts and from time to
+time, and learns from them. On any network, one configured peer is enough. A node
+learns further addresses from its peers and keeps connections to up to `max_peers`
+of them, eight unless configured otherwise. Every new connection asks for addresses first, before
 headers and blocks, so a node that knows only a seed learns of other peers at once.
 This follows the address exchange of Bitcoin, kept small: no separate discovery
 protocol, no distributed hash table, nothing beyond the connections above.
@@ -303,8 +305,12 @@ protocol, no distributed hash table, nothing beyond the connections above.
 listening addresses, filled from four sources:
 
 - on the production network, its seed nodes: `host:port` names built into the node,
-  each looked up for at most five seconds at every start; a name that does not
-  resolve is passed over;
+  each looked up for at most five seconds as the node starts, again every hour, as
+  often as an address that keeps failing is tried again, so that a seed whose
+  address changed is found by then, and every minute while the book holds no seed
+  address the node may connect to, as when bans or failures cover them all; a name
+  that does not resolve is passed over, and after the first lookup without a word
+  in the log;
 - its configured peers;
 - the listening port each connecting peer announces in its `hello`, taken at the IP
   address the connection came from;
@@ -387,7 +393,7 @@ they then do not serve keep the node from them for no longer than it takes to ca
 them. A node that reaches only the seeds keeps them. A configured seed is a
 configured peer like any other, and an address a peer shared is marked as a seed's
 when the seed's name resolves to it. A seed's address is never dropped from a full
-book.
+book, nor by a ban.
 
 **Probing.** When every slot is taken, the node tests one untried address every two
 minutes with a connection that only exchanges `hello`, never a seed's. An address
