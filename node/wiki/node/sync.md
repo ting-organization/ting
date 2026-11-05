@@ -384,7 +384,8 @@ network it costs one extra connection.
   connection, in place of the one least worth keeping: the peers that delivered new
   blocks latest, the longest connected, the connections of the node's own machine
   and those less than ten seconds old keep theirs. An operator raises
-  `max_inbound` for a seed node, and the process's open-file limit with it
+  `max_inbound` for a seed node; on Unix the node raises its open-file limit to
+  match as it starts, as far as the system's hard limit allows
 - An address book of at most 1,024 addresses
 
 The transport's own limits, on connections, requests and frames, are on

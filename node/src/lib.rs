@@ -11,6 +11,7 @@ pub mod pool;
 pub mod presync;
 pub mod progress;
 pub mod reads;
+pub mod rest;
 pub mod seed;
 pub mod store;
 pub mod transport;

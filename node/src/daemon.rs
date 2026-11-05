@@ -4,7 +4,7 @@ use crate::{
     config::{self, Config, Running},
     discovery::{self, AddressBook},
     mining::{self, Miner, Search, Selector},
-    peers, progress, reads,
+    peers, progress, reads, rest,
     transport::{self, Inbound, PeerStats},
 };
 use serde_json::{Value, json};
@@ -311,17 +311,15 @@ struct ApiServer {
     stop: oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
 }
-fn launch_api(listener: TcpListener, node: Node, cors: bool) -> ApiServer {
+/// REST on `listener`, with up to `connections` connections at once.
+fn launch_api(listener: TcpListener, node: Node, cors: bool, connections: usize) -> ApiServer {
     let (stop, stopped) = oneshot::channel();
     let task = tokio::spawn(async move {
-        let app =
-            api::router(node, cors).into_make_service_with_connect_info::<std::net::SocketAddr>();
-        let server = axum::serve(listener, app).with_graceful_shutdown(async {
+        let limits = rest::Limits::new(connections);
+        rest::serve(listener, api::router(node, cors), limits, async {
             let _ = stopped.await;
-        });
-        if let Err(e) = server.await {
-            crate::log!("REST service: {e}");
-        }
+        })
+        .await;
     });
     ApiServer { stop, task }
 }
@@ -341,9 +339,12 @@ async fn api_manager(
     dir: PathBuf,
     mut changes: mpsc::Receiver<ApiChange>,
     initial: Option<(TcpListener, bool)>,
+    connections: usize,
 ) {
-    let mut server =
-        initial.map(|(listener, cors)| (launch_api(listener, node.clone(), cors), cors));
+    let mut server = initial.map(|(listener, cors)| {
+        let server = launch_api(listener, node.clone(), cors, connections);
+        (server, cors)
+    });
     loop {
         let change = tokio::select! {c=changes.recv()=>c,_=node.stopped()=>break};
         let Some(change) = change else {
@@ -370,7 +371,8 @@ async fn api_manager(
                 node.handle
                     .call("api_config", json!({"enabled":true,"cors":change.cors}))
                     .await?;
-                server = Some((launch_api(listener, node.clone(), change.cors), change.cors));
+                let active = launch_api(listener, node.clone(), change.cors, connections);
+                server = Some((active, change.cors));
                 node.info.lock().unwrap().api = Some(address);
             } else if !change.enabled && server.is_some() {
                 node.handle
@@ -399,6 +401,18 @@ pub async fn run_with(dir: &Path, mining: Mining) -> Result<()> {
     let lock = config::lock(dir)?;
     let c = Config::load(dir)?;
     let token = config::token(dir)?;
+    // REST never takes the descriptors that peers and storage may need: the
+    // limit is raised to leave room for both if it can be, and REST takes
+    // what is left of it (wiki: node/security#the-rest-interface).
+    let reserved = rest::reserved(c.max_inbound, c.max_peers);
+    let limit = rest::descriptors(reserved.saturating_add(rest::CONNECTIONS_MAX as u64));
+    let connections = rest::connections(limit, reserved);
+    if let Some(limit) = limit.filter(|_| connections < rest::CONNECTIONS_MAX) {
+        crate::log!(
+            "open-file limit {limit}: REST takes at most {connections} connections at once, \
+             leaving {reserved} for peers and storage"
+        );
+    }
     let control = TcpListener::bind(c.control)
         .await
         .map_err(|e| format!("control listener: {e}"))?;
@@ -488,6 +502,7 @@ pub async fn run_with(dir: &Path, mining: Mining) -> Result<()> {
         dir.into(),
         receiver,
         api.map(|listener| (listener, c.api_cors)),
+        connections,
     ));
     tokio::select! {_=node.stopped()=>{},_=terminated()=>{}}
     shutdown.store(true, Ordering::Relaxed);

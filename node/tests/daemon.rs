@@ -2736,3 +2736,59 @@ async fn an_inventory_whose_pages_do_not_move_on_ends_the_connection() {
     }
     n.stop().await;
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_closes_slow_and_idle_connections_and_still_takes_the_largest_requests() {
+    // A client that sends half a header, and one left idle after an answer,
+    // are closed within the ten seconds a header has; meanwhile a full batch
+    // storage read with proofs and a submission as large as a block holds
+    // are answered whole.
+    let n = Node::start(true, "rest limits");
+    let api = n.info.api.unwrap();
+    let opened = tokio::time::Instant::now();
+    let mut slow = TcpStream::connect(api).await.unwrap();
+    slow.write_all(b"GET /health HTTP/1.1\r\nHost:")
+        .await
+        .unwrap();
+    let mut idle = TcpStream::connect(api).await.unwrap();
+    idle.write_all(b"GET /health HTTP/1.1\r\nHost: node\r\n\r\n")
+        .await
+        .unwrap();
+    let mut answer = vec![0; 4096];
+    let read = idle.read(&mut answer).await.unwrap();
+    assert!(answer[..read].starts_with(b"HTTP/1.1 200"));
+    let json = [("Content-Type", "application/json")];
+    let reads: Vec<Value> = (0..1_024u32)
+        .map(|i| json!({"contract":hex(&[i as u8; 32]),"key":hex(&[(i >> 8) as u8; 32])}))
+        .collect();
+    let batch = json!({"reads":reads,"proof":true}).to_string();
+    let (status, _, values) = http_full(api, "POST", "/v1/storage", &json, &batch).await;
+    assert_eq!(status, 200, "{values}");
+    let values: Value = serde_json::from_str(&values).unwrap();
+    assert_eq!(values["values"].as_array().unwrap().len(), 1_024);
+    let capacity = n.call("status", json!({})).await["limits"][2]
+        .as_u64()
+        .unwrap();
+    let large = ting_core::protocol::Transaction {
+        budget: ting_core::meter::Resources([1_000_000, 1, capacity, 1]),
+        payload: ting_core::protocol::Payload::Call {
+            target: [1; 32],
+            input: vec![1; capacity as usize - 4096],
+        },
+    };
+    let body = format!(r#"{{"hex":"{}"}}"#, hex(&large.encode()));
+    let (status, _, admitted) = http_full(api, "POST", "/v1/transactions", &json, &body).await;
+    assert_eq!(status, 200, "{admitted}");
+    for stream in [&mut slow, &mut idle] {
+        let mut rest = Vec::new();
+        let closed = tokio::time::timeout_at(
+            opened + Duration::from_secs(20),
+            stream.read_to_end(&mut rest),
+        )
+        .await;
+        assert!(closed.is_ok(), "still open after 20 seconds");
+    }
+    assert!(opened.elapsed() >= Duration::from_secs(9));
+    let (status, _) = http(api, "GET", "/health", None, None).await;
+    assert_eq!(status, 200);
+    n.stop().await;
+}

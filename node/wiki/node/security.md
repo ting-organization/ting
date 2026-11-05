@@ -77,11 +77,15 @@ REST's reads run on threads of their own, one per processor core, beside the thr
 that validates and applies blocks, and its few requests to that thread have their
 own share of its queue, so REST traffic cannot slow block processing or crowd out
 peers ([how the node is put together](../node.md#how-it-is-put-together)). There is
-no rate per client. Requests, bodies, queues and pages are bounded:
+no rate per client. Connections, requests, bodies, queues and pages are bounded:
 
 | Bound | Value | When exceeded |
 |---|---|---|
-| Requests in progress | 32 per processor core | `503`, `HTTP service busy` |
+| Connections at once | 512, or what the open-file limit leaves beside what peers and storage may need | Further connections wait to be accepted |
+| Connections from one client, an IPv4 address or an IPv6 /64 | 16; this machine's own, such as a reverse proxy's, are not counted | Closed at once |
+| Time to send a request's header, and to leave a connection idle after an answer | 10 seconds | Connection closed |
+| Time to send an answer, from when it is ready | A minute, and ten seconds for every MiB of it | Connection closed |
+| Requests in progress, each until all but at most 128 KiB of its answer is written to its connection | 32 per processor core | `503`, `HTTP service busy` |
 | REST's requests waiting for the chain thread (submissions, the mempool, pending status) | 128 | `503`, `node request queue unavailable` |
 | Time per request | 35 seconds; a submission also ten seconds for every MiB its body may have | `504`, `HTTP deadline exceeded` |
 | A submission's body | Twice the data capacity of the next block, and 4 KiB | `413` |
@@ -91,6 +95,14 @@ no rate per client. Requests, bodies, queues and pages are bounded:
 Every response carries `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. The endpoints are
 listed on [Explore the chain](../start/explore.md#the-rest-api).
+
+REST never takes the descriptors that peers and storage may need. Those are one for
+each peer connection the configuration allows, `max_inbound` in and `max_peers` out
+and 32 configured peers, and 64 for the rest: the seeds, control connections, block
+files, the database and the log. On Unix the node raises its open-file limit at start
+to that and 512 more, as far as the system's hard limit allows, and REST takes what
+is left of the limit, at most 512. When that is fewer, the node says so in its log.
+Windows has no such limit.
 
 ## Exposing a node
 
