@@ -457,6 +457,15 @@ impl Node {
     /// A node on the test genesis, with its configuration changed by
     /// `configure` before it starts, such as its pool's size.
     fn start_configured(name: &str, configure: impl FnOnce(&mut config::Config)) -> Self {
+        Self::start_with_book(name, configure, &[])
+    }
+    /// A node as `start_configured` starts it, whose address book holds
+    /// `book` as it starts: addresses, each with its source, such as `seed`.
+    fn start_with_book(
+        name: &str,
+        configure: impl FnOnce(&mut config::Config),
+        book: &[(SocketAddr, &str)],
+    ) -> Self {
         let dir = Directory::new();
         let mut c = config::Config {
             name: name.into(),
@@ -467,6 +476,14 @@ impl Node {
         };
         configure(&mut c);
         config::initialize_with(&dir.0, &c, support::test_genesis()).unwrap();
+        if !book.is_empty() {
+            let addresses: Vec<Value> = book
+                .iter()
+                .map(|(address, source)| json!({"address":address,"source":source}))
+                .collect();
+            let book = json!({ "addresses": addresses }).to_string();
+            std::fs::write(dir.0.join("peers.json"), book).unwrap();
+        }
         command(&dir.0, &["start"]);
         let info = Running::load(&dir.0).unwrap();
         Self { dir, info }
@@ -806,6 +823,33 @@ async fn daemon_cli_rest_wiki_sync_and_restart_work_together() {
         let (status, body) = http(api, "POST", "/v1/storage", Some(refused), None).await;
         assert!((400..500).contains(&status), "{status} {body}");
         assert!(serde_json::from_str::<Value>(&body).unwrap()["error"].is_string());
+    }
+    // A whole batch with proofs is read, compact or pretty-printed. A body
+    // larger than any batch needs, 256 bytes a record and 4 KiB, is refused
+    // before it is parsed, whatever it names.
+    let json_body = [("Content-Type", "application/json")];
+    let whole = json!({"reads":vec![read([0; 32]); 1_024],"proof":true});
+    for body in [
+        whole.to_string(),
+        serde_json::to_string_pretty(&whole).unwrap(),
+    ] {
+        let (status, _, answer) = http_full(api, "POST", "/v1/storage", &json_body, &body).await;
+        assert_eq!(status, 200, "{answer}");
+        let answer: Value = serde_json::from_str(&answer).unwrap();
+        assert_eq!(answer["values"].as_array().unwrap().len(), 1_024);
+    }
+    let over = 1_024 * 256 + 4096 + 1;
+    let mut empty = r#"{"reads":["#.to_owned();
+    while empty.len() + 40 < over {
+        empty.push_str(r#"{"contract":"","key":""},"#);
+    }
+    empty.pop();
+    empty.push_str("]}");
+    for body in [whole.to_string(), empty] {
+        let body = " ".repeat(over - body.len()) + &body;
+        let (status, _, answer) = http_full(api, "POST", "/v1/storage", &json_body, &body).await;
+        assert_eq!(status, 413, "{answer}");
+        assert!(!error_of(&answer).is_empty());
     }
     // The raw block comes whole, or in slices that add up to it.
     let (status, whole) = http(api, "GET", "/v1/blocks/4/raw", None, None).await;
@@ -1281,6 +1325,322 @@ async fn a_peer_counts_only_as_high_as_the_headers_it_shows() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     n.stop().await;
+}
+
+/// `n` blocks on genesis `g`, a second apart from now.
+fn blocks_on(g: &ting_core::protocol::Genesis, n: u64) -> Vec<ting_core::protocol::Block> {
+    let runtime = Runtime::new(State::default(), Context::from_genesis(g));
+    let (mut history, mut blocks) = (Vec::new(), Vec::new());
+    let start = ting_node::now();
+    for i in 0..n {
+        let mut block = runtime
+            .build_candidate(g, &history, vec![], start + i, [0; 4], vec![])
+            .unwrap();
+        while !consensus::valid_pow(&block.header) {
+            block.header.nonce += 1;
+        }
+        runtime
+            .validate_and_apply_block(g, &history, &block)
+            .unwrap();
+        history.push(block.header.clone());
+        blocks.push(block);
+    }
+    blocks
+}
+/// A fake peer at the tip of `blocks`, which it announces every 300 ms once
+/// a hello asks it to, with a work no node reaches, so that it is never
+/// pushed to.
+#[derive(Clone)]
+struct ChainPeer {
+    chain_id: Hash,
+    nonce: u64,
+    blocks: std::sync::Arc<Vec<ting_core::protocol::Block>>,
+    /// Whether it shows its headers and serves its blocks.
+    serves: bool,
+    /// How long it takes to answer each block slice.
+    delay: Duration,
+    /// The addresses it shares.
+    shares: Vec<SocketAddr>,
+    /// Once set, it announces a tip it never shows instead.
+    bluff: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// How many hellos it has answered.
+    hellos: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl ChainPeer {
+    fn new(
+        chain_id: Hash,
+        nonce: u64,
+        blocks: std::sync::Arc<Vec<ting_core::protocol::Block>>,
+    ) -> Self {
+        Self {
+            chain_id,
+            nonce,
+            blocks,
+            serves: true,
+            delay: Duration::ZERO,
+            shares: vec![],
+            bluff: Default::default(),
+            hellos: Default::default(),
+        }
+    }
+    fn bluffing(&self) -> bool {
+        self.bluff.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn tip(&self) -> (Hash, u64) {
+        let height = self.blocks.len() as u64;
+        if self.bluffing() {
+            ([9; 32], height + 1)
+        } else {
+            (self.blocks.last().unwrap().header.id(), height)
+        }
+    }
+    fn answer(&self, request: &wire::Request) -> Result<wire::Answer, String> {
+        let (tip, height) = self.tip();
+        let state = wire::State {
+            version: 1,
+            chain_id: self.chain_id,
+            agent: "fake".into(),
+            features: vec![],
+            nonce: self.nonce,
+            height,
+            tip,
+            work: u64::MAX.into(),
+            locator: vec![],
+            pending: vec![],
+            deferred: vec![],
+        };
+        match request {
+            wire::Request::Hello(_) | wire::Request::State => Ok(wire::Answer::State(state)),
+            // After the most recent locator entry it holds, as a node answers.
+            wire::Request::Headers { locator } if self.serves && !self.bluffing() => {
+                let from = locator
+                    .iter()
+                    .find_map(|id| self.blocks.iter().position(|b| b.header.id() == *id))
+                    .map_or(0, |k| k + 1);
+                Ok(wire::Answer::Headers(
+                    self.blocks[from..]
+                        .iter()
+                        .map(|b| b.header.encode().try_into().unwrap())
+                        .collect(),
+                ))
+            }
+            wire::Request::Headers { .. } => Ok(wire::Answer::Headers(vec![])),
+            wire::Request::Raw { id, offset, length } if self.serves => {
+                let block = self.blocks.iter().find(|b| b.header.id() == *id);
+                let bytes = block.ok_or("block not found")?.encode();
+                let from = (*offset as usize).min(bytes.len());
+                let to = (from + *length as usize).min(bytes.len());
+                Ok(wire::Answer::Slice {
+                    offset: *offset,
+                    total: bytes.len() as u64,
+                    bytes: bytes[from..to].to_vec(),
+                })
+            }
+            wire::Request::Raw { .. } => Err("block not found".into()),
+            wire::Request::Inventory { .. } => Ok(wire::Answer::Inventory {
+                ids: vec![],
+                next: None,
+            }),
+            wire::Request::Addresses => Ok(wire::Answer::Addresses(self.shares.clone())),
+            _ => Err("not served".into()),
+        }
+    }
+    fn spawn(self, listener: tokio::net::TcpListener) {
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let peer = self.clone();
+                tokio::spawn(async move {
+                    let (mut read, mut write) = stream.into_split();
+                    let (frames, mut out) = tokio::sync::mpsc::unbounded_channel();
+                    let writer = tokio::spawn(async move {
+                        while let Some(frame) = out.recv().await {
+                            if transport::write_wire(&mut write, &frame).await.is_err() {
+                                return;
+                            }
+                        }
+                    });
+                    let mut announcer = None;
+                    while let Ok(wire::Frame::Request(request)) =
+                        transport::read_wire(&mut read, None, ting_node::FRAME_MAX).await
+                    {
+                        if matches!(request, wire::Request::Raw { .. }) {
+                            tokio::time::sleep(peer.delay).await;
+                        }
+                        let frame = match peer.answer(&request) {
+                            Ok(answer) => wire::Frame::Answer(answer),
+                            Err(error) => wire::Frame::Error(error),
+                        };
+                        if frames.send(frame).is_err() {
+                            break;
+                        }
+                        if let wire::Request::Hello(hello) = &request {
+                            peer.hellos
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            if hello.announce && announcer.is_none() {
+                                let (peer, frames) = (peer.clone(), frames.clone());
+                                announcer = Some(tokio::spawn(async move {
+                                    loop {
+                                        tokio::time::sleep(Duration::from_millis(300)).await;
+                                        let (tip, height) = peer.tip();
+                                        let news = wire::Announcement {
+                                            tip,
+                                            height,
+                                            work: u64::MAX.into(),
+                                            pending: 0,
+                                            deferred: 0,
+                                        };
+                                        if frames.send(wire::Frame::Announcement(news)).is_err() {
+                                            return;
+                                        }
+                                    }
+                                }));
+                            }
+                        }
+                    }
+                    if let Some(announcer) = announcer {
+                        announcer.abort();
+                    }
+                    writer.abort();
+                });
+            }
+        });
+    }
+}
+/// A peer's status in a node's `peers` answer.
+fn peer_status(peers: &Value, address: SocketAddr) -> Value {
+    peers["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["address"] == address.to_string())
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_node_keeps_the_seed_until_it_holds_the_tip_others_only_claim() {
+    // A new node knows a seed, which serves 200 blocks slowly, and four
+    // peers that announce the seed's tip but show no header and serve no
+    // block. While it downloads, peers that claim its best header count for
+    // nothing; caught lacking it, these four count for nothing after either.
+    // So the node reaches the tip from the seed and keeps it.
+    let g = support::test_genesis();
+    let blocks = std::sync::Arc::new(blocks_on(&g, 200));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let seed = listener.local_addr().unwrap();
+    ChainPeer {
+        delay: Duration::from_millis(30),
+        ..ChainPeer::new(g.chain_id(), 0x5eed, blocks.clone())
+    }
+    .spawn(listener);
+    let mut book = vec![(seed, "seed")];
+    let mut fakes = Vec::new();
+    for k in 0..4 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        fakes.push(listener.local_addr().unwrap());
+        book.push((listener.local_addr().unwrap(), "peer"));
+        ChainPeer {
+            serves: false,
+            ..ChainPeer::new(g.chain_id(), 0xfa0 + k, blocks.clone())
+        }
+        .spawn(listener);
+    }
+    let b = Node::start_with_book("new", |_| {}, &book);
+    b.wait_height(200).await;
+    assert_eq!(
+        b.call("status", json!({})).await["tip"],
+        hex(&blocks[199].header.id())
+    );
+    // Caught up, it still holds the seed after more than two of its checks.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let peers = b.call("peers", json!({})).await;
+    assert!(
+        peer_status(&peers, seed)["connected"].is_u64(),
+        "{peers}{}",
+        node_log(&b.dir.0)
+    );
+    for fake in fakes {
+        assert_eq!(peer_status(&peers, fake)["lacking"], true, "{peers}");
+    }
+    let log = std::fs::read_to_string(b.dir.0.join("node.log")).unwrap();
+    assert!(!log.contains("enough peers besides the seeds"), "{log}");
+    b.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_leaves_the_seed_for_peers_that_serve_it_and_comes_back_when_none_do() {
+    // A node with two slots knows a seed and C, which serve the same 20
+    // blocks; C shares D, which announces a tip it never shows. Caught up,
+    // with C at its tip, the node leaves the seed. Then C, too, announces a
+    // tip it never shows: caught lacking, it leaves the node no peer that
+    // serves it, and the node connects the seed again at once, though C and
+    // D still take both of its slots.
+    let g = support::test_genesis();
+    let blocks = std::sync::Arc::new(blocks_on(&g, 20));
+    let bind = || async { tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap() };
+    let (seed_listener, c_listener, d_listener) = (bind().await, bind().await, bind().await);
+    let (seed, c, d) = (
+        seed_listener.local_addr().unwrap(),
+        c_listener.local_addr().unwrap(),
+        d_listener.local_addr().unwrap(),
+    );
+    let seed_peer = ChainPeer::new(g.chain_id(), 0x5eed, blocks.clone());
+    let hellos = seed_peer.hellos.clone();
+    seed_peer.spawn(seed_listener);
+    let c_peer = ChainPeer {
+        shares: vec![d],
+        ..ChainPeer::new(g.chain_id(), 0xc, blocks.clone())
+    };
+    let bluff = c_peer.bluff.clone();
+    c_peer.spawn(c_listener);
+    let d_peer = ChainPeer {
+        serves: false,
+        ..ChainPeer::new(g.chain_id(), 0xd, blocks.clone())
+    };
+    d_peer
+        .bluff
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    d_peer.spawn(d_listener);
+    let b = Node::start_with_book(
+        "leaves",
+        |config| config.max_peers = 2,
+        &[(seed, "seed"), (c, "peer")],
+    );
+    b.wait_height(20).await;
+    wait_log(
+        &b.dir.0,
+        &format!("disconnected from {seed}: enough peers besides the seeds"),
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let peers = b.call("peers", json!({})).await;
+        if peer_status(&peers, d)["lacking"] == true {
+            assert_eq!(peer_status(&peers, c)["lacking"], false, "{peers}");
+            assert!(peer_status(&peers, seed).is_null(), "{peers}");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{peers}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let before = hellos.load(std::sync::atomic::Ordering::SeqCst);
+    bluff.store(true, std::sync::atomic::Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let peers = b.call("peers", json!({})).await;
+        let back = hellos.load(std::sync::atomic::Ordering::SeqCst) > before;
+        if back && peer_status(&peers, seed)["connected"].is_u64() {
+            assert_eq!(peer_status(&peers, c)["lacking"], true, "{peers}");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{peers}{}",
+            node_log(&b.dir.0)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    b.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1967,7 +2327,9 @@ async fn the_node_answers_while_ting_mine_searches() {
 async fn the_built_in_miner_waits_while_the_node_is_behind_its_best_header() {
     // A fake peer shows three valid headers and never serves their blocks:
     // the node stays at height 0 behind a best header at 3, and its miner
-    // waits rather than mine a block about to be replaced.
+    // waits rather than mine a block about to be replaced, but only for a
+    // block's transfer time, 70 seconds at this chain's capacity: a tip that
+    // does not move has no download behind it.
     let n = Node::start(false, "behind");
     let g = config::genesis(&n.dir.0).unwrap();
     let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
@@ -2016,7 +2378,8 @@ async fn the_built_in_miner_waits_while_the_node_is_behind_its_best_header() {
     }
     n.call("miner", json!({"action":"start","threads":1,"spacing":0}))
         .await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_secs(30);
     loop {
         let status = n.call("miner", json!({"action":"status"})).await;
         if status["last_error"]
@@ -2030,6 +2393,13 @@ async fn the_built_in_miner_waits_while_the_node_is_behind_its_best_header() {
     }
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(n.height().await, 0);
+    let deadline = started + Duration::from_secs(150);
+    while n.height().await == 0 {
+        let status = n.call("miner", json!({"action":"status"})).await;
+        assert!(tokio::time::Instant::now() < deadline, "{status}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(started.elapsed() >= Duration::from_secs(60));
     n.call("miner", json!({"action":"stop"})).await;
     n.stop().await;
 }
@@ -2176,6 +2546,48 @@ async fn seed_names_resolve_to_addresses_and_bad_ones_are_passed_over() {
     );
     assert!(found.iter().all(|a| a.port() != 0));
     assert!(ting_node::config::SEEDS.iter().all(|s| s.contains(':')));
+}
+#[tokio::test]
+async fn looking_the_seeds_up_again_restores_a_seed_gone_from_the_book() {
+    use std::sync::{Arc, Mutex, atomic::AtomicBool};
+    use ting_node::{daemon::keep_seeds, discovery::AddressBook};
+    let names: &'static [&'static str] = &["127.0.0.1:18442", "127.0.0.1:18443"];
+    let seeds: Vec<SocketAddr> = names.iter().map(|n| n.parse().unwrap()).collect();
+    let held = |book: &Arc<Mutex<AddressBook>>, address: &SocketAddr| {
+        book.lock().unwrap().is_seed(address)
+    };
+    let wait = |book: Arc<Mutex<AddressBook>>, seeds: Vec<SocketAddr>| async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !seeds.iter().all(|a| held(&book, a)) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "not looked up again"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let hour = Duration::from_secs(3600);
+    // With no seed address left to connect to, the names are looked up again
+    // within `retry`, however far off the next regular lookup is.
+    let book = Arc::new(Mutex::new(AddressBook::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let short = Duration::from_millis(100);
+    tokio::spawn(keep_seeds(book.clone(), names, stop.clone(), hour, short));
+    wait(book.clone(), seeds.clone()).await;
+    for seed in &seeds {
+        book.lock().unwrap().forget(seed);
+    }
+    wait(book.clone(), seeds.clone()).await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    // With one left, the other comes back at the next regular lookup.
+    let book = Arc::new(Mutex::new(AddressBook::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let every = Duration::from_millis(200);
+    tokio::spawn(keep_seeds(book.clone(), names, stop.clone(), every, hour));
+    wait(book.clone(), seeds.clone()).await;
+    book.lock().unwrap().forget(&seeds[1]);
+    wait(book.clone(), seeds.clone()).await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocks_are_asked_for_many_at_once_and_assembled_from_their_slices() {
@@ -2491,6 +2903,36 @@ async fn a_hello_alone_does_not_prove_a_peer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peers_error_text_cannot_write_a_line_of_the_log() {
+    // A peer answers with an error whose text holds a line break, a line
+    // the node might have written, and an escape code that clears a
+    // terminal. The node's log shows the text on the line that tells of the
+    // disconnection, with each control character escaped.
+    let n = Node::start(false, "forged");
+    let chain_id = chain_id_of(&n).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake = listener.local_addr().unwrap();
+    let forged = "2026-10-21T00:00:00Z connected to 203.0.113.9:18442: ting-node/0.1.0";
+    let error = format!("bad\n{forged}\u{1b}[2J");
+    fake_peer(listener, move |request, _| match request {
+        wire::Request::Hello(_) | wire::Request::State => {
+            Ok(wire::Answer::State(fake_state(chain_id, [7; 32], 0xe1)))
+        }
+        wire::Request::Addresses => Ok(wire::Answer::Addresses(vec![])),
+        _ => Err(error.clone()),
+    });
+    command(&n.dir.0, &["add", "node", &fake.to_string()]);
+    let shown = format!("disconnected from {fake}: bad\\n{forged}\\u{{1b}}[2J");
+    wait_log(&n.dir.0, &shown).await;
+    let log = std::fs::read_to_string(n.dir.0.join("node.log")).unwrap();
+    assert!(
+        !log.lines().any(|line| line.starts_with(forged)) && !log.contains('\u{1b}'),
+        "{log}"
+    );
+    n.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commands_print_text_or_with_json_their_result() {
     // A person reads each result as text; `--json` prints the result itself.
     let n = Node::start(true, "texts");
@@ -2738,6 +3180,93 @@ async fn an_inventory_whose_pages_do_not_move_on_ends_the_connection() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     n.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_of_tiny_transactions_lists_a_peers_pools_at_most_once_in_two_seconds() {
+    // The node takes a tiny transaction ten times a second, and its peer
+    // announces after every exchange that its pool changed. Each exchange
+    // lists the peer's pool and deferred set, which may be five pages of
+    // 32 KiB, so a connection lists them at most once in two seconds.
+    let n = Node::start(false, "stream");
+    let g = config::genesis(&n.dir.0).unwrap();
+    let (pool, asked): (Pool, Asked) = Default::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    pool_peer(
+        listener,
+        fake_state(g.chain_id(), g.block_id(), 0xd0),
+        pool,
+        asked.clone(),
+    );
+    command(&n.dir.0, &["add", "node", &address.to_string()]);
+    wait_exchanges(&n, &asked, 1).await;
+    let pages = |asked: &Asked| {
+        let asked = asked.lock().unwrap();
+        asked
+            .iter()
+            .filter(|r| matches!(r, wire::Request::Inventory { .. }))
+            .count()
+    };
+    let (begun, listed) = (exchanges(&asked).0, pages(&asked));
+    let start = tokio::time::Instant::now();
+    let mut input = 0;
+    while start.elapsed() < Duration::from_secs(8) {
+        n.call("submit", json!({"hex":hex(&pooled(input).encode())}))
+            .await;
+        input += 1;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (begun, listed) = (exchanges(&asked).0 - begun, pages(&asked) - listed);
+    eprintln!("{input} transactions in 8 s: {begun} exchanges, {listed} inventory pages");
+    // One exchange every two seconds at most, four in eight, and one that
+    // may have begun as they ended; each lists one page of either set.
+    assert!(begun <= 5 && listed <= 2 * 5, "{begun} {listed}");
+    // The node's own transactions still went out to the peer.
+    assert!(exchanges(&asked).1 > 0);
+    n.stop().await;
+}
+/// How long it took, since `since`, until `n` pooled `count` transactions.
+async fn pooled_within(n: &Node, count: u64, since: tokio::time::Instant) -> Duration {
+    let deadline = since + Duration::from_secs(30);
+    loop {
+        let status = n.call("status", json!({})).await;
+        if status["mempool_count"].as_u64() >= Some(count) {
+            return since.elapsed();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{status}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_transaction_reaches_a_peer_within_seconds_however_many_follow() {
+    // From when A takes it until B pools it: a transaction on its own, after a
+    // quiet while, and the last of forty that A takes ten a second.
+    let a = Node::start(false, "relay A");
+    let b = Node::start(false, "relay B");
+    command(&a.dir.0, &["add", "node", &b.info.p2p.to_string()]);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !a.call("peers", json!({})).await["items"][0]["last_success"].is_u64() {
+        assert!(tokio::time::Instant::now() < deadline, "never connected");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let sent = tokio::time::Instant::now();
+    a.call("submit", json!({"hex":hex(&pooled(0).encode())}))
+        .await;
+    let alone = pooled_within(&b, 1, sent).await;
+    let mut last = sent;
+    for input in 1..=40 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        a.call("submit", json!({"hex":hex(&pooled(input).encode())}))
+            .await;
+        last = tokio::time::Instant::now();
+    }
+    let streamed = pooled_within(&b, 41, last).await;
+    eprintln!("a transaction alone reached B in {alone:?}, the last of a stream in {streamed:?}");
+    assert!(alone < Duration::from_secs(5), "{alone:?}");
+    assert!(streamed < Duration::from_secs(5), "{streamed:?}");
+    a.stop().await;
+    b.stop().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rest_keeps_this_machines_idle_connections_and_takes_the_largest_requests() {

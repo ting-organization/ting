@@ -402,6 +402,13 @@ fn proof_json(view: &View, record: &Hash, others: &mut Others) -> Result<Value> 
 }
 /// The most records one batch read names.
 pub const BATCH_MAX: usize = 1_024;
+/// A batch read names 1 to `BATCH_MAX` records.
+pub fn batch_count(reads: usize) -> Result<()> {
+    if reads == 0 || reads > BATCH_MAX {
+        return Err(format!("reads must name 1 to {BATCH_MAX} records"));
+    }
+    Ok(())
+}
 /// Many records, `reads` naming each by `contract` and `key`, all from one
 /// view: one state root, so that records read together never straddle a
 /// block. The values come in the order asked, with the root and the tip
@@ -413,9 +420,7 @@ pub const BATCH_MAX: usize = 1_024;
 /// the limit with its proofs.
 fn storage_batch(view: &View, p: &Value) -> Result<Value> {
     let reads = p["reads"].as_array().ok_or("expected reads")?;
-    if reads.is_empty() || reads.len() > BATCH_MAX {
-        return Err(format!("reads must name 1 to {BATCH_MAX} records"));
-    }
+    batch_count(reads.len())?;
     let proof = p["proof"] == true;
     let mut asked = Vec::with_capacity(reads.len());
     let mut size = 0usize;

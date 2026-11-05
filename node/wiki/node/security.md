@@ -90,6 +90,7 @@ no rate per client. Connections, requests, bodies, queues and pages are bounded:
 | REST's requests waiting for the chain thread (submissions, the mempool, pending status) | 128 | `503`, `node request queue unavailable` |
 | Time per request | 35 seconds; a submission also ten seconds for every MiB its body may have | `504`, `HTTP deadline exceeded` |
 | A submission's body | Twice the data capacity of the next block, and 4 KiB | `413` |
+| A batch storage read's body | 256 bytes for each of the 1,024 records it may name, and 4 KiB: 260 KiB | `413` |
 | Any other request body | 16 MiB | `413` |
 | A JSON page | Just under 16 MiB | The page stops early; follow `next` |
 

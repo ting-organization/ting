@@ -505,6 +505,118 @@ fn a_relayed_transaction_a_recent_block_included_is_refused() {
         ting_node::chain::INCLUDED
     );
 }
+/// Relays `tx` as a peer would.
+fn relay(
+    chain: &mut Chain,
+    tx: &ting_core::protocol::Transaction,
+) -> Result<serde_json::Value, String> {
+    chain.request(
+        "submit",
+        json!({"hex":hex(&tx.encode()),"relayed":true,"peer":"192.0.2.1:18442"}),
+    )
+}
+#[test]
+fn a_relayed_transaction_that_succeeded_after_failing_in_the_same_block_is_refused() {
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let chain_id = g.chain_id();
+    let deploy = support::tx();
+    let contract = {
+        let mut bytes = chain_id.to_vec();
+        bytes.extend(deploy.id(chain_id));
+        bytes.extend(0u64.to_le_bytes());
+        ting_core::hash::hash("contract", &bytes)
+    };
+    let program = call(&hex(&contract), vec![]);
+    let nothing = call(&hex(&[7; 32]), vec![]);
+    // One block calls the program twice before it exists and once after,
+    // and calls nothing three times.
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = vec![];
+    let block = mine(
+        &runtime,
+        &g,
+        &mut history,
+        vec![
+            program.clone(),
+            nothing.clone(),
+            program.clone(),
+            nothing.clone(),
+            deploy,
+            program.clone(),
+            nothing.clone(),
+        ],
+        "A",
+    );
+    let succeeded: Vec<bool> = block
+        .receipts
+        .iter()
+        .map(|r| r.status == ting_core::protocol::Status::Success)
+        .collect();
+    assert_eq!(succeeded, [false, false, false, false, true, true, false]);
+    chain.import(&block.encode(), true).unwrap();
+    for _ in 0..ting_node::chain::RELAY_ECHO {
+        let empty = mine(&runtime, &g, &mut history, vec![], "A");
+        chain.import(&empty.encode(), true).unwrap();
+    }
+    // Past the block's echo only a success refuses: the program's call
+    // succeeded at its last occurrence, the other call at none.
+    assert_eq!(
+        relay(&mut chain, &program).unwrap_err(),
+        ting_node::chain::INCLUDED
+    );
+    assert_eq!(relay(&mut chain, &nothing).unwrap()["known"], false);
+}
+#[test]
+fn a_relayed_transaction_is_checked_once_per_block_however_often_blocks_include_it() {
+    use std::time::{Duration, Instant};
+    // A pool of one, which the operator's own transaction fills and never
+    // gives up: every relayed submission is checked, then refused.
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut c = config::Config::load(&dir.0).unwrap();
+    c.mempool_transactions = 1;
+    c.save(&dir.0).unwrap();
+    let mut chain = open(&dir);
+    chain.submit(&support::tx().encode()).unwrap();
+    // Ten blocks, each holding a failing call a thousand times and another
+    // once, then enough empty ones for their echo to end, so that only the
+    // check for a success reads them.
+    let g = chain.genesis.clone();
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = vec![];
+    let many = call(&hex(&[7; 32]), vec![]);
+    let once = call(&hex(&[8; 32]), vec![]);
+    for _ in 0..10 {
+        let mut transactions = vec![many.clone(); 1_000];
+        transactions.push(once.clone());
+        let block = mine(&runtime, &g, &mut history, transactions, "A");
+        chain.import(&block.encode(), true).unwrap();
+    }
+    for _ in 0..ting_node::chain::RELAY_ECHO {
+        let empty = mine(&runtime, &g, &mut history, vec![], "A");
+        chain.import(&empty.encode(), true).unwrap();
+    }
+    let fastest = |chain: &mut Chain, tx: &ting_core::protocol::Transaction| {
+        (0..3)
+            .map(|_| {
+                let started = Instant::now();
+                assert_eq!(relay(chain, tx).unwrap_err(), ting_node::chain::POOL_FULL);
+                started.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let (many, once) = (fastest(&mut chain, &many), fastest(&mut chain, &once));
+    // Both read the same ten blocks, once each: a thousand occurrences in a
+    // block cost about what one does, not a thousand reads of it.
+    assert!(
+        many < once * 10 + Duration::from_millis(50),
+        "{many:?} for a thousand occurrences a block, {once:?} for one"
+    );
+}
 #[test]
 fn a_block_that_fails_names_the_peer_that_sent_it() {
     let dir = Directory::new();
@@ -592,6 +704,54 @@ fn rejects_invalid_bodies_unknown_parents_and_header_work() {
     );
     assert!(!dir.0.join("blocks").exists());
     assert!(dir.0.join("chain.redb").exists());
+}
+#[test]
+fn a_pushed_block_whose_body_fails_leaves_no_header_behind() {
+    // Blocks above the tip pushed with no body that matches their headers,
+    // as by a peer that never means to deliver them: each is invalid data,
+    // and none leaves its header indexed, so the best header stays where
+    // the node's blocks are and nothing waits for a block nobody has.
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let r = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut h = vec![];
+    for _ in 0..3 {
+        let b = mine(&r, &g, &mut h, vec![], "A");
+        chain.import(&b.encode(), true).unwrap();
+    }
+    let b4 = mine(&r, &g, &mut h, vec![support::tx()], "A");
+    let b5 = mine(&r, &g, &mut h, vec![], "A");
+    let mut receipt = b4.clone();
+    receipt.receipts[0].result[0] ^= 1;
+    let mut producer = b4.clone();
+    producer.producer = b"B".to_vec();
+    let mut trailing = b4.encode();
+    trailing.push(0);
+    for bytes in [
+        b4.header.encode(),
+        receipt.encode(),
+        producer.encode(),
+        trailing,
+    ] {
+        let error = chain.import(&bytes, true).unwrap_err();
+        assert!(ting_node::chain::is_invalid(&error), "{error}");
+        assert_eq!(chain.event().best, 3, "{error}");
+    }
+    // The next block's header finds no parent.
+    assert_eq!(
+        chain.import(&b5.header.encode(), true).unwrap_err(),
+        "unknown parent"
+    );
+    assert_eq!(chain.event().best, 3);
+    // The blocks themselves are taken whole as before.
+    chain.import(&b4.encode(), true).unwrap();
+    let error = chain.import(&b5.header.encode(), true).unwrap_err();
+    assert!(ting_node::chain::is_invalid(&error), "{error}");
+    assert_eq!((chain.event().height, chain.event().best), (4, 4));
+    chain.import(&b5.encode(), true).unwrap();
+    assert_eq!((chain.event().height, chain.event().best), (5, 5));
 }
 #[test]
 fn truncated_tail_repairs_and_indexed_block_corruption_is_rejected_on_read() {
@@ -1517,6 +1677,41 @@ fn the_pool_shares_its_room_by_address() {
     assert!(status["mempool_bytes"].as_u64().unwrap() < 4 * 1_048_576);
 }
 #[test]
+fn the_addresses_of_an_ipv6_64_hold_one_share_of_the_pool() {
+    use std::net::IpAddr;
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut c = config::Config::load(&dir.0).unwrap();
+    c.mempool_transactions = 8;
+    c.save(&dir.0).unwrap();
+    let mut chain = open(&dir);
+    let chain_id = chain.genesis.chain_id();
+    let tx = |source: u8, i: u16| {
+        let mut input = i.to_le_bytes().to_vec();
+        input.extend([source, 0x64]);
+        variant(input)
+    };
+    let honest: IpAddr = "198.51.100.4".parse().unwrap();
+    for i in 0..4 {
+        chain.submit_from(&tx(1, i).encode(), Some(honest)).unwrap();
+    }
+    // Each from another address of one /64: four fill the pool, and then the
+    // /64 holds as many as the other address, so it takes none of its places.
+    for i in 0..8u16 {
+        let address: IpAddr = format!("2001:db8:1:2::{:x}", i + 1).parse().unwrap();
+        let answer = chain.submit_from(&tx(2, i).encode(), Some(address));
+        if i < 4 {
+            answer.unwrap();
+        } else {
+            assert_eq!(answer.unwrap_err(), ting_node::chain::POOL_FULL);
+        }
+    }
+    for i in 0..4 {
+        let id = hex(&tx(1, i).id(chain_id));
+        assert!(chain.request("transaction", json!({"id":id})).is_ok());
+    }
+}
+#[test]
 fn a_fork_chooses_what_gives_way_in_a_full_pool() {
     use ting_core::vm::Candidate;
     use ting_node::{
@@ -1749,6 +1944,40 @@ fn the_deferred_set_shares_its_room_by_address_and_keeps_what_is_due_first() {
             .unwrap_err(),
         ting_node::chain::DEFERRED_FULL
     );
+}
+#[test]
+fn the_addresses_of_an_ipv6_64_hold_one_share_of_the_deferred_set() {
+    use std::net::IpAddr;
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let now = ting_node::now();
+    let tx = |source: u8, i: u16| {
+        let mut input = i.to_le_bytes().to_vec();
+        input.extend([source, 0x64]);
+        variant(input)
+    };
+    // 256 from as many addresses of one /64; the next address of it is
+    // refused, and an address of another /64 is not.
+    let address = |i: u16| -> IpAddr { format!("2001:db8:1:2::{:x}", i + 1).parse().unwrap() };
+    for i in 0..256 {
+        chain
+            .submit_deferred_from(&tx(1, i).encode(), now + 1_000, Some(address(i)))
+            .unwrap();
+    }
+    assert_eq!(
+        chain
+            .submit_deferred_from(&tx(1, 256).encode(), now + 1_000, Some(address(256)))
+            .unwrap_err(),
+        ting_node::chain::DEFERRED_FULL
+    );
+    chain
+        .submit_deferred_from(
+            &tx(2, 0).encode(),
+            now + 1_000,
+            Some("2001:db8:1:3::1".parse().unwrap()),
+        )
+        .unwrap();
 }
 #[test]
 fn only_header_and_block_checks_prove_invalid_data() {
@@ -2491,6 +2720,73 @@ fn a_branch_below_the_undo_window_is_reached_by_replaying_from_genesis() {
     assert_eq!(chain.height(), 11);
 }
 #[test]
+fn the_pruned_height_holds_when_the_tip_falls_below_where_it_was() {
+    // An undo window of three: eight blocks, every other one changing state,
+    // leave no undo data at heights 1 to 5.
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut c = config::Config::load(&dir.0).unwrap();
+    c.undo_window = 3;
+    c.save(&dir.0).unwrap();
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = vec![];
+    let a: Vec<Block> = (0..8u8)
+        .map(|i| {
+            let txs = if i % 2 == 0 {
+                vec![variant(vec![i])]
+            } else {
+                vec![]
+            };
+            mine(&runtime, &g, &mut history, txs, "A")
+        })
+        .collect();
+    for block in &a {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let pruned =
+        |chain: &mut Chain| chain.request("status", json!({})).unwrap()["undo_pruned"].clone();
+    assert_eq!(pruned(&mut chain), 5);
+    let fork = |at: usize, n: usize, producer: &str| -> Vec<Block> {
+        let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+        let mut history = vec![];
+        for block in &a[..at] {
+            runtime
+                .validate_and_apply_block(&g, &history, block)
+                .unwrap();
+            history.push(block.header.clone());
+        }
+        (0..n)
+            .map(|_| mine(&runtime, &g, &mut history, vec![], producer))
+            .collect()
+    };
+    // The tip falls to height 6, as in the middle of a reorganization or
+    // after the operator's mark, and a block connects at 7: the window now
+    // ends at 4, but height 5 has no undo data any more, and the pruned
+    // height says so still.
+    chain
+        .request("invalidate", json!({"id":hex(&a[6].header.id())}))
+        .unwrap();
+    assert_eq!(chain.height(), 6);
+    chain.import(&fork(6, 1, "C")[0].encode(), true).unwrap();
+    assert_eq!(chain.height(), 7);
+    assert_eq!(pruned(&mut chain), 5);
+    // So a heavier branch forking at height 4 is reached by the replay
+    // rather than by undoing height 5 with data it no longer has.
+    let b = fork(4, 4, "B");
+    for block in &b {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while chain.tip() != b[3].header.id() {
+        assert!(std::time::Instant::now() < deadline, "no reorganization");
+        chain.resume_activation();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(chain.height(), 8);
+}
+#[test]
 fn settled_blocks_leave_memory_and_branches_below_them_are_still_followed() {
     // The experimental profile, epochs of four blocks, and an undo window of
     // three: the index holds the last 23 canonical blocks at least, three
@@ -3210,6 +3506,63 @@ fn a_chain_far_behind_is_checked_without_being_kept_until_it_overtakes() {
     assert_eq!(chain.tip(), b[1_459].header.id());
 }
 #[test]
+fn a_page_begins_at_most_one_presync_however_often_a_header_repeats() {
+    let dir = Directory::new();
+    dir.config(false, "repeats");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    // A chain of 2,000 blocks, and a header on a branch from its block 500,
+    // too far behind to be indexed: a presync for it begins by walking the
+    // branch back from there.
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = vec![];
+    let mut side = None;
+    for i in 0..2_000 {
+        if i == 500 {
+            let mut x = runtime
+                .build_candidate(
+                    &g,
+                    &history,
+                    vec![],
+                    g.timestamp + 60 * (history.len() as u64 + 1),
+                    [0; 4],
+                    b"X".to_vec(),
+                )
+                .unwrap();
+            while !consensus::valid_pow(&x.header) {
+                x.header.nonce += 1;
+            }
+            side = Some(x.header);
+        }
+        let block = mine(&runtime, &g, &mut history, vec![], "A");
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let side = side.unwrap();
+    let timed = |chain: &mut Chain, page: &[Header]| {
+        let started = std::time::Instant::now();
+        let answer = headers_from(chain, page).unwrap();
+        (answer, started.elapsed())
+    };
+    // Alone, it begins one, as any page from far back does.
+    let (one, alone) = timed(&mut chain, std::slice::from_ref(&side));
+    assert_eq!(one["next"], hex(&side.id()));
+    assert_eq!(one["indexed"], 0);
+    // Repeated through a whole page, it begins one too: the copy that does
+    // not follow it ends the page, and costs no second walk.
+    let page = vec![side.clone(); 2_000];
+    let (repeated, took) = timed(&mut chain, &page);
+    assert_eq!(repeated["next"], serde_json::Value::Null);
+    assert_eq!(repeated["indexed"], 0);
+    assert!(
+        took < alone * 20 + std::time::Duration::from_millis(100),
+        "{took:?} for the page against {alone:?} for one header"
+    );
+    // And alone again, it still begins one.
+    let (again, _) = timed(&mut chain, std::slice::from_ref(&side));
+    assert_eq!(again["next"], hex(&side.id()));
+    assert_eq!(chain.height(), 2_000);
+}
+#[test]
 fn a_damaged_deferred_set_is_set_aside_and_the_node_starts() {
     let dir = Directory::new();
     dir.config(false, "test");
@@ -3744,6 +4097,136 @@ fn an_address_whose_transaction_was_just_tried_lets_the_others_go_first() {
     // first template's allowance. Then the other address has its turn before
     // the attacker's next loop.
     assert_eq!(templates_until(&mut chain, &hex(&honest.id(chain_id))), 2);
+}
+/// A deployment whose initializer loops until it has used exactly a block's
+/// compute: it fails, so its sender pays nothing, and it fills the block.
+fn filler(chain: &Chain, n: u64) -> ting_core::protocol::Transaction {
+    ting_core::protocol::Transaction {
+        budget: ting_core::meter::Resources([chain.genesis.initial.0[0], 16, 4096, 4096]),
+        payload: ting_core::protocol::Payload::Deploy {
+            code: wat::parse_str("(module (func (export \"invoke\") (loop br 0)))").unwrap(),
+            input: n.to_le_bytes().to_vec(),
+        },
+    }
+}
+#[test]
+fn new_block_fillers_from_two_addresses_do_not_keep_a_waiting_transaction_out() {
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let chain_id = chain.genesis.chain_id();
+    let ip = |s: &str| Some(s.parse::<std::net::IpAddr>().unwrap());
+    let attackers = [ip("203.0.113.7"), ip("203.0.113.8")];
+    chain
+        .submit_from(&filler(&chain, 0).encode(), attackers[0])
+        .unwrap();
+    let honest = support::tx();
+    chain
+        .submit_from(&honest.encode(), ip("198.51.100.4"))
+        .unwrap();
+    let honest = hex(&honest.id(chain_id));
+    // A new filler from the other address before every block: each is one no
+    // template has run, from an address none has taken one of lately.
+    let mut mined = None;
+    for n in 1..=6u64 {
+        let answer = chain.mine(1, 1_000_000).unwrap();
+        let block = chain
+            .request("block", json!({"id":answer["blocks"][0]["id"]}))
+            .unwrap();
+        let transactions = block["transactions"].as_array().unwrap();
+        assert_eq!(transactions.len(), 1, "every block holds one transaction");
+        if transactions[0] == json!(honest) {
+            mined.get_or_insert(n);
+        }
+        chain
+            .submit_from(&filler(&chain, n).encode(), attackers[(n % 2) as usize])
+            .unwrap();
+    }
+    // The first filler arrived first and fills the first block; the honest
+    // transaction has waited longer than the next one and goes in the second.
+    assert_eq!(mined, Some(2));
+}
+#[test]
+fn address_ranges_take_turns_and_a_new_one_joins_at_the_back() {
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let chain_id = chain.genesis.chain_id();
+    let ip = |s: &str| Some(s.parse::<std::net::IpAddr>().unwrap());
+    let id = |tx: &ting_core::protocol::Transaction| json!([hex(&tx.id(chain_id))]);
+    let next =
+        |chain: &mut Chain| chain.request("template", json!({})).unwrap()["transactions"].clone();
+    // Two fillers from addresses in one IPv6 /64, then one from an IPv4
+    // address, then an honest transaction: each fills a template alone.
+    let (a, b, c) = (filler(&chain, 0), filler(&chain, 1), filler(&chain, 2));
+    chain
+        .submit_from(&a.encode(), ip("2001:db8:1:2::1"))
+        .unwrap();
+    chain
+        .submit_from(&b.encode(), ip("2001:db8:1:2::ff"))
+        .unwrap();
+    chain.submit_from(&c.encode(), ip("203.0.113.7")).unwrap();
+    let honest = support::tx();
+    chain
+        .submit_from(&honest.encode(), ip("198.51.100.4"))
+        .unwrap();
+    // The /64 is one range: its second filler waits until the other ranges
+    // have had their turn, and each range goes to the back after its own.
+    assert_eq!(next(&mut chain), id(&a));
+    assert_eq!(next(&mut chain), id(&c));
+    assert_eq!(next(&mut chain), id(&honest));
+    // A new range arrives with a filler no template has run: it joins at the
+    // back, behind the /64, whose turn has come round again.
+    let d = filler(&chain, 3);
+    chain.submit_from(&d.encode(), ip("192.0.2.9")).unwrap();
+    assert_eq!(next(&mut chain), id(&a));
+    assert_eq!(next(&mut chain), id(&c));
+    assert_eq!(next(&mut chain), id(&honest));
+    assert_eq!(next(&mut chain), id(&d));
+}
+#[test]
+fn turns_order_by_rank_then_queue_place_then_arrival() {
+    use std::{collections::BTreeMap, net::IpAddr};
+    use ting_node::mining::{Pending, turns};
+    let tx = support::tx();
+    let ip = |s: &str| Some(s.parse::<IpAddr>().unwrap());
+    // Arrival order; `tried` plays no part, so it is set against the order.
+    let sources = [
+        ip("198.51.100.1"),
+        ip("2001:db8:1:2::1"),
+        ip("198.51.100.1"),
+        ip("2001:db8:1:2:ffff::"),
+        ip("203.0.113.9"),
+        None,
+        ip("203.0.113.9"),
+        ip("192.0.2.50"),
+    ];
+    let pool: Vec<Pending<'_>> = sources
+        .iter()
+        .enumerate()
+        .map(|(at, &source)| Pending {
+            id: [at as u8; 32],
+            tx: &tx,
+            bytes: 1,
+            arrived: at as u64,
+            source,
+            tried: if at == 7 { 0 } else { 100 - at as u64 },
+        })
+        .collect();
+    // Places in the queue by range: an IPv6 address counts as its /64, and
+    // the range of 192.0.2.50 has none.
+    let places = BTreeMap::from([
+        (ip("198.51.100.1"), 5),
+        (ip("2001:db8:1:2::"), 3),
+        (ip("203.0.113.9"), 3),
+        (None, 7),
+    ]);
+    // First of each range: the /64 and 203.0.113.9 (place 3, by arrival),
+    // 198.51.100.1 (5), the node's own (7), then the range with no place.
+    // Then the second of each, in the same order.
+    assert_eq!(turns(&pool, &places), vec![1, 4, 0, 5, 7, 3, 6, 2]);
+    // With no places at all, rank and arrival decide.
+    assert_eq!(turns(&pool, &BTreeMap::new()), vec![0, 1, 4, 5, 7, 2, 3, 6]);
 }
 #[test]
 fn a_transaction_a_fork_takes_back_out_stays_pooled() {

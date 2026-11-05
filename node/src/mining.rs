@@ -9,9 +9,9 @@
 //!
 //! - [`Selector`], which transactions a template includes, and which pooled
 //!   transaction gives way when the pool is full. The reference [`FirstIn`]
-//!   gives every transaction and address its turn and makes room by
-//!   [`fair_share`]; a fork that knows what the programs it cares about pay
-//!   can build candidates and read their receipts.
+//!   gives every address range its turn, first in, first served, and makes
+//!   room by [`fair_share`]; a fork that knows what the programs it cares
+//!   about pay can build candidates and read their receipts.
 //! - [`Search`], finding the nonce. The reference [`Cpu`] runs the plain
 //!   loop on a few threads, hashing each attempt from a SHA-256 midstate; a
 //!   fork drives a GPU or an ASIC.
@@ -23,21 +23,25 @@
 //! stays the only owner of state and external tools can do by hand what the
 //! miner does in a loop.
 
-use crate::{Result, chain::Handle, now};
+use crate::{
+    Result,
+    chain::{Event, Handle},
+    now,
+};
 
 /// The answer to a solution for a template the node no longer holds, as after
 /// the tip moved.
 pub const EXPIRED: &str = "unknown or expired template";
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::IpAddr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use ting_core::{
     hash::{Hash, hex},
@@ -95,56 +99,73 @@ pub struct Pending<'a> {
     pub tried: u64,
 }
 /// The reference node's way of making room in a full pool (wiki:
-/// node/mining): the most recent transaction of the address holding the most
-/// gives way, if that address holds more than the newcomer's. One address can
-/// fill an empty pool, and gives way to every other as they arrive, down to
-/// an equal share; the node's own submissions count against no address and
-/// never give way.
+/// node/mining): the most recent transaction of the address range holding
+/// the most gives way, if that range holds more than the newcomer's. Ranges
+/// are those [`FirstIn`] takes turns by, so all the addresses of an IPv6 /64
+/// hold one share between them. One range can fill an empty pool, and gives
+/// way to every other as they arrive, down to an equal share; the node's own
+/// submissions count against no address and never give way.
 pub fn fair_share(pool: &[Pending<'_>], incoming: &Pending<'_>) -> Option<usize> {
     let mut held: BTreeMap<IpAddr, usize> = BTreeMap::new();
     for pending in pool {
-        if let Some(source) = pending.source {
+        if let Some(source) = range(pending.source) {
             *held.entry(source).or_default() += 1;
         }
     }
-    let own = incoming
-        .source
+    let own = range(incoming.source)
         .and_then(|source| held.get(&source).copied())
         .unwrap_or(0);
     let (&largest, &count) = held.iter().max_by_key(|(_, count)| **count)?;
     if count <= own {
         return None;
     }
-    pool.iter().rposition(|p| p.source == Some(largest))
+    pool.iter().rposition(|p| range(p.source) == Some(largest))
 }
 
-/// The reference policy: first in, first served, with every transaction and
-/// every address getting its turn. It tries the transactions no template has
-/// run first, then those run longest ago; among those, the first of each
-/// address before the second of any, the addresses whose transactions were
-/// tried longest ago first, and arrival order within that. Each goes in when
-/// the block still fits it. The node bounds the work a template may throw
-/// away (wiki: node/mining), so a transaction that never fits costs at most
-/// one template's allowance and cannot keep other addresses waiting.
+/// The reference policy: first in, first served, with the address ranges
+/// taking turns in one queue (wiki: node/mining). A range is an IPv4 address
+/// or an IPv6 /64, as bans and inbound limits count ([`discovery::range`]).
+/// A range joins the back of the queue when it first holds a pooled
+/// transaction, and goes to the back again whenever a template keeps one of
+/// its transactions or runs one into an empty block; one tried after others
+/// that the block no longer fits keeps its place. A template takes the first
+/// of each range before the second of any, the ranges in queue order, and
+/// arrival order within that, each when the block still fits it.
+///
+/// So no transaction goes first for being new, a new address waits behind
+/// those already waiting, and a transaction that fills a block, which costs
+/// its sender nothing when it fails, buys its range one turn. The node
+/// bounds the work a template may throw away, so a transaction that never
+/// fits costs at most one template's allowance and then leaves the pool.
+///
+/// [`discovery::range`]: crate::discovery::range
 #[derive(Default)]
 pub struct FirstIn {
-    /// Templates selected so far, and for each address in the pool the last
-    /// one in which a transaction of it was tried.
+    /// Templates selected so far, and for each address range in the pool its
+    /// place in the queue: the template in which it last had its turn, or the
+    /// one before the template that first found it in the pool.
     turn: u64,
     sources: BTreeMap<Option<IpAddr>, u64>,
 }
 impl Selector for FirstIn {
     fn select(&mut self, pool: &[Pending<'_>], block: &mut Candidate<'_>) {
-        self.turn += 1;
-        self.sources
-            .retain(|source, _| pool.iter().any(|p| p.source == *source));
+        self.turn = self.turn.saturating_add(1);
+        let present: BTreeSet<Option<IpAddr>> = pool.iter().map(|p| range(p.source)).collect();
+        self.sources.retain(|key, _| present.contains(key));
+        let joined = self.turn - 1;
+        for key in present {
+            self.sources.entry(key).or_insert(joined);
+        }
         for at in turns(pool, &self.sources) {
             if block.spent() {
                 break;
             }
-            self.sources.insert(pool[at].source, self.turn);
+            let alone = block.transactions().is_empty();
             // A transaction the block does not fit is left out.
-            let _ = block.add(pool[at].tx);
+            let kept = matches!(block.add(pool[at].tx), Ok(Some(_)));
+            if kept || alone {
+                self.sources.insert(range(pool[at].source), self.turn);
+            }
         }
     }
     fn describe(&self) -> Value {
@@ -152,21 +173,27 @@ impl Selector for FirstIn {
     }
 }
 
-/// The order in which [`FirstIn`] tries the pool: by when a template last ran
-/// each transaction, never first; among equals, the first of each address
-/// before the second of any, then the addresses by the template in which one
-/// of their transactions was last tried (`sources`, never first), and arrival
-/// order within that.
+/// The range a pooled transaction's address belongs to, by which [`FirstIn`]
+/// takes turns: none stays none, the node's own.
+fn range(source: Option<IpAddr>) -> Option<IpAddr> {
+    source.map(crate::discovery::range)
+}
+
+/// The order in which [`FirstIn`] tries the pool: the first transaction of
+/// each address range before the second of any; among equals, the ranges by
+/// their place in the queue (`sources`, by range, lowest first; a range
+/// missing from it comes after the others), and arrival order within that.
 pub fn turns(pool: &[Pending<'_>], sources: &BTreeMap<Option<IpAddr>, u64>) -> Vec<usize> {
     let mut seen: BTreeMap<Option<IpAddr>, usize> = BTreeMap::new();
-    let mut order: Vec<(u64, usize, u64, usize)> = pool
+    let mut order: Vec<(usize, u64, usize)> = pool
         .iter()
         .enumerate()
         .map(|(at, pending)| {
-            let rank = seen.entry(pending.source).or_default();
+            let key = range(pending.source);
+            let rank = seen.entry(key).or_default();
             *rank += 1;
-            let last = sources.get(&pending.source).copied().unwrap_or(0);
-            (pending.tried, *rank, last, at)
+            let place = sources.get(&key).copied().unwrap_or(u64::MAX);
+            (*rank, place, at)
         })
         .collect();
     order.sort_unstable();
@@ -457,6 +484,36 @@ impl Miner {
     }
 }
 
+/// Whether the built-in miner waits for its node to catch up with its best
+/// header (wiki: node/mining#the-built-in-miner). Far behind it, the node's
+/// tip is about to be replaced, and a block on it with it: the miner waits
+/// while the node is more than one block behind and its tip moves, or while
+/// it rebuilds undo data to move it. A tip that stays put for a block's
+/// transfer time, the time a peer has to deliver a block before it is asked
+/// of another, has no download behind it, as when a peer showed headers
+/// whose blocks it never sends; the miner then mines on it. That time counts
+/// from the tip's last move, or from when the node fell behind.
+struct CatchUp {
+    tip: Hash,
+    since: Instant,
+}
+impl CatchUp {
+    fn new(tip: Hash, now: Instant) -> Self {
+        Self { tip, since: now }
+    }
+    /// How far behind its best header the node is, if the miner waits.
+    fn waits(&mut self, event: &Event, replaying: bool, now: Instant) -> Option<u64> {
+        let behind = event.best.saturating_sub(event.height);
+        if behind <= 1 || event.tip != self.tip {
+            self.tip = event.tip;
+            self.since = now;
+        }
+        let moving =
+            now.saturating_duration_since(self.since) < crate::chain::transfer_time(event.data);
+        (behind > 1 && (moving || replaying)).then_some(behind)
+    }
+}
+
 fn run(
     handle: Handle,
     search: Arc<dyn Search>,
@@ -468,21 +525,22 @@ fn run(
     let mut nonce_start: u128 = 0;
     let mut last_block = 0u64;
     let events = handle.events();
+    let mut catch_up = CatchUp::new(events.borrow().tip, Instant::now());
     while !stop.load(Ordering::Relaxed) {
         if spacing > 0 && now() < last_block.saturating_add(spacing) {
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
-        // Far behind its best header, the node's tip is about to be replaced
-        // and a block on it with it: the miner waits until it catches up.
-        let (height, best) = {
-            let event = events.borrow();
-            (event.height, event.best)
-        };
-        if best > height + 1 {
+        // Far behind its best header while blocks connect, the node's tip is
+        // about to be replaced, and a block on it with it.
+        let replaying = matches!(
+            &*handle.status().status,
+            Ok(status) if status["replaying"] == true
+        );
+        let waiting = catch_up.waits(&events.borrow(), replaying, Instant::now());
+        if let Some(behind) = waiting {
             stats.lock().unwrap().last_error = Some(format!(
-                "waiting: the node is {} blocks behind its best header",
-                best - height
+                "waiting: the node is {behind} blocks behind its best header"
             ));
             std::thread::sleep(Duration::from_millis(500));
             continue;
@@ -590,5 +648,67 @@ mod tests {
                 assert_eq!(id, header.id(), "seed {seed} nonce {nonce}");
             }
         }
+    }
+
+    #[test]
+    fn the_miner_waits_while_blocks_connect_and_mines_once_they_stop() {
+        // Production's data capacity, 256 KiB: a block's transfer time is 70
+        // seconds.
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        let event = |height: u64, best: u64| Event {
+            tip: hash("tip", &height.to_le_bytes()),
+            height,
+            best,
+            data: 262_144,
+            ..Default::default()
+        };
+        let mut catch_up = CatchUp::new(event(10, 10).tip, at(0));
+        assert_eq!(catch_up.waits(&event(10, 10), false, at(0)), None);
+        // A header just ahead of its block is no reason to wait.
+        assert_eq!(catch_up.waits(&event(10, 11), false, at(1)), None);
+        // A download: the miner waits for as long as blocks connect, here
+        // one a second for ten minutes.
+        for second in 2..600 {
+            assert_eq!(
+                catch_up.waits(&event(second + 10, 1_000), false, at(second)),
+                Some(990 - second)
+            );
+        }
+        // Then none comes: it waits a transfer time, then mines on its tip,
+        // until a block connects again.
+        assert_eq!(
+            catch_up.waits(&event(609, 1_000), false, at(668)),
+            Some(391)
+        );
+        assert_eq!(catch_up.waits(&event(609, 1_000), false, at(669)), None);
+        assert_eq!(catch_up.waits(&event(609, 1_000), false, at(900)), None);
+        assert_eq!(
+            catch_up.waits(&event(610, 1_000), false, at(901)),
+            Some(390)
+        );
+        // While the node rebuilds undo data to move its tip, the tip stays
+        // and the miner waits.
+        assert_eq!(
+            catch_up.waits(&event(610, 1_000), true, at(5_000)),
+            Some(390)
+        );
+        // Two headers above the tip whose blocks never come: the miner waits
+        // a transfer time from when they came, then mines on its tip.
+        let mut catch_up = CatchUp::new(event(20, 20).tip, at(0));
+        assert_eq!(catch_up.waits(&event(20, 20), false, at(100)), None);
+        assert_eq!(catch_up.waits(&event(20, 22), false, at(101)), Some(2));
+        assert_eq!(catch_up.waits(&event(20, 22), false, at(169)), Some(2));
+        assert_eq!(catch_up.waits(&event(20, 22), false, at(170)), None);
+        // Its own block moves the tip; one behind, it goes on mining.
+        assert_eq!(catch_up.waits(&event(21, 22), false, at(171)), None);
+        // A larger capacity gives a block longer: 8 MiB, 140 seconds.
+        let large = |height: u64, best: u64| Event {
+            data: 8 << 20,
+            ..event(height, best)
+        };
+        let mut catch_up = CatchUp::new(large(5, 5).tip, at(0));
+        assert_eq!(catch_up.waits(&large(5, 7), false, at(139)), Some(2));
+        assert_eq!(catch_up.waits(&large(5, 7), false, at(140)), None);
     }
 }

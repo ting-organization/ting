@@ -74,7 +74,11 @@ pub fn router(node: Node, cors: bool) -> Router {
         .route("/v1/events", get(events))
         .route("/v1/contracts/{id}", get(contract))
         .route("/v1/contracts/{id}/storage/{key}", get(storage))
-        .route("/v1/storage", post(storage_batch))
+        // A batch read's body is bounded by the records it may name.
+        .route(
+            "/v1/storage",
+            post(storage_batch).layer(DefaultBodyLimit::max(STORAGE_BODY)),
+        )
         .route("/v1/metrics", get(status))
         .fallback(|| async {
             (
@@ -403,9 +407,20 @@ struct StorageReads {
     /// Also each record's Merkle proof against the state root.
     proof: Option<bool>,
 }
+/// The largest body of a batch storage read: 256 bytes for each record it may
+/// name, and 4 KiB for the rest, 260 KiB in all. One record in compact JSON,
+/// two 64-character hex strings with their names and a comma, is 153 bytes,
+/// and pretty-printed about 180 to 200, so every batch that can be answered
+/// fits. Parsed, a body costs several times its size, so a larger one is
+/// refused before it is.
+const STORAGE_BODY: usize = reads::BATCH_MAX * 256 + 4096;
 /// Many storage records from one view of the state, read off the chain
 /// thread.
 async fn storage_batch(State(s): State<ApiState>, Json(body): Json<StorageReads>) -> Response {
+    // Counted before anything is built for each read.
+    if let Err(error) = reads::batch_count(body.reads.len()) {
+        return respond(Err(error));
+    }
     let reads: Vec<Value> = body
         .reads
         .iter()
@@ -581,7 +596,7 @@ pub fn openapi() -> Value {
                 "400":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}}));
     }
     paths.insert("/v1/storage".into(),json!({"post":{"summary":"Read many storage records from one state","tags":["Contracts"],
-        "description":format!("Reads 1 to {} records, each named by a contract and a key, all from the same state: one state root, which the answer gives with the canonical tip it belongs to. Records read together therefore never straddle a block. Values come in the order asked, null for an absent record; with proof, each with its Merkle proof against the state root.", reads::BATCH_MAX),
+        "description":format!("Reads 1 to {} records, each named by a contract and a key, all from the same state: one state root, which the answer gives with the canonical tip it belongs to. Records read together therefore never straddle a block. Values come in the order asked, null for an absent record; with proof, each with its Merkle proof against the state root. The body may have at most {STORAGE_BODY} bytes, 256 for each record and 4 KiB for the rest.", reads::BATCH_MAX),
         "requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/StorageReads"}}}},
         "responses":{"200":{"description":"The records","content":{"application/json":{"schema":{"$ref":"#/components/schemas/StorageValues"}}}},
             "400":{"$ref":"#/components/responses/Error"},"413":{"$ref":"#/components/responses/Error"},"503":{"$ref":"#/components/responses/Error"}}}}));
