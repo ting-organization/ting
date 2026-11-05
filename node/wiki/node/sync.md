@@ -304,10 +304,30 @@ listening addresses, filled from four sources:
 - the `addresses` its peers share, at most 32 from one answer, each only if the
   sending peer could reach it (below).
 
+No one source fills the book. Of the addresses it discovers, announced or shared, it
+keeps at most two of one public IP address, room for a node and a port it moved to,
+and 32 of one network group (an IPv4 /16, an IPv6 /32): a 32nd of the book, as
+Bitcoin's tried table keeps one group to 8 of its 256 buckets, so an attacker needs
+32 networks to fill it. A network group adds at most 32 in an hour, by announcing
+its own or by sharing others: as many as an honest peer's answer changes by in that
+time (below). When an address's IP address or network group holds its share, the
+least worth keeping of them gives way to it, never one the node has completed a
+round with. Configured peers and seeds count for none of this, and addresses on
+this machine or a private network have no share: they come only from there.
+
 **What a node shares.** An `addresses` answer holds at most 32 addresses in random
 order, and only addresses the node has itself completed a round with in the last 24
 hours, without a failure since. It never includes the asking peer's own announced
-address. An address reaches only peers that could reach it too:
+address. Every peer is given the same answer for an hour, drawn at the first request
+after the last one's hour, so that asking again, or over many connections, tells
+nothing new: neither the book nor the node's connections can be mapped by asking.
+Bitcoin keeps its answer for about a day, beside relaying addresses as it hears of
+them; here answers are the only way addresses spread, so a new node becomes known
+within hours rather than a day. An answer that held every address there was to
+share is drawn again as soon as there is another, so a node that has just started is
+not held to the few it knew, and an address that is banned leaves it at once. An
+address reaches only peers that could reach it too, and peers at private or loopback
+addresses have their own answer:
 
 | Address | Shared with and accepted from |
 |---|---|
@@ -375,8 +395,11 @@ configured one.
 **The book.** It holds at most 1,024 addresses and lives in `peers.json` in the data
 directory, saved every two seconds when it has changed. When it is full, the address
 least worth keeping makes room: never a configured one, an untried one before one
-with a completed round, the most failed first. The file holds only hints; if it is
-missing or unreadable, the node starts with an empty book. A peer removed from the
+with a completed round, the most failed first, and of those alike one at random, so
+that no address can be chosen to stay or to go. The file holds only hints; if it is
+missing or unreadable, the node starts with an empty book. A book that holds more of
+one IP address or network group than its share keeps the best of them when it loads:
+the most recently proven, then the least failed. A peer removed from the
 configuration is forgotten, and connected again only if a peer shares its address
 later.
 
@@ -406,7 +429,9 @@ On a quiet network this costs one extra connection and the connections to the se
   blocks latest, the longest connected, the connections of the node's own machine
   and those less than ten seconds old keep theirs. An operator raises
   `max_inbound` for a seed node, and the process's open-file limit with it
-- An address book of at most 1,024 addresses
+- An address book of at most 1,024 addresses: of the discovered ones, at most 2 of
+  one public IP address and 32 of one network group, and at most 32 added by one
+  network group in an hour
 
 The transport's own limits, on connections, requests and frames, are on
 [Peer protocol](../reference/peer-protocol.md#limits).

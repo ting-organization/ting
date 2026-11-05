@@ -128,6 +128,9 @@ length has, and every answer 30 seconds from its request.
 - **`submit`.** Refused with `transaction already included` when one of the node's
   last 1,440 canonical blocks included the transaction and it succeeded there, or
   one of the last 10 included it at all.
+- **`addresses`.** The reference node gives every peer the same answer for an hour:
+  asking again within it is answered with the same list, never with an error
+  ([what a node shares](../node/sync.md#finding-more-peers)).
 
 ## Answers
 
@@ -333,7 +336,9 @@ shown by `ting peers`; nothing depends on it.
   once, without an answer, even before its `hello`
 - 200 request units a second per inbound connection after a burst of 2,000, and 120
   seconds without a request before it is closed
-- At most 32 addresses in or from one `addresses` answer
+- At most 32 addresses in or from one `addresses` answer, the same answer to every
+  peer for an hour, and at most 32 addresses an hour learned from the peers of one
+  network group, shared or announced
 - Five seconds per connection attempt and per frame, 30 seconds per answer
 
 No message reaches administration: peer configuration, mining and shutdown exist

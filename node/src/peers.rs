@@ -1029,7 +1029,7 @@ impl Link {
             .book
             .lock()
             .unwrap()
-            .learn_shared(&shared, self.address.ip());
+            .learn_shared(&shared, self.address.ip(), crate::now());
     }
     /// A block delivered or a round completed: the peer is proven, and its
     /// status current.
