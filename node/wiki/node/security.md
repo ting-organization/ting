@@ -83,7 +83,7 @@ no rate per client. Connections, requests, bodies, queues and pages are bounded:
 |---|---|---|
 | Connections at once | 512, or what the open-file limit leaves beside what peers and storage may need | Further connections wait to be accepted |
 | Connections from one client, an IPv4 address or an IPv6 /64 | 16; this machine's own, such as a reverse proxy's, are not counted | Closed at once |
-| Time to send a request's header, and to leave a connection idle after an answer | 10 seconds | Connection closed |
+| Time to send a request's header, and to leave a connection idle after an answer | 10 seconds; 5 minutes for this machine's own, longer than a reverse proxy keeps an idle connection to the node, so that the proxy closes it first | Connection closed |
 | Time to send an answer, from when it is ready | A minute, and ten seconds for every MiB of it | Connection closed |
 | Requests in progress, each until all but at most 128 KiB of its answer is written to its connection | 32 per processor core | `503`, `HTTP service busy` |
 | REST's requests waiting for the chain thread (submissions, the mempool, pending status) | 128 | `503`, `node request queue unavailable` |

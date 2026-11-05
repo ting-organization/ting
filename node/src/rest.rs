@@ -4,8 +4,17 @@
 //! not read an answer within the time its size allows. What a request may
 //! take once its header is in, its body included, is `api`'s own bound.
 use crate::{FRAME_MAX, chain::transfer_time, discovery};
-use axum::{Router, body::HttpBody, extract::ConnectInfo};
-use hyper::{body::Incoming, server::conn::http1, service::Service as _, service::service_fn};
+use axum::{
+    Router,
+    body::{Body, Bytes, HttpBody},
+    extract::ConnectInfo,
+};
+use hyper::{
+    body::{Frame, Incoming, SizeHint},
+    server::conn::http1,
+    service::Service as _,
+    service::service_fn,
+};
 use hyper_util::{
     rt::{TokioIo, TokioTimer},
     service::TowerToHyperService,
@@ -15,8 +24,9 @@ use std::{
     convert::Infallible,
     future::Future,
     net::{IpAddr, SocketAddr},
-    pin::pin,
+    pin::{Pin, pin},
     sync::{Arc, Mutex},
+    task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
@@ -31,6 +41,13 @@ use tokio::{
 /// bytes, one packet; TCP retransmits a lost one after 1, 2 and 4 seconds
 /// (RFC 6298), so ten seconds outlast three losses in a row.
 pub const HEADER_TIME: Duration = Duration::from_secs(10);
+/// The header time of a connection from this machine, as a reverse proxy's
+/// are: five minutes, longer than proxies keep an idle connection to a backend
+/// (Caddy two minutes, Go's HTTP client 90 seconds, nginx 60), so that the
+/// proxy closes it, never the node while a request of the proxy's is on its
+/// way. Only processes on this machine open such connections, and the total
+/// still bounds them.
+pub const LOCAL_TIME: Duration = Duration::from_secs(300);
 /// What a connection buffers: it reads a request's header into about this
 /// much, and takes more of an answer to write only while less than this
 /// waits, in pieces of as much (`api`), so less than twice this waits. A
@@ -119,6 +136,8 @@ pub struct Limits {
     pub per_client: usize,
     /// The time to send a request's header, or to leave a connection idle.
     pub header: Duration,
+    /// The same for a connection from this machine.
+    pub local: Duration,
     /// The time an answer of so many bytes has to be written.
     pub send: fn(u64) -> Duration,
 }
@@ -132,7 +151,16 @@ impl Limits {
             connections,
             per_client: CLIENT_MAX,
             header: HEADER_TIME,
+            local: LOCAL_TIME,
             send: transfer_time,
+        }
+    }
+    /// The header time of a connection from `ip`.
+    fn header_for(&self, ip: IpAddr) -> Duration {
+        if discovery::loopback(ip) {
+            self.local
+        } else {
+            self.header
         }
     }
 }
@@ -180,10 +208,12 @@ impl Drop for Client {
     }
 }
 /// When the answer going out on a connection must have been written; none
-/// while a request is read or handled, which `api` bounds. A pipelined
-/// request's answer keeps the time left to the one before it, if longer. An
-/// answer has at least a minute, longer than a connection may wait idle, so
-/// its time never ends a connection that has written it.
+/// while a request is read or handled, which `api` bounds. Once all of it is
+/// handed to the connection, at least the connection's header time from then,
+/// for what is left to write, at most twice `BUFFER`, and for the wait for the
+/// next request, so that an answer's time never ends a connection sooner than
+/// its idle time. A pipelined request's answer keeps the time left to the one
+/// before it, if longer.
 #[derive(Clone, Copy, Default)]
 struct Due {
     until: Option<Instant>,
@@ -241,6 +271,35 @@ pub async fn serve(
         .acquire_many(u32::try_from(capacity).expect("CONNECTIONS_MAX fits"))
         .await;
 }
+/// An answer going out on a connection, whose time lasts at least `idle`
+/// more once the connection has taken all of it and lets it go.
+struct Sending {
+    body: Body,
+    due: Arc<watch::Sender<Due>>,
+    idle: Duration,
+}
+impl HttpBody for Sending {
+    type Data = Bytes;
+    type Error = axum::Error;
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
+        Pin::new(&mut self.body).poll_frame(cx)
+    }
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
+}
+impl Drop for Sending {
+    fn drop(&mut self) {
+        let rest = Instant::now() + self.idle;
+        self.due.send_modify(|d| d.until = d.until.max(Some(rest)));
+    }
+}
 /// One connection, until it closes, its client is too slow, or REST stops.
 async fn connection(
     stream: TcpStream,
@@ -253,6 +312,7 @@ async fn connection(
     let (due, mut watching) = watch::channel(Due::default());
     let due = Arc::new(due);
     let inner = TowerToHyperService::new(router);
+    let idle = limits.header_for(remote.ip());
     let service = service_fn(move |mut request: hyper::Request<Incoming>| {
         request.extensions_mut().insert(ConnectInfo(remote));
         due.send_modify(|d| d.earlier = d.earlier.max(d.until.take()));
@@ -270,12 +330,12 @@ async fn connection(
                 .min(u64::from(u32::MAX));
             let until = Instant::now() + (limits.send)(size);
             due.send_modify(|d| d.until = d.earlier.take().max(Some(until)));
-            Ok::<_, Infallible>(response)
+            Ok::<_, Infallible>(response.map(|body| Body::new(Sending { body, due, idle })))
         }
     });
     let connection = http1::Builder::new()
         .timer(TokioTimer::new())
-        .header_read_timeout(limits.header)
+        .header_read_timeout(idle)
         .max_buf_size(BUFFER)
         .serve_connection(TokioIo::new(stream), service);
     let mut connection = pin!(connection);
@@ -298,15 +358,7 @@ async fn connection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        body::{Body, Bytes},
-        routing::get,
-    };
-    use hyper::body::{Frame, SizeHint};
-    use std::{
-        pin::Pin,
-        task::{Context, Poll},
-    };
+    use axum::routing::get;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const LARGE: usize = 64 << 20;
@@ -359,12 +411,14 @@ mod tests {
         (address, stop)
     }
     /// As the node's, an answer has longer to be taken than a connection
-    /// may wait idle.
+    /// may wait idle. The tests connect from this machine, so its header
+    /// time is the one they meet, unless they set it apart.
     fn limits(header: Duration) -> Limits {
         Limits {
             connections: 8,
             per_client: CLIENT_MAX,
             header,
+            local: header,
             send: |_| Duration::from_secs(30),
         }
     }
@@ -431,6 +485,42 @@ mod tests {
         let (bytes, closed) = until_closed(&mut stream, Duration::from_secs(5)).await;
         assert!(closed && bytes.is_empty());
         assert!(answered.elapsed() >= Duration::from_millis(300));
+    }
+
+    #[test]
+    fn a_connection_from_this_machine_may_wait_idle_longer() {
+        let limits = Limits::new(1);
+        assert_eq!(limits.header, HEADER_TIME);
+        for local in ["127.0.0.1", "127.8.9.1", "::1", "::ffff:127.0.0.1"] {
+            assert_eq!(limits.header_for(local.parse().unwrap()), LOCAL_TIME);
+        }
+        for remote in ["192.0.2.1", "10.0.0.2", "2001:db8::1", "::ffff:192.0.2.1"] {
+            assert_eq!(limits.header_for(remote.parse().unwrap()), HEADER_TIME);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_connection_from_this_machine_has_the_local_time() {
+        // Longer than the header time of others, and than an answer's own
+        // time, which does not end the connection once the answer is out.
+        let (address, _stop) = start(Limits {
+            local: Duration::from_millis(1_500),
+            send: |_| Duration::from_millis(300),
+            ..limits(Duration::from_millis(300))
+        })
+        .await;
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream.write_all(&get_request("/")).await.unwrap();
+        answer(&mut stream).await;
+        // Idle past the header time of others, it still serves a request...
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        stream.write_all(&get_request("/")).await.unwrap();
+        answer(&mut stream).await;
+        // ...and closes once idle for its own.
+        let answered = Instant::now();
+        let (_, closed) = until_closed(&mut stream, Duration::from_secs(5)).await;
+        assert!(closed);
+        assert!(answered.elapsed() >= Duration::from_millis(1_200));
     }
 
     #[tokio::test]
