@@ -1706,7 +1706,9 @@ impl Chain {
             return Ok(self.pruned);
         }
         let floor = height - window;
-        let to = floor.min(self.pruned + STEP as u64);
+        // A tip lower than it was, as in the middle of a reorganization, has
+        // a lower floor, but what is pruned stays pruned.
+        let to = floor.min(self.pruned + STEP as u64).max(self.pruned);
         let id_at = |h: u64| -> Result<Hash> {
             let h = h as usize;
             if h <= common {

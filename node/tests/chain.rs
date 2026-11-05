@@ -2539,6 +2539,73 @@ fn a_branch_below_the_undo_window_is_reached_by_replaying_from_genesis() {
     assert_eq!(chain.height(), 11);
 }
 #[test]
+fn the_pruned_height_holds_when_the_tip_falls_below_where_it_was() {
+    // An undo window of three: eight blocks, every other one changing state,
+    // leave no undo data at heights 1 to 5.
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut c = config::Config::load(&dir.0).unwrap();
+    c.undo_window = 3;
+    c.save(&dir.0).unwrap();
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = vec![];
+    let a: Vec<Block> = (0..8u8)
+        .map(|i| {
+            let txs = if i % 2 == 0 {
+                vec![variant(vec![i])]
+            } else {
+                vec![]
+            };
+            mine(&runtime, &g, &mut history, txs, "A")
+        })
+        .collect();
+    for block in &a {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let pruned =
+        |chain: &mut Chain| chain.request("status", json!({})).unwrap()["undo_pruned"].clone();
+    assert_eq!(pruned(&mut chain), 5);
+    let fork = |at: usize, n: usize, producer: &str| -> Vec<Block> {
+        let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+        let mut history = vec![];
+        for block in &a[..at] {
+            runtime
+                .validate_and_apply_block(&g, &history, block)
+                .unwrap();
+            history.push(block.header.clone());
+        }
+        (0..n)
+            .map(|_| mine(&runtime, &g, &mut history, vec![], producer))
+            .collect()
+    };
+    // The tip falls to height 6, as in the middle of a reorganization or
+    // after the operator's mark, and a block connects at 7: the window now
+    // ends at 4, but height 5 has no undo data any more, and the pruned
+    // height says so still.
+    chain
+        .request("invalidate", json!({"id":hex(&a[6].header.id())}))
+        .unwrap();
+    assert_eq!(chain.height(), 6);
+    chain.import(&fork(6, 1, "C")[0].encode(), true).unwrap();
+    assert_eq!(chain.height(), 7);
+    assert_eq!(pruned(&mut chain), 5);
+    // So a heavier branch forking at height 4 is reached by the replay
+    // rather than by undoing height 5 with data it no longer has.
+    let b = fork(4, 4, "B");
+    for block in &b {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while chain.tip() != b[3].header.id() {
+        assert!(std::time::Instant::now() < deadline, "no reorganization");
+        chain.resume_activation();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(chain.height(), 8);
+}
+#[test]
 fn settled_blocks_leave_memory_and_branches_below_them_are_still_followed() {
     // The experimental profile, epochs of four blocks, and an undo window of
     // three: the index holds the last 23 canonical blocks at least, three
