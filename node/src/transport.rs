@@ -538,6 +538,15 @@ pub async fn read_wire<S: AsyncRead + Unpin>(
     let bytes = read_bytes(stream, idle, max).await?;
     wire::Frame::decode(&bytes)
 }
+/// A frame, as `read_wire` reads it, and its size in bytes.
+pub async fn read_wire_sized<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    idle: Option<Duration>,
+    max: usize,
+) -> Result<(wire::Frame, usize)> {
+    let bytes = read_bytes(stream, idle, max).await?;
+    Ok((wire::Frame::decode(&bytes)?, bytes.len()))
+}
 pub async fn write_wire<S: AsyncWrite + Unpin>(stream: &mut S, frame: &wire::Frame) -> Result<()> {
     write_bytes(stream, &frame.encode(), FRAME_MAX).await
 }

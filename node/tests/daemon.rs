@@ -493,10 +493,13 @@ impl Node {
         command(&self.dir.0, &["start"]);
         self.info = Running::load(&self.dir.0).unwrap();
     }
+    /// Stops the node and waits for its process to end, as `ting stop`
+    /// does: the process holds the data directory's lock a moment after
+    /// `runtime.json` is gone, and a command editing the stopped node needs it.
     async fn stop(&self) {
         self.call("stop", json!({})).await;
-        for _ in 0..50 {
-            if !self.dir.0.join("runtime.json").exists() {
+        for _ in 0..150 {
+            if !self.dir.0.join("runtime.json").exists() && config::lock(&self.dir.0).is_ok() {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3264,4 +3267,109 @@ async fn a_new_transaction_reaches_a_peer_within_seconds_however_many_follow() {
     assert!(streamed < Duration::from_secs(5), "{streamed:?}");
     a.stop().await;
     b.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_keeps_this_machines_idle_connections_and_takes_the_largest_requests() {
+    // A connection from this machine, as a reverse proxy's, stays open past
+    // the ten seconds others may wait idle and serves its next request;
+    // meanwhile a full batch storage read with proofs and a submission as
+    // large as a block holds are answered whole.
+    async fn health(stream: &mut TcpStream) -> Vec<u8> {
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: node\r\n\r\n")
+            .await
+            .unwrap();
+        let mut answer = Vec::new();
+        let mut buffer = vec![0; 4096];
+        while !(answer.windows(4).any(|w| w == b"\r\n\r\n") && answer.ends_with(b"}")) {
+            let read = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(read > 0, "closed: {}", String::from_utf8_lossy(&answer));
+            answer.extend(&buffer[..read]);
+        }
+        answer
+    }
+    let n = Node::start(true, "rest limits");
+    let api = n.info.api.unwrap();
+    let opened = tokio::time::Instant::now();
+    let mut idle = TcpStream::connect(api).await.unwrap();
+    assert!(health(&mut idle).await.starts_with(b"HTTP/1.1 200"));
+    let json = [("Content-Type", "application/json")];
+    let reads: Vec<Value> = (0..1_024u32)
+        .map(|i| json!({"contract":hex(&[i as u8; 32]),"key":hex(&[(i >> 8) as u8; 32])}))
+        .collect();
+    let batch = json!({"reads":reads,"proof":true}).to_string();
+    let (status, _, values) = http_full(api, "POST", "/v1/storage", &json, &batch).await;
+    assert_eq!(status, 200, "{values}");
+    let values: Value = serde_json::from_str(&values).unwrap();
+    assert_eq!(values["values"].as_array().unwrap().len(), 1_024);
+    let capacity = n.call("status", json!({})).await["limits"][2]
+        .as_u64()
+        .unwrap();
+    let large = ting_core::protocol::Transaction {
+        budget: ting_core::meter::Resources([1_000_000, 1, capacity, 1]),
+        payload: ting_core::protocol::Payload::Call {
+            target: [1; 32],
+            input: vec![1; capacity as usize - 4096],
+        },
+    };
+    let body = format!(r#"{{"hex":"{}"}}"#, hex(&large.encode()));
+    let (status, _, admitted) = http_full(api, "POST", "/v1/transactions", &json, &body).await;
+    assert_eq!(status, 200, "{admitted}");
+    tokio::time::sleep_until(opened + Duration::from_secs(12)).await;
+    assert!(health(&mut idle).await.starts_with(b"HTTP/1.1 200"));
+    n.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_switches_off_at_once_whatever_its_clients_do() {
+    // An idle keep-alive connection from this machine, which may wait five
+    // minutes, and a client that stopped reading in the middle of its answers
+    // do not hold `ting api disable` up: it returns at once, and both
+    // connections are closed.
+    let n = Node::start(true, "rest off");
+    let api = n.info.api.unwrap();
+    let mut idle = TcpStream::connect(api).await.unwrap();
+    idle.write_all(b"GET /health HTTP/1.1\r\nHost: node\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buffer = vec![0; 4096];
+    let read = idle.read(&mut buffer).await.unwrap();
+    assert!(buffer[..read].starts_with(b"HTTP/1.1 200"));
+    // Sixteen copies of the API page's 1.5 MB script, asked for at once and
+    // never read: far more than the sockets between them hold.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    let mut stalled = socket.connect(api).await.unwrap();
+    let asked = "GET /assets/swagger-ui-bundle.js HTTP/1.1\r\nHost: node\r\n\r\n".repeat(16);
+    stalled.write_all(asked.as_bytes()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Asked over the control channel itself, as `ting api disable` asks:
+    // the CLI's own launches wait their turn among the tests'.
+    let started = tokio::time::Instant::now();
+    let disabled = n.call("api", json!({"enabled":false})).await;
+    assert_eq!(disabled["enabled"], false);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    // Both are closed, the reader long before the sixteen copies it asked
+    // for, about 25 MB, have reached it. What it still reads after the close
+    // is what the two machines' socket buffers held by then, which depends on
+    // the system: on Linux, whose send buffers grow to megabytes, more than
+    // the first copy of 1,585,988 bytes.
+    for (stream, most) in [(&mut idle, 0), (&mut stalled, 8_000_000)] {
+        let mut rest = Vec::new();
+        let closed = tokio::time::timeout_at(
+            started + Duration::from_secs(5),
+            stream.read_to_end(&mut rest),
+        )
+        .await;
+        assert!(closed.is_ok(), "still open after 5 seconds");
+        assert!(rest.len() <= most, "{} bytes", rest.len());
+    }
+    n.stop().await;
 }

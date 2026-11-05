@@ -64,7 +64,8 @@ treated as authority to stop a process.
 REST is off by default. When on, it binds to loopback unless you choose another
 address, and it can be switched on or off while the node runs. Enabling it binds the
 listener before recording success, so a failed bind leaves REST off and reports the
-error.
+error. Switching it off, or stopping the node, closes idle connections at once and
+gives requests in progress a second to finish; then their connections close too.
 
 Everything it offers is public by design:
 
@@ -77,11 +78,15 @@ REST's reads run on threads of their own, one per processor core, beside the thr
 that validates and applies blocks, and its few requests to that thread have their
 own share of its queue, so REST traffic cannot slow block processing or crowd out
 peers ([how the node is put together](../node.md#how-it-is-put-together)). There is
-no rate per client. Requests, bodies, queues and pages are bounded:
+no rate per client. Connections, requests, bodies, queues and pages are bounded:
 
 | Bound | Value | When exceeded |
 |---|---|---|
-| Requests in progress | 32 per processor core | `503`, `HTTP service busy` |
+| Connections at once | 512, or what the open-file limit leaves beside what peers and storage may need | Further connections wait to be accepted |
+| Connections from one client, an IPv4 address or an IPv6 /64 | 16; this machine's own, such as a reverse proxy's, are not counted | Closed at once |
+| Time to send a request's header, and to leave a connection idle after an answer | 10 seconds; 5 minutes for this machine's own, longer than a reverse proxy keeps an idle connection to the node, so that the proxy closes it first | Connection closed |
+| Time to send an answer, from when it is ready | A minute, and ten seconds for every MiB of it | Connection closed |
+| Requests in progress, each until all but at most 128 KiB of its answer is written to its connection | 32 per processor core | `503`, `HTTP service busy` |
 | REST's requests waiting for the chain thread (submissions, the mempool, pending status) | 128 | `503`, `node request queue unavailable` |
 | Time per request | 35 seconds; a submission also ten seconds for every MiB its body may have | `504`, `HTTP deadline exceeded` |
 | A submission's body | Twice the data capacity of the next block, and 4 KiB | `413` |
@@ -92,6 +97,14 @@ no rate per client. Requests, bodies, queues and pages are bounded:
 Every response carries `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. The endpoints are
 listed on [Explore the chain](../start/explore.md#the-rest-api).
+
+REST never takes the descriptors that peers and storage may need. Those are one for
+each peer connection the configuration allows, `max_inbound` in and `max_peers` out
+and 32 configured peers, and 64 for the rest: the seeds, control connections, block
+files, the database and the log. On Unix the node raises its open-file limit at start
+to that and 512 more, as far as the system's hard limit allows, and REST takes what
+is left of the limit, at most 512. When that is fewer, the node says so in its log.
+Windows has no such limit.
 
 ## Exposing a node
 

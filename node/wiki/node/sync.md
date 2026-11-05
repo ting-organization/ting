@@ -285,7 +285,11 @@ node [warns](storage.md#warnings) that it may be the one out of step.
 At the heights of the chain's [seed](../reference/conformance.md#the-seed), only the
 listed blocks are taken: any other is an invalid header. A listed block that this
 node's own execution rejects is the node's fault, not the peer's: the node stops and
-reports that it does not conform, holding nothing against the peer.
+reports that it does not conform, holding nothing against the peer. So is a block
+whose parent's state the node does not hold, as when its stored state is damaged:
+that state is the node's own, its root checked when the parent connected, and the
+block takes no part in it, so the node stops and says so, marking nothing invalid
+and holding nothing against the peer.
 
 Some failures look like misbehavior without proving it, and cost the peer nothing
 beyond the request: headers that do not follow the chain they continue, a chain that
@@ -443,7 +447,8 @@ On a quiet network this costs one extra connection and the connections to the se
   connection, in place of the one least worth keeping: the peers that delivered new
   blocks latest, the longest connected, the connections of the node's own machine
   and those less than ten seconds old keep theirs. An operator raises
-  `max_inbound` for a seed node, and the process's open-file limit with it
+  `max_inbound` for a seed node; on Unix the node raises its open-file limit to
+  match as it starts, as far as the system's hard limit allows
 - An address book of at most 1,024 addresses: of the discovered ones, at most 2 of
   one public IP address and 32 of one network group, and at most 32 added by one
   network group in an hour

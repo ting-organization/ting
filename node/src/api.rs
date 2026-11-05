@@ -1,21 +1,24 @@
 use crate::{Result, daemon::Node, reads, web, wiki};
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes, HttpBody},
     extract::{ConnectInfo, DefaultBodyLimit, FromRequest, Path, Query, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
+use hyper::body::{Frame, SizeHint};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     net::{IpAddr, SocketAddr},
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll, ready},
     time::Duration,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower_http::cors::CorsLayer;
 
 #[derive(Clone)]
@@ -98,7 +101,7 @@ pub fn router(node: Node, cors: bool) -> Router {
 async fn bounded(State(s): State<ApiState>, request: Request, next: Next) -> Response {
     let json_endpoint =
         request.uri().path().starts_with("/v1/") || request.uri().path() == "/health";
-    let Ok(_permit) = s.slots.clone().try_acquire_owned() else {
+    let Ok(slot) = s.slots.clone().try_acquire_owned() else {
         return secured(
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -116,7 +119,7 @@ async fn bounded(State(s): State<ApiState>, request: Request, next: Next) -> Res
     } else {
         Duration::from_secs(35)
     };
-    match tokio::time::timeout(deadline, next.run(request)).await {
+    let response = match tokio::time::timeout(deadline, next.run(request)).await {
         Ok(mut response) => {
             if json_endpoint
                 && response.status().is_client_error()
@@ -145,6 +148,64 @@ async fn bounded(State(s): State<ApiState>, request: Request, next: Next) -> Res
             )
                 .into_response(),
         ),
+    };
+    response.map(|body| {
+        Body::new(Held {
+            body,
+            left: Bytes::new(),
+            slot: Some(slot),
+        })
+    })
+}
+/// An answer's body, which holds its request's slot until the connection has
+/// taken all of it, in copies of up to `CHUNK` bytes. A connection takes more
+/// only while less than that waits to be written, so the slots bound the
+/// answers held in memory for slow clients, and an answer whose slot is free
+/// keeps at most twice that of it (wiki: node/security).
+struct Held {
+    body: Body,
+    left: Bytes,
+    slot: Option<OwnedSemaphorePermit>,
+}
+const CHUNK: usize = crate::rest::BUFFER;
+impl HttpBody for Held {
+    type Data = Bytes;
+    type Error = axum::Error;
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Frame<Bytes>, axum::Error>>> {
+        let held = self.get_mut();
+        while held.left.is_empty() {
+            match ready!(Pin::new(&mut held.body).poll_frame(cx)) {
+                Some(Ok(frame)) => match frame.into_data() {
+                    Ok(data) => held.left = data,
+                    Err(frame) => return Poll::Ready(Some(Ok(frame))),
+                },
+                end => {
+                    held.slot = None;
+                    return Poll::Ready(end);
+                }
+            }
+        }
+        let chunk = Bytes::copy_from_slice(&held.left[..held.left.len().min(CHUNK)]);
+        held.left = held.left.slice(chunk.len()..);
+        if held.is_end_stream() {
+            held.slot = None;
+        }
+        Poll::Ready(Some(Ok(Frame::data(chunk))))
+    }
+    fn is_end_stream(&self) -> bool {
+        self.left.is_empty() && self.body.is_end_stream()
+    }
+    fn size_hint(&self) -> SizeHint {
+        let (inner, left) = (self.body.size_hint(), self.left.len() as u64);
+        let mut hint = SizeHint::new();
+        hint.set_lower(inner.lower().saturating_add(left));
+        if let Some(upper) = inner.upper() {
+            hint.set_upper(upper.saturating_add(left));
+        }
+        hint
     }
 }
 /// Every response carries the same protective headers (wiki: node/security).
@@ -590,5 +651,50 @@ mod tests {
         );
         // A request with no connection information, as in a test, is local.
         assert_eq!(client_address(&Request::new(Body::empty())), None);
+    }
+
+    #[tokio::test]
+    async fn an_answer_holds_its_slot_until_the_connection_has_taken_it() {
+        let slots = Arc::new(Semaphore::new(1));
+        let answer: Vec<u8> = (0..(1 << 20) + 5).map(|i| i as u8).collect();
+        let mut held = Held {
+            body: Body::from(answer.clone()),
+            left: Bytes::new(),
+            slot: Some(slots.clone().try_acquire_owned().unwrap()),
+        };
+        // Its length is known, so the answer says it.
+        assert_eq!(held.size_hint().exact(), Some(answer.len() as u64));
+        let mut taken = Vec::new();
+        while !held.is_end_stream() {
+            assert_eq!(slots.available_permits(), 0);
+            let frame = std::future::poll_fn(|cx| Pin::new(&mut held).poll_frame(cx))
+                .await
+                .unwrap()
+                .unwrap();
+            let chunk = frame.into_data().unwrap();
+            assert!(!chunk.is_empty() && chunk.len() <= CHUNK);
+            taken.extend_from_slice(&chunk);
+            assert_eq!(
+                held.size_hint().exact(),
+                Some((answer.len() - taken.len()) as u64)
+            );
+        }
+        // The last piece taken, the slot is free, and the answer whole.
+        assert_eq!(slots.available_permits(), 1);
+        assert_eq!(taken, answer);
+        assert!(
+            std::future::poll_fn(|cx| Pin::new(&mut held).poll_frame(cx))
+                .await
+                .is_none()
+        );
+        // A connection that ends first gives the slot back too.
+        let early = Held {
+            body: Body::from(answer),
+            left: Bytes::new(),
+            slot: Some(slots.clone().try_acquire_owned().unwrap()),
+        };
+        assert_eq!(slots.available_permits(), 0);
+        drop(early);
+        assert_eq!(slots.available_permits(), 1);
     }
 }
