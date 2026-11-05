@@ -174,6 +174,11 @@ impl Held {
         self.blocks.first().map(|b| b.header.parent)
     }
 }
+/// The answer to the child of a run let go to make room for others: not a
+/// policy refusal, so that the pushing node ends its connection and, connected
+/// again, pushes the run once more from the block both nodes hold, which is
+/// the only way an inbound peer's blocks come back to this node.
+pub const LET_GO: &str = "the blocks this connection pushed were let go to make room; push them again from the block both nodes hold";
 fn held_size(bytes: &[u8]) -> usize {
     bytes.len().saturating_add(HELD_OVERHEAD)
 }
@@ -441,8 +446,11 @@ pub struct Chain {
     /// whose blocks have since failed: they sent invalid data.
     sources: BTreeMap<Hash, String>,
     offenders: Vec<String>,
-    /// The blocks each pushing peer's connection holds, not stored, by peer.
+    /// The blocks each pushing peer's connection holds, not stored, by peer,
+    /// and the last block of a run each let go, with the answer its child
+    /// gets: past its bound, `BEHIND`; to make room, `LET_GO`.
     held: BTreeMap<String, Held>,
+    let_go: BTreeMap<String, (Hash, &'static str)>,
     /// Blocks the operator marked invalid, whether seen yet or not.
     marks: BTreeSet<Hash>,
     /// Stored blocks whose parent is not indexed, by parent, as after a restart
@@ -529,6 +537,7 @@ impl Chain {
             sources: BTreeMap::new(),
             offenders: Vec::new(),
             held: BTreeMap::new(),
+            let_go: BTreeMap::new(),
             marks: BTreeSet::new(),
             orphans: BTreeMap::new(),
             failed_work: BigUint::default(),
@@ -1377,12 +1386,18 @@ impl Chain {
         if run.is_some_and(|run| run.blocks.iter().any(|b| b.id == id)) {
             return Ok(held(self, true));
         }
-        // The child of the last block this connection's run holds.
-        if let Some(run) = run.filter(|run| run.last() == Some(header.parent)) {
+        // The child of a block this connection's run holds: the run goes on
+        // from there, cut back to it should the pusher have moved to another
+        // branch within the run.
+        let within = run.and_then(|run| {
+            let at = run.blocks.iter().position(|b| b.id == header.parent)?;
+            Some((run, at))
+        });
+        if let Some((run, at)) = within {
             if self.marks.contains(&id) {
                 return Err(MARKED.into());
             }
-            let (work, limits) = self.check_held_child(run, &header)?;
+            let (work, limits) = self.check_held_child(&run.blocks[..=at], &header)?;
             Self::timely(&header)?;
             Self::check_body(&header, bytes, limits)?;
             let size = held_size(bytes);
@@ -1394,13 +1409,21 @@ impl Chain {
                 bytes: bytes.to_vec(),
             };
             let mut run = self.held.remove(peer).ok_or("nothing held")?;
+            run.blocks.truncate(at + 1);
+            run.bytes = run
+                .blocks
+                .iter()
+                .fold(0usize, |sum, b| sum.saturating_add(held_size(&b.bytes)));
             if overtakes(&block.work, &block.header, &self.tip_work()) {
                 run.blocks.push(block);
                 return self.store_held(run, peer);
             }
             // Longer than a connection holds: neither held nor stored, and the
-            // pusher stops.
+            // pusher stops, as it does at its next push from here.
             if run.bytes.saturating_add(size) > HELD_PEER {
+                if let Some(last) = run.last() {
+                    self.let_go.insert(peer.into(), (last, BEHIND));
+                }
                 return Err(BEHIND.into());
             }
             run.bytes = run.bytes.saturating_add(size);
@@ -1411,7 +1434,7 @@ impl Chain {
         }
         let parent = header.parent;
         if parent != self.genesis.block_id() && !self.index.contains(&parent) {
-            return Err("unknown parent".into());
+            return Err(self.unheld_parent(peer, &parent));
         }
         let (work, limits) = match self.index.get(&id) {
             Some(entry) => {
@@ -1455,13 +1478,12 @@ impl Chain {
     /// followed, with the limits of the canonical block at its parent's
     /// height, so that no held block is ever counted along a branch; any
     /// other is refused for now, and reaches the node through its headers.
-    fn check_held_child(&self, run: &Held, header: &Header) -> Result<(BigUint, Resources)> {
-        let (Some(last), Some(fork)) = (run.blocks.last(), run.parent()) else {
+    fn check_held_child(&self, run: &[HeldBlock], header: &Header) -> Result<(BigUint, Resources)> {
+        let (Some(last), Some(fork)) = (run.last(), run.first().map(|b| b.header.parent)) else {
             return Err("nothing held".into());
         };
         crate::seed::check(self.seed, header)?;
         let mut recent: Vec<u64> = run
-            .blocks
             .iter()
             .rev()
             .take(11)
@@ -1643,6 +1665,15 @@ impl Chain {
         );
         Err(BEHIND.into())
     }
+    /// The answer to a pushed block whose parent is neither indexed nor held
+    /// for its connection: for the child of a run the connection had let go,
+    /// what that run's end calls for, and otherwise `unknown parent`.
+    fn unheld_parent(&self, peer: &str, parent: &Hash) -> String {
+        match self.let_go.get(peer) {
+            Some((last, answer)) if last == parent => (*answer).into(),
+            _ => "unknown parent".into(),
+        }
+    }
     /// Keeps what all held runs count within `HELD_MAX`: the largest run of
     /// another connection than `keep`'s gives way, as long as one must.
     fn make_held_room(&mut self, keep: &str) {
@@ -1662,6 +1693,9 @@ impl Chain {
             };
             if let Some(run) = self.held.remove(&largest) {
                 total = total.saturating_sub(run.bytes);
+                if let Some(last) = run.last() {
+                    self.let_go.insert(largest, (last, LET_GO));
+                }
             }
         }
     }
@@ -3437,15 +3471,26 @@ impl Chain {
                 if known {
                     return Ok(json!({"id":hex(&h.id()),"known":true}));
                 }
-                // The child of a run the pushing connection holds is checked
-                // along that run.
-                let run = p["peer"]
-                    .as_str()
-                    .and_then(|peer| self.held.get(peer))
-                    .filter(|run| run.last() == Some(h.parent));
-                let limits = match run {
-                    Some(run) => self.check_held_child(run, &h)?.1,
-                    None => self.checked_header(&h)?.1,
+                // A block the pushing connection holds is known to it, and the
+                // child of one is checked along its run, as a whole push is.
+                let peer = p["peer"].as_str();
+                let run = peer.and_then(|peer| self.held.get(peer));
+                if run.is_some_and(|run| run.blocks.iter().any(|b| b.id == h.id())) {
+                    return Ok(json!({"id":hex(&h.id()),"known":true,"held":true}));
+                }
+                let within = run.and_then(|run| {
+                    let at = run.blocks.iter().position(|b| b.id == h.parent)?;
+                    Some(&run.blocks[..=at])
+                });
+                let limits = match (within, peer) {
+                    (Some(blocks), _) => self.check_held_child(blocks, &h)?.1,
+                    (None, Some(peer))
+                        if h.parent != self.genesis.block_id()
+                            && !self.index.contains(&h.parent) =>
+                    {
+                        return Err(self.unheld_parent(peer, &h.parent));
+                    }
+                    (None, _) => self.checked_header(&h)?.1,
                 };
                 Self::timely(&h)?;
                 // The block's data capacity bounds its size.
@@ -3495,6 +3540,7 @@ impl Chain {
                 let peer = str_param(&p, "peer")?.to_string();
                 if p["pushed"] == true {
                     self.held.remove(&peer);
+                    self.let_go.remove(&peer);
                     return Ok(json!({}));
                 }
                 match p["id"].as_str() {

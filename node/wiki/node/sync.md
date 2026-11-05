@@ -248,23 +248,35 @@ makes the run overtake the tip stores the whole run and connects it at once. Bef
 anything is stored, each block's header is checked again from its parent as any
 block's is, and the run is stored only if that finds the work and capacities it was
 held with; were the two checks to disagree, a fault of the node, the run would be
-refused for now and nothing held against the peer. A block that does not follow the
-run begins a new one in its place. So a natural fork ends as
-soon as it can: a miner that mined B on the tip's parent and then C on B pushes both
-from the block the nodes share, as a pushing node does, and the node moves to C when C
-arrives.
+refused for now and nothing held against the peer. A block whose parent is a held
+block other than the run's last, as from a pusher that moved to another branch within
+the run, cuts the run back to that block and goes on from there; a block the run
+holds already is answered as known, whole or by the header of its first slice; and a
+block that follows no held block begins a new run in its place. So a natural fork
+ends as soon as it can: a miner that mined B on the tip's parent and then C on B
+pushes both from the block the nodes share, as a pushing node does, and the node
+moves to C when C arrives.
 
 A run holds up to 16 MiB, each block counted with 1 KiB more for what is kept beside
 it: 64 blocks at the production network's data capacity, two pushes of 32, and more
 blocks of today's few hundred bytes than a branch within a day's work of the tip has
 before it overtakes it. All runs together hold 64 MiB at most; past that, the largest
-run of another connection gives way. A run goes when its connection ends. The node's
+run of another connection gives way. Runs a little smaller than an honest one, from
+many connections, can so make it give way; the next block of a run let go is then
+answered with `the blocks this connection pushed were let go to make room; push them
+again from the block both nodes hold`. That is no policy refusal: the pushing node
+ends its connection and, connected again, pushes its branch once more from the block
+the two share, which is how a peer that only connects to this node gets its blocks
+here, so an honest branch is delayed, not lost. A run goes when its connection ends.
+The node's
 status shows what the runs hold, as `held_pushed_blocks` and `held_pushed_bytes`. A
 held block does not count as one the peer delivered, for its place among inbound
 connections ([limits](#limits)). Each of these is answered with `branch too far behind
 the tip`, holds nothing against the peer, and stops the pushing node:
 
-- a block that would take a run past 16 MiB, and the run with it;
+- a block that would take a run past 16 MiB, and the run with it, and the same block
+  pushed again from the run's last block, as the pushing node does next: such a
+  branch, pushed whole once more, would be let go again, and comes by its headers;
 - a block whose parent the node holds only as a header, or without its whole branch,
   such as one ahead of a download: it comes along the best header's branch;
 - at the first block of a voting epoch, whose capacities the votes of an earlier
@@ -275,8 +287,9 @@ the tip`, holds nothing against the peer, and stops the pushing node:
 What a node does not keep is not lost: a branch that later carries more work comes
 again, by its headers from the peers the node follows
 ([headers first](#headers-first)), or pushed again from the block the two nodes
-share, as after a reconnection. A pushed block whose parent is neither indexed nor the
-last one its connection holds is answered with `unknown parent`, and one from more
+share, as after a reconnection. A pushed block whose parent is neither indexed, nor
+held for its connection, nor the last block of a run its connection had let go, is
+answered with `unknown parent`, and one from more
 than a day's work behind the tip with `branch too far behind the tip`. A pushed
 block's header joins the header tree only with its body, once the block is stored,
 so one whose body fails leaves no header behind for the node to download toward.

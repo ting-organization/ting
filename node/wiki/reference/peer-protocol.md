@@ -270,6 +270,7 @@ has moved, at most the next block's data capacity of them each way at each tip.
 | `transaction larger than the data capacity` | A transaction beyond the next block's data capacity |
 | `transaction already included` | A recent block included the transaction |
 | `slice out of order`, `empty slice` | A push broke its order |
+| `the blocks this connection pushed were let go to make room; push them again from the block both nodes hold` | The node held the pushed blocks this one follows and let them go for others' ([pushed blocks](../node/sync.md#pushed-blocks)): connect again and push the branch from the block you share |
 
 Other texts may come from the node's own state, such as a storage error; they are
 answers too, and the connection stays open.
