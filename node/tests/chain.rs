@@ -1898,6 +1898,40 @@ fn the_deferred_set_shares_its_room_by_address_and_keeps_what_is_due_first() {
     );
 }
 #[test]
+fn the_addresses_of_an_ipv6_64_hold_one_share_of_the_deferred_set() {
+    use std::net::IpAddr;
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let now = ting_node::now();
+    let tx = |source: u8, i: u16| {
+        let mut input = i.to_le_bytes().to_vec();
+        input.extend([source, 0x64]);
+        variant(input)
+    };
+    // 256 from as many addresses of one /64; the next address of it is
+    // refused, and an address of another /64 is not.
+    let address = |i: u16| -> IpAddr { format!("2001:db8:1:2::{:x}", i + 1).parse().unwrap() };
+    for i in 0..256 {
+        chain
+            .submit_deferred_from(&tx(1, i).encode(), now + 1_000, Some(address(i)))
+            .unwrap();
+    }
+    assert_eq!(
+        chain
+            .submit_deferred_from(&tx(1, 256).encode(), now + 1_000, Some(address(256)))
+            .unwrap_err(),
+        ting_node::chain::DEFERRED_FULL
+    );
+    chain
+        .submit_deferred_from(
+            &tx(2, 0).encode(),
+            now + 1_000,
+            Some("2001:db8:1:3::1".parse().unwrap()),
+        )
+        .unwrap();
+}
+#[test]
 fn only_header_and_block_checks_prove_invalid_data() {
     use ting_node::chain::is_invalid;
     for refusal in [

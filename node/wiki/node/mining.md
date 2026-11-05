@@ -268,8 +268,9 @@ node keeps it in a separate deferred set instead of the pool.
 - An entry the node can no longer decode when it starts, such as a transaction above
   a data capacity voted down since, is dropped with a note on standard error.
 - The set holds at most 4,096 transactions and as many bytes as the pool, with at
-  most 256 of them counting against one IP address, a relaying peer's or a REST
-  client's, and `not_before` may be at most a
+  most 256 of them counting against one address range, an IPv4 address or an IPv6
+  /64 as in the pool, a relaying peer's or a REST client's, and `not_before` may be
+  at most a
   year (366 days) ahead. When the set is full, a submission due earlier takes the
   place of the relayed entry due latest; otherwise it is refused with
   `deferred set is full`.

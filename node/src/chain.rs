@@ -193,7 +193,8 @@ pub struct Deferred {
     /// and CLI.
     source: Option<std::net::IpAddr>,
 }
-/// Most entries the deferred set keeps that count against one address.
+/// Most entries the deferred set keeps that count against one address range:
+/// an IPv4 address or an IPv6 /64 (`discovery::range`).
 pub const DEFERRED_PER_SOURCE: usize = 256;
 /// Ids in one `inventory` page, and transactions in one `pending` or
 /// `deferred` page.
@@ -2341,11 +2342,12 @@ impl Chain {
         if not_before > current.saturating_add(DEFERRED_HORIZON) {
             return Err(HORIZON.into());
         }
-        if source.is_some()
+        let range = source.map(crate::discovery::range);
+        if range.is_some()
             && self
                 .deferred
                 .values()
-                .filter(|d| d.source == source)
+                .filter(|d| d.source.map(crate::discovery::range) == range)
                 .count()
                 >= DEFERRED_PER_SOURCE
         {
