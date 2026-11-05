@@ -271,7 +271,11 @@ node [warns](storage.md#warnings) that it may be the one out of step.
 At the heights of the chain's [seed](../reference/conformance.md#the-seed), only the
 listed blocks are taken: any other is an invalid header. A listed block that this
 node's own execution rejects is the node's fault, not the peer's: the node stops and
-reports that it does not conform, holding nothing against the peer.
+reports that it does not conform, holding nothing against the peer. So is a block
+whose parent's state the node does not hold, as when its stored state is damaged:
+that state is the node's own, its root checked when the parent connected, and the
+block takes no part in it, so the node stops and says so, marking nothing invalid
+and holding nothing against the peer.
 
 Some failures look like misbehavior without proving it, and cost the peer nothing
 beyond the request: headers that do not follow the chain they continue, a chain that

@@ -35,6 +35,9 @@ use tokio::sync::oneshot;
 
 /// Largest block slice a peer request returns; larger blocks travel in pieces.
 pub const SLICE_MAX: usize = 1024 * 1024;
+/// What validation answers when the state a block runs on is not its
+/// parent's (ting-core's runtime).
+const PARENT_STATE: &str = "parent state mismatch";
 /// Most block ids a locator names.
 pub const LOCATOR_MAX: usize = 32;
 
@@ -1594,6 +1597,19 @@ impl Chain {
                 if block.header.height <= self.seed.len() as u64 {
                     let report = self.nonconformance(&block, &ancestry, limits, &error.to_string());
                     return Err(self.fail(report));
+                }
+                // The parent's state is this node's own, its root checked
+                // when the parent connected; the block takes no part in it.
+                // When the two differ, the node's stored state is at fault.
+                if error.0 == PARENT_STATE {
+                    return Err(self.fail(format!(
+                        "this node's stored state is not the state of block {} at height {}, \
+                         so block {} cannot be checked on it; the fault is this node's, not \
+                         the block's or its peer's",
+                        hex(&parent),
+                        ancestry.height,
+                        hex(id)
+                    )));
                 }
                 return self.invalidate(*id, &error.to_string());
             }
@@ -3595,6 +3611,83 @@ mod tests {
         );
         assert!(chain.failed.is_some());
         assert!(chain.offenders.is_empty(), "the source is not blamed");
+        drop(chain);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A block whose parent's state this node no longer holds, as after its
+    /// stored state was damaged, stops the node instead of marking the block
+    /// invalid and blaming its source: the block takes no part in that state.
+    #[test]
+    fn a_block_on_a_state_this_node_damaged_stops_it_without_blaming_the_block() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".node-tests")
+            .join(format!(
+                "state-unit-{}-{}",
+                std::process::id(),
+                crate::now()
+            ));
+        let g = Genesis::experimental();
+        let c = Config {
+            control: "127.0.0.1:0".parse().unwrap(),
+            p2p: "127.0.0.1:0".parse().unwrap(),
+            api: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        };
+        config::initialize_empty(&dir, &c, g.clone()).unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut chain = Chain::open(&dir, shutdown.clone()).unwrap();
+        let deploy = |input: u8| Transaction {
+            budget: Resources([1_000_000, 16, 4096, 4096]),
+            payload: Payload::Deploy {
+                code: wat::parse_str("(module (func (export \"invoke\")))").unwrap(),
+                input: vec![input],
+            },
+        };
+        let mined = |runtime: &Runtime, history: &mut Vec<Header>, tx: Transaction| {
+            let time = g.timestamp + 60 * (history.len() as u64 + 1);
+            let mut block = runtime
+                .build_candidate(&g, history, vec![tx], time, [0; 4], Vec::new())
+                .unwrap();
+            while !consensus::valid_pow(&block.header) {
+                block.header.nonce += 1;
+            }
+            runtime
+                .validate_and_apply_block(&g, history, &block)
+                .unwrap();
+            history.push(block.header.clone());
+            block
+        };
+        let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+        let mut history = Vec::new();
+        let first = mined(&runtime, &mut history, deploy(1));
+        let second = mined(&runtime, &mut history, deploy(2));
+        chain
+            .import_from(&first.encode(), true, Some("192.0.2.1:18442"))
+            .unwrap();
+        assert_eq!(chain.tip(), first.header.id());
+        // The stored state moves on without a block: another deployment's
+        // changes are written over the first block's state.
+        let damaged = Runtime::with_cache(
+            chain.store.snapshot().unwrap(),
+            Context::from_genesis(&g),
+            chain.code.clone(),
+        );
+        let other = mined(&damaged, &mut history[..1].to_vec(), deploy(3));
+        assert_ne!(other.header.state_root, first.header.state_root);
+        let tx = chain.store.begin().unwrap();
+        Store::apply(&tx, &damaged.state_changes().unwrap()).unwrap();
+        tx.commit().unwrap();
+        let error = chain
+            .import_from(&second.encode(), true, Some("192.0.2.2:18442"))
+            .unwrap_err();
+        assert!(error.contains("the fault is this node's"), "{error}");
+        assert!(chain.failed.is_some());
+        assert!(shutdown.load(Ordering::Relaxed));
+        assert!(chain.offenders.is_empty(), "the source is not blamed");
+        let entry = chain.index.get(&second.header.id()).unwrap();
+        assert_ne!(entry.status, Kept::Invalid);
+        assert_eq!(chain.tip(), first.header.id());
         drop(chain);
         let _ = std::fs::remove_dir_all(&dir);
     }
