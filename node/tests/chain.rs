@@ -1629,6 +1629,41 @@ fn the_pool_shares_its_room_by_address() {
     assert!(status["mempool_bytes"].as_u64().unwrap() < 4 * 1_048_576);
 }
 #[test]
+fn the_addresses_of_an_ipv6_64_hold_one_share_of_the_pool() {
+    use std::net::IpAddr;
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut c = config::Config::load(&dir.0).unwrap();
+    c.mempool_transactions = 8;
+    c.save(&dir.0).unwrap();
+    let mut chain = open(&dir);
+    let chain_id = chain.genesis.chain_id();
+    let tx = |source: u8, i: u16| {
+        let mut input = i.to_le_bytes().to_vec();
+        input.extend([source, 0x64]);
+        variant(input)
+    };
+    let honest: IpAddr = "198.51.100.4".parse().unwrap();
+    for i in 0..4 {
+        chain.submit_from(&tx(1, i).encode(), Some(honest)).unwrap();
+    }
+    // Each from another address of one /64: four fill the pool, and then the
+    // /64 holds as many as the other address, so it takes none of its places.
+    for i in 0..8u16 {
+        let address: IpAddr = format!("2001:db8:1:2::{:x}", i + 1).parse().unwrap();
+        let answer = chain.submit_from(&tx(2, i).encode(), Some(address));
+        if i < 4 {
+            answer.unwrap();
+        } else {
+            assert_eq!(answer.unwrap_err(), ting_node::chain::POOL_FULL);
+        }
+    }
+    for i in 0..4 {
+        let id = hex(&tx(1, i).id(chain_id));
+        assert!(chain.request("transaction", json!({"id":id})).is_ok());
+    }
+}
+#[test]
 fn a_fork_chooses_what_gives_way_in_a_full_pool() {
     use ting_core::vm::Candidate;
     use ting_node::{

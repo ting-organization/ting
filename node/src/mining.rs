@@ -95,27 +95,27 @@ pub struct Pending<'a> {
     pub tried: u64,
 }
 /// The reference node's way of making room in a full pool (wiki:
-/// node/mining): the most recent transaction of the address holding the most
-/// gives way, if that address holds more than the newcomer's. One address can
-/// fill an empty pool, and gives way to every other as they arrive, down to
-/// an equal share; the node's own submissions count against no address and
-/// never give way.
+/// node/mining): the most recent transaction of the address range holding
+/// the most gives way, if that range holds more than the newcomer's. Ranges
+/// are those [`FirstIn`] takes turns by, so all the addresses of an IPv6 /64
+/// hold one share between them. One range can fill an empty pool, and gives
+/// way to every other as they arrive, down to an equal share; the node's own
+/// submissions count against no address and never give way.
 pub fn fair_share(pool: &[Pending<'_>], incoming: &Pending<'_>) -> Option<usize> {
     let mut held: BTreeMap<IpAddr, usize> = BTreeMap::new();
     for pending in pool {
-        if let Some(source) = pending.source {
+        if let Some(source) = range(pending.source) {
             *held.entry(source).or_default() += 1;
         }
     }
-    let own = incoming
-        .source
+    let own = range(incoming.source)
         .and_then(|source| held.get(&source).copied())
         .unwrap_or(0);
     let (&largest, &count) = held.iter().max_by_key(|(_, count)| **count)?;
     if count <= own {
         return None;
     }
-    pool.iter().rposition(|p| p.source == Some(largest))
+    pool.iter().rposition(|p| range(p.source) == Some(largest))
 }
 
 /// The reference policy: first in, first served, with the address ranges

@@ -195,10 +195,12 @@ Mempool rules are local policy, not consensus:
   Transactions from the CLI, and from a local client without that header, count
   against no address: they are the operator's own. Any address may fill a pool that
   has room. When the pool is full, a submission takes the place of the most recent
-  transaction of the address holding the most, if that address holds more than the
-  submitter's, so every address keeps an equal share against the others once the
-  pool is contended; the operator's own transactions can take such a place and never
-  give up theirs. Otherwise the submission is refused with `mempool is full`. A
+  transaction of the address range holding the most, if that range holds more than
+  the submitter's, so every range keeps an equal share against the others once the
+  pool is contended. Ranges are those of the turns below, so the addresses of one
+  IPv6 /64 hold one share between them. The operator's own transactions can take
+  such a place and never give up theirs. Otherwise the submission is refused with
+  `mempool is full`. A
   [mining fork](#what-a-mining-fork-replaces) may make room by its own rule, such as
   what transactions pay it;
 - the reference selector lets address ranges take turns: an IPv4 address, or the
