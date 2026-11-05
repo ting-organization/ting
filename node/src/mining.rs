@@ -9,9 +9,9 @@
 //!
 //! - [`Selector`], which transactions a template includes, and which pooled
 //!   transaction gives way when the pool is full. The reference [`FirstIn`]
-//!   gives every transaction and address its turn and makes room by
-//!   [`fair_share`]; a fork that knows what the programs it cares about pay
-//!   can build candidates and read their receipts.
+//!   gives every address range its turn, first in, first served, and makes
+//!   room by [`fair_share`]; a fork that knows what the programs it cares
+//!   about pay can build candidates and read their receipts.
 //! - [`Search`], finding the nonce. The reference [`Cpu`] runs the plain
 //!   loop on a few threads, hashing each attempt from a SHA-256 midstate; a
 //!   fork drives a GPU or an ASIC.
@@ -30,7 +30,7 @@ use crate::{Result, chain::Handle, now};
 pub const EXPIRED: &str = "unknown or expired template";
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::IpAddr,
     sync::{
         Arc, Mutex,
@@ -95,56 +95,73 @@ pub struct Pending<'a> {
     pub tried: u64,
 }
 /// The reference node's way of making room in a full pool (wiki:
-/// node/mining): the most recent transaction of the address holding the most
-/// gives way, if that address holds more than the newcomer's. One address can
-/// fill an empty pool, and gives way to every other as they arrive, down to
-/// an equal share; the node's own submissions count against no address and
-/// never give way.
+/// node/mining): the most recent transaction of the address range holding
+/// the most gives way, if that range holds more than the newcomer's. Ranges
+/// are those [`FirstIn`] takes turns by, so all the addresses of an IPv6 /64
+/// hold one share between them. One range can fill an empty pool, and gives
+/// way to every other as they arrive, down to an equal share; the node's own
+/// submissions count against no address and never give way.
 pub fn fair_share(pool: &[Pending<'_>], incoming: &Pending<'_>) -> Option<usize> {
     let mut held: BTreeMap<IpAddr, usize> = BTreeMap::new();
     for pending in pool {
-        if let Some(source) = pending.source {
+        if let Some(source) = range(pending.source) {
             *held.entry(source).or_default() += 1;
         }
     }
-    let own = incoming
-        .source
+    let own = range(incoming.source)
         .and_then(|source| held.get(&source).copied())
         .unwrap_or(0);
     let (&largest, &count) = held.iter().max_by_key(|(_, count)| **count)?;
     if count <= own {
         return None;
     }
-    pool.iter().rposition(|p| p.source == Some(largest))
+    pool.iter().rposition(|p| range(p.source) == Some(largest))
 }
 
-/// The reference policy: first in, first served, with every transaction and
-/// every address getting its turn. It tries the transactions no template has
-/// run first, then those run longest ago; among those, the first of each
-/// address before the second of any, the addresses whose transactions were
-/// tried longest ago first, and arrival order within that. Each goes in when
-/// the block still fits it. The node bounds the work a template may throw
-/// away (wiki: node/mining), so a transaction that never fits costs at most
-/// one template's allowance and cannot keep other addresses waiting.
+/// The reference policy: first in, first served, with the address ranges
+/// taking turns in one queue (wiki: node/mining). A range is an IPv4 address
+/// or an IPv6 /64, as bans and inbound limits count ([`discovery::range`]).
+/// A range joins the back of the queue when it first holds a pooled
+/// transaction, and goes to the back again whenever a template keeps one of
+/// its transactions or runs one into an empty block; one tried after others
+/// that the block no longer fits keeps its place. A template takes the first
+/// of each range before the second of any, the ranges in queue order, and
+/// arrival order within that, each when the block still fits it.
+///
+/// So no transaction goes first for being new, a new address waits behind
+/// those already waiting, and a transaction that fills a block, which costs
+/// its sender nothing when it fails, buys its range one turn. The node
+/// bounds the work a template may throw away, so a transaction that never
+/// fits costs at most one template's allowance and then leaves the pool.
+///
+/// [`discovery::range`]: crate::discovery::range
 #[derive(Default)]
 pub struct FirstIn {
-    /// Templates selected so far, and for each address in the pool the last
-    /// one in which a transaction of it was tried.
+    /// Templates selected so far, and for each address range in the pool its
+    /// place in the queue: the template in which it last had its turn, or the
+    /// one before the template that first found it in the pool.
     turn: u64,
     sources: BTreeMap<Option<IpAddr>, u64>,
 }
 impl Selector for FirstIn {
     fn select(&mut self, pool: &[Pending<'_>], block: &mut Candidate<'_>) {
-        self.turn += 1;
-        self.sources
-            .retain(|source, _| pool.iter().any(|p| p.source == *source));
+        self.turn = self.turn.saturating_add(1);
+        let present: BTreeSet<Option<IpAddr>> = pool.iter().map(|p| range(p.source)).collect();
+        self.sources.retain(|key, _| present.contains(key));
+        let joined = self.turn - 1;
+        for key in present {
+            self.sources.entry(key).or_insert(joined);
+        }
         for at in turns(pool, &self.sources) {
             if block.spent() {
                 break;
             }
-            self.sources.insert(pool[at].source, self.turn);
+            let alone = block.transactions().is_empty();
             // A transaction the block does not fit is left out.
-            let _ = block.add(pool[at].tx);
+            let kept = matches!(block.add(pool[at].tx), Ok(Some(_)));
+            if kept || alone {
+                self.sources.insert(range(pool[at].source), self.turn);
+            }
         }
     }
     fn describe(&self) -> Value {
@@ -152,21 +169,27 @@ impl Selector for FirstIn {
     }
 }
 
-/// The order in which [`FirstIn`] tries the pool: by when a template last ran
-/// each transaction, never first; among equals, the first of each address
-/// before the second of any, then the addresses by the template in which one
-/// of their transactions was last tried (`sources`, never first), and arrival
-/// order within that.
+/// The range a pooled transaction's address belongs to, by which [`FirstIn`]
+/// takes turns: none stays none, the node's own.
+fn range(source: Option<IpAddr>) -> Option<IpAddr> {
+    source.map(crate::discovery::range)
+}
+
+/// The order in which [`FirstIn`] tries the pool: the first transaction of
+/// each address range before the second of any; among equals, the ranges by
+/// their place in the queue (`sources`, by range, lowest first; a range
+/// missing from it comes after the others), and arrival order within that.
 pub fn turns(pool: &[Pending<'_>], sources: &BTreeMap<Option<IpAddr>, u64>) -> Vec<usize> {
     let mut seen: BTreeMap<Option<IpAddr>, usize> = BTreeMap::new();
-    let mut order: Vec<(u64, usize, u64, usize)> = pool
+    let mut order: Vec<(usize, u64, usize)> = pool
         .iter()
         .enumerate()
         .map(|(at, pending)| {
-            let rank = seen.entry(pending.source).or_default();
+            let key = range(pending.source);
+            let rank = seen.entry(key).or_default();
             *rank += 1;
-            let last = sources.get(&pending.source).copied().unwrap_or(0);
-            (pending.tried, *rank, last, at)
+            let place = sources.get(&key).copied().unwrap_or(u64::MAX);
+            (*rank, place, at)
         })
         .collect();
     order.sort_unstable();
