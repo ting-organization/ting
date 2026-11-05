@@ -2030,6 +2030,8 @@ impl Chain {
     fn headers_from(&mut self, peer: &str, headers: &[Header]) -> Result<Value> {
         let mut indexed = 0usize;
         let mut next: Option<Hash> = None;
+        // Whether this page began a presync.
+        let mut begun = false;
         for header in headers {
             let id = header.id();
             if let Some(mut state) = self.presync.remove(peer)
@@ -2078,6 +2080,15 @@ impl Chain {
                     next = Some(id);
                 }
                 Err(error) if error == BEHIND => {
+                    // A page is one chain, which begins at most one presync:
+                    // a header too far behind that does not follow the one
+                    // this page began ends the page, so that no page walks a
+                    // branch back more than once.
+                    if begun {
+                        next = None;
+                        break;
+                    }
+                    begun = true;
                     let start = header.parent;
                     let start_time = if start == self.genesis.block_id() {
                         self.genesis.timestamp

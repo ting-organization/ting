@@ -162,8 +162,11 @@ difficulty, can be made cheaply, header by header. Presync lets a node check suc
 chain at the cost of the headers' checks alone, without its memory growing with the
 chain: what a presync keeps grows with the time since the fork, never with the
 number of headers, and the clock bounds the headers it accepts at six a second of
-that time. A real competing chain, however long, is indexed once it shows its work,
-so there is no depth limit and no checkpoint.
+that time. A page of headers is one chain, so it begins at most one presync: a header
+from far back that does not follow the one the page began ends the page, and a page
+that repeats such a header costs no more than one that holds it once. A real
+competing chain, however long, is indexed once it shows its work, so there is no
+depth limit and no checkpoint.
 
 A `headers` answer starts after the highest locator entry on the answering node's
 canonical branch, wherever that entry sits in the list, so two nodes on competing

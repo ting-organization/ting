@@ -3210,6 +3210,63 @@ fn a_chain_far_behind_is_checked_without_being_kept_until_it_overtakes() {
     assert_eq!(chain.tip(), b[1_459].header.id());
 }
 #[test]
+fn a_page_begins_at_most_one_presync_however_often_a_header_repeats() {
+    let dir = Directory::new();
+    dir.config(false, "repeats");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    // A chain of 2,000 blocks, and a header on a branch from its block 500,
+    // too far behind to be indexed: a presync for it begins by walking the
+    // branch back from there.
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = vec![];
+    let mut side = None;
+    for i in 0..2_000 {
+        if i == 500 {
+            let mut x = runtime
+                .build_candidate(
+                    &g,
+                    &history,
+                    vec![],
+                    g.timestamp + 60 * (history.len() as u64 + 1),
+                    [0; 4],
+                    b"X".to_vec(),
+                )
+                .unwrap();
+            while !consensus::valid_pow(&x.header) {
+                x.header.nonce += 1;
+            }
+            side = Some(x.header);
+        }
+        let block = mine(&runtime, &g, &mut history, vec![], "A");
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let side = side.unwrap();
+    let timed = |chain: &mut Chain, page: &[Header]| {
+        let started = std::time::Instant::now();
+        let answer = headers_from(chain, page).unwrap();
+        (answer, started.elapsed())
+    };
+    // Alone, it begins one, as any page from far back does.
+    let (one, alone) = timed(&mut chain, std::slice::from_ref(&side));
+    assert_eq!(one["next"], hex(&side.id()));
+    assert_eq!(one["indexed"], 0);
+    // Repeated through a whole page, it begins one too: the copy that does
+    // not follow it ends the page, and costs no second walk.
+    let page = vec![side.clone(); 2_000];
+    let (repeated, took) = timed(&mut chain, &page);
+    assert_eq!(repeated["next"], serde_json::Value::Null);
+    assert_eq!(repeated["indexed"], 0);
+    assert!(
+        took < alone * 20 + std::time::Duration::from_millis(100),
+        "{took:?} for the page against {alone:?} for one header"
+    );
+    // And alone again, it still begins one.
+    let (again, _) = timed(&mut chain, std::slice::from_ref(&side));
+    assert_eq!(again["next"], hex(&side.id()));
+    assert_eq!(chain.height(), 2_000);
+}
+#[test]
 fn a_damaged_deferred_set_is_set_aside_and_the_node_starts() {
     let dir = Directory::new();
     dir.config(false, "test");
