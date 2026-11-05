@@ -105,15 +105,19 @@ so new transactions, a new tip and the clock reach the header it works on. After
 error, such as a template that expired, it waits half a second and starts over.
 While the node is more than one block behind its best header, as while it
 synchronizes, the miner waits instead, since a block on a tip about to be replaced
-would be lost; its status shows how far behind. It waits only while that tip moves,
-or while the node rebuilds undo data to move it
-([deep reorganizations](storage.md#deep-reorganizations)). A download connects
-blocks many times a second, and a block not delivered within its
-[transfer time](sync.md#blocks) is asked of another peer, so a tip that has not
-moved for a block's transfer time, counted from its last move or from when the node
-fell behind, has no download behind it, as when a peer showed headers whose blocks
-it never sends. The miner then mines on its tip: at the production network's data
-capacity, after 70 seconds.
+would be lost; its status shows how far behind. It waits only while the node stores
+blocks or its tip moves, or while it rebuilds undo data to move it
+([deep reorganizations](storage.md#deep-reorganizations)). A heavier branch that
+forks below the tip moves it only once enough of the branch is stored, so until then
+its download shows only in the blocks stored. A download stores blocks many times a
+second, and a block not delivered within its [transfer time](sync.md#blocks) is
+asked of another peer, so a node that has stored no block and kept its tip for a
+block's transfer time, counted from the last block stored or move of the tip, or
+from when the node fell behind, has no download behind it, as when a peer showed
+headers whose blocks it never sends. The miner then mines on its tip: at the
+production network's data capacity, after 70 seconds. A peer that lets the lowest
+missing block lapse can pause a download a little longer, until another peer
+delivers it, and the miner may then mine one block on a tip about to be replaced.
 
 - `--threads` sets the search threads, 1 to 64; `--spacing` the least number of
   seconds between its own blocks, useful on an easy development chain. Both default
