@@ -15,6 +15,7 @@
       "state_root":{"$ref":"#/components/schemas/Hash"},"limits":{"$ref":"#/components/schemas/Resources"},"resource_order":{"type":"array","items":{"type":"string"},"const":["C","S","D","G"]},
       "mempool_count":{"type":"integer","minimum":0},"mempool_bytes":{"type":"integer","minimum":0},"stored_blocks":{"type":"integer","minimum":0},
       "settled_height":{"type":"integer","minimum":0,"description":"Canonical blocks at or below this height are settled: the block index reads them from storage"},"held_headers":{"type":"integer","minimum":0,"description":"Block index entries held in memory"},
+      "held_pushed_blocks":{"type":"integer","minimum":0,"description":"Blocks peers pushed that are held in memory, not stored, until their branch overtakes the tip"},"held_pushed_bytes":{"type":"integer","minimum":0,"description":"What those blocks count against the 64 MiB the node holds of them: their bytes and 1 KiB each"},
       "state_records":{"type":"integer","minimum":0},"uptime_seconds":{"type":"integer","minimum":0},"deferred_count":{"type":"integer","minimum":0},
       "producer_hex":{"type":"string","pattern":"^([0-9a-f]{2})*$","description":"Producer data of the blocks this node builds"}
     }

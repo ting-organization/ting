@@ -209,7 +209,7 @@ impl Index {
     }
     /// Whether the chain up to and including `id` (or genesis) holds every
     /// block and none is invalid.
-    fn complete(&self, id: &Hash) -> bool {
+    pub fn complete(&self, id: &Hash) -> bool {
         *id == self.genesis || self.get(id).is_some_and(|e| e.complete)
     }
     /// Settles canonical blocks, `(id, canonical child)` from the floor up: they

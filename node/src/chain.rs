@@ -112,9 +112,11 @@ pub fn is_policy(error: &str) -> bool {
     )
 }
 
-/// A header chain is indexed once its work comes within this many blocks of
-/// the tip's work (about a day); below that it is checked without being kept
-/// (`presync`), so a cheap chain from far back costs no memory.
+/// A block a peer pushes, or the node's own, is taken only when its chain's
+/// work comes within this many blocks of the tip's work (about a day). Headers
+/// sync indexes a chain only once it overtakes the best header
+/// (`best_work`); below that it is checked without being kept
+/// (`presync`), so a cheap chain costs no memory.
 const THRESHOLD_BLOCKS: u32 = 1_440;
 /// Headers per `headers` answer.
 pub const HEADERS_PAGE: usize = 2_000;
@@ -138,6 +140,51 @@ pub fn transfer_time(bytes: u64) -> Duration {
 const STEP: usize = 64;
 /// The most canonical blocks settled in one database transaction.
 const SETTLE_MAX: u64 = 65_536;
+/// Blocks a peer pushed unasked whose branch does not overtake the tip are
+/// held in memory, never stored (wiki: node/sync#pushed-blocks): per
+/// connection, one run of blocks, each the child of the one before, of at most
+/// `HELD_PEER` bytes, each block counted with `HELD_OVERHEAD` more for its
+/// header, work and limits beside its bytes (an index entry measures about
+/// 860); and `HELD_MAX` bytes in all, the largest other run giving way. A run
+/// of 16 MiB holds 64 blocks at the production network's data capacity of
+/// 256 KiB, two pushes of 32, and more than 1,440 blocks of a few hundred
+/// bytes, as many as a branch within a day's work of the tip can run without
+/// overtaking it. 64 MiB is four such runs, as much as the recent blocks the
+/// store keeps in memory.
+const HELD_PEER: usize = 16 << 20;
+const HELD_MAX: usize = 64 << 20;
+const HELD_OVERHEAD: usize = 1024;
+/// A run of blocks one peer pushed, held and not stored: each the child of
+/// the one before, the first the child of a block whose branch is stored
+/// whole, each with the work and limits its check gave it.
+struct Held {
+    blocks: Vec<HeldBlock>,
+    /// What it counts against `HELD_PEER` and `HELD_MAX`.
+    bytes: usize,
+}
+struct HeldBlock {
+    id: Hash,
+    header: Header,
+    work: BigUint,
+    limits: Resources,
+    bytes: Vec<u8>,
+}
+impl Held {
+    fn last(&self) -> Option<Hash> {
+        self.blocks.last().map(|b| b.id)
+    }
+    fn parent(&self) -> Option<Hash> {
+        self.blocks.first().map(|b| b.header.parent)
+    }
+}
+/// The answer to the child of a run let go to make room for others: not a
+/// policy refusal, so that the pushing node ends its connection and, connected
+/// again, pushes the run once more from the block both nodes hold, which is
+/// the only way an inbound peer's blocks come back to this node.
+pub const LET_GO: &str = "the blocks this connection pushed were let go to make room; push them again from the block both nodes hold";
+fn held_size(bytes: &[u8]) -> usize {
+    bytes.len().saturating_add(HELD_OVERHEAD)
+}
 /// A reorganization that replaces at least this many blocks is logged as a
 /// warning.
 const DEEP_REORG: usize = 6;
@@ -302,7 +349,7 @@ fn replay(
 /// one length, the one stamped earlier carries slightly more work under ASERT;
 /// without the margin a withholding miner would win every such race
 /// (rules §8).
-fn overtakes(work: &BigUint, header: &Header, tip: &BigUint) -> bool {
+pub(crate) fn overtakes(work: &BigUint, header: &Header, tip: &BigUint) -> bool {
     *work > tip + consensus::work(&header.target) / 2u32
 }
 /// Block ids by height along a branch from genesis. Those at or below the
@@ -402,6 +449,11 @@ pub struct Chain {
     /// whose blocks have since failed: they sent invalid data.
     sources: BTreeMap<Hash, String>,
     offenders: Vec<String>,
+    /// The blocks each pushing peer's connection holds, not stored, by peer,
+    /// and the last block of a run each let go, with the answer its child
+    /// gets: past its bound, `BEHIND`; to make room, `LET_GO`.
+    held: BTreeMap<String, Held>,
+    let_go: BTreeMap<String, (Hash, &'static str)>,
     /// Blocks the operator marked invalid, whether seen yet or not.
     marks: BTreeSet<Hash>,
     /// Stored blocks whose parent is not indexed, by parent, as after a restart
@@ -487,6 +539,8 @@ impl Chain {
             presync: BTreeMap::new(),
             sources: BTreeMap::new(),
             offenders: Vec::new(),
+            held: BTreeMap::new(),
+            let_go: BTreeMap::new(),
             marks: BTreeSet::new(),
             orphans: BTreeMap::new(),
             failed_work: BigUint::default(),
@@ -935,8 +989,8 @@ impl Chain {
         *self.voting.borrow_mut() = Some((tip, answer.clone()));
         Ok(answer)
     }
-    /// The work a header chain needs before it is indexed: within
-    /// `THRESHOLD_BLOCKS` of the tip's work.
+    /// The work a pushed block's chain needs before the block is taken:
+    /// within `THRESHOLD_BLOCKS` of the tip's work.
     fn threshold(&self) -> BigUint {
         let block = self.index.get(&self.tip()).map_or_else(
             || consensus::work(&self.genesis.initial_target),
@@ -949,6 +1003,19 @@ impl Chain {
         } else {
             BigUint::default()
         }
+    }
+    /// The work a header chain must overtake, by the fork-choice margin of
+    /// its last block, before headers sync indexes it (wiki:
+    /// node/sync#headers-first): the best header's, or the tip's. Every child
+    /// of one block has one target, so siblings of the best header, however
+    /// many, each cost a block of work: a chain that would not replace the
+    /// best branch is checked by a presync without being kept, and indexed
+    /// once its work shows.
+    fn best_work(&self) -> BigUint {
+        let best = self.index.best_header().unwrap_or(self.tip());
+        self.index
+            .get(&best)
+            .map_or_else(BigUint::default, |e| e.work.clone())
     }
     fn checked_header(&self, header: &Header) -> Result<(consensus::Ancestry, Resources)> {
         // At a seed height, the seed's block alone, before anything else.
@@ -1204,13 +1271,17 @@ impl Chain {
         Ok(())
     }
     /// Checks a header against its indexed parent and indexes it. A header
-    /// whose chain stays below the work threshold is refused here: such a
-    /// chain is checked by `headers_from` without being kept.
+    /// whose chain does not overtake the best header, by the fork-choice
+    /// margin of its own block, is refused here: such a chain is checked by
+    /// `headers_from` without being kept.
     fn accept_header(&mut self, header: &Header, recovered: bool) -> Result<()> {
         if self.index.contains(&header.id()) {
             return Ok(());
         }
         let (work, limits) = self.check_new_header(header, recovered)?;
+        if !recovered && !overtakes(&work, header, &self.best_work()) {
+            return Err(BEHIND.into());
+        }
         self.index_header(header.clone(), work, limits);
         self.sync_best();
         Ok(())
@@ -1283,6 +1354,354 @@ impl Chain {
             json!({"id":hex(&id),"known":known,"canonical":self.is_canonical(&id),"height":self.height()}),
         )
     }
+    /// A block a peer pushed unasked (wiki: node/sync#pushed-blocks). It is
+    /// stored, as any import, once its branch is stored whole and, with it,
+    /// overtakes the tip, so that it is executed at once. Until then it is held
+    /// in memory, in the run of blocks this connection pushed, each the child
+    /// of the one before: the block that makes the run overtake the tip stores
+    /// and connects the whole run, and a run that never does goes when its
+    /// connection ends, when a new run begins on it, or to make room for
+    /// others. A block whose parent is indexed but not stored with its whole
+    /// branch is refused for now, its branch fetched along the best header's.
+    /// So nothing a peer pushes is stored unless it is executed at once, and
+    /// a refusal here holds nothing against the peer.
+    fn import_pushed(&mut self, bytes: &[u8], peer: &str) -> Result<Value> {
+        if let Some(error) = &self.failed {
+            return Err(error.clone());
+        }
+        let header = Header::decode(
+            bytes
+                .get(..HEADER_LEN)
+                .ok_or(format!("{INVALID}block: truncated header"))?,
+        )
+        .map_err(|e| format!("{INVALID}block: {e}"))?;
+        let id = header.id();
+        // Stored, invalid or marked: answered as any import.
+        if self
+            .index
+            .get(&id)
+            .is_some_and(|e| e.status != Kept::Header)
+        {
+            return self.import_from(bytes, true, Some(peer));
+        }
+        let held = |chain: &Self, known: bool| json!({"id":hex(&id),"known":known,"held":true,"canonical":false,"height":chain.height()});
+        let run = self.held.get(peer);
+        if run.is_some_and(|run| run.blocks.iter().any(|b| b.id == id)) {
+            return Ok(held(self, true));
+        }
+        // The child of a block this connection's run holds: the run goes on
+        // from there, cut back to it should the pusher have moved to another
+        // branch within the run.
+        let within = run.and_then(|run| {
+            let at = run.blocks.iter().position(|b| b.id == header.parent)?;
+            Some((run, at))
+        });
+        if let Some((run, at)) = within {
+            if self.marks.contains(&id) {
+                return Err(MARKED.into());
+            }
+            let (work, limits) = self.check_held_child(&run.blocks[..=at], &header)?;
+            Self::timely(&header)?;
+            Self::check_body(&header, bytes, limits)?;
+            let size = held_size(bytes);
+            let block = HeldBlock {
+                id,
+                header,
+                work,
+                limits,
+                bytes: bytes.to_vec(),
+            };
+            let mut run = self.held.remove(peer).ok_or("nothing held")?;
+            run.blocks.truncate(at + 1);
+            run.bytes = run
+                .blocks
+                .iter()
+                .fold(0usize, |sum, b| sum.saturating_add(held_size(&b.bytes)));
+            if overtakes(&block.work, &block.header, &self.tip_work()) {
+                run.blocks.push(block);
+                return self.store_held(run, peer);
+            }
+            // Longer than a connection holds: neither held nor stored, and the
+            // pusher stops, as it does at its next push from here.
+            if run.bytes.saturating_add(size) > HELD_PEER {
+                if let Some(last) = run.last() {
+                    self.let_go.insert(peer.into(), (last, BEHIND));
+                }
+                return Err(BEHIND.into());
+            }
+            run.bytes = run.bytes.saturating_add(size);
+            run.blocks.push(block);
+            self.held.insert(peer.into(), run);
+            self.make_held_room(peer);
+            return Ok(held(self, false));
+        }
+        let parent = header.parent;
+        if parent != self.genesis.block_id() && !self.index.contains(&parent) {
+            return Err(self.unheld_parent(peer, &parent));
+        }
+        let (work, limits) = match self.index.get(&id) {
+            Some(entry) => {
+                Self::timely(&header)?;
+                (entry.work.clone(), entry.limits)
+            }
+            None => self.check_new_header(&header, false)?,
+        };
+        Self::check_body(&header, bytes, limits)?;
+        // A branch not stored whole is downloaded along the best header's.
+        if !self.index.complete(&parent) {
+            return Err(BEHIND.into());
+        }
+        if overtakes(&work, &header, &self.tip_work()) {
+            self.held.remove(peer);
+            return self.import_from(bytes, true, Some(peer));
+        }
+        // A new run, in place of any this connection held.
+        let block = HeldBlock {
+            id,
+            header,
+            work,
+            limits,
+            bytes: bytes.to_vec(),
+        };
+        self.held.insert(
+            peer.into(),
+            Held {
+                bytes: held_size(bytes),
+                blocks: vec![block],
+            },
+        );
+        self.make_held_room(peer);
+        Ok(held(self, false))
+    }
+    /// The checks of `checked_header` on the child of the last block of a
+    /// held run, whose ancestry and limits follow from the run and the indexed
+    /// blocks below it. Returns its chain's work and its limits. At the first
+    /// block of an epoch, whose limits the votes of an earlier epoch decide,
+    /// only a run that forks from the canonical branch above that epoch is
+    /// followed, with the limits of the canonical block at its parent's
+    /// height, so that no held block is ever counted along a branch; any
+    /// other is refused for now, and reaches the node through its headers.
+    fn check_held_child(&self, run: &[HeldBlock], header: &Header) -> Result<(BigUint, Resources)> {
+        let (Some(last), Some(fork)) = (run.last(), run.first().map(|b| b.header.parent)) else {
+            return Err("nothing held".into());
+        };
+        crate::seed::check(self.seed, header)?;
+        let mut recent: Vec<u64> = run
+            .iter()
+            .rev()
+            .take(11)
+            .map(|b| b.header.timestamp)
+            .collect();
+        let below = self.ancestry(fork)?;
+        recent.extend(below.recent.iter().take(11 - recent.len()));
+        let ancestry = consensus::Ancestry {
+            height: last.header.height,
+            parent: Some(last.header.clone()),
+            recent,
+        };
+        consensus::validate_header_at(&self.genesis, &ancestry, header, Resources([u64::MAX; 4]))
+            .map_err(|e| format!("{INVALID}header: {e}"))?;
+        let e = u64::from(self.genesis.vote_epoch);
+        let height = last.header.height;
+        let epoch = height / e;
+        let limits = if epoch < 3 {
+            self.genesis.initial
+        } else if !height.is_multiple_of(e) {
+            last.limits
+        } else {
+            // The votes counted lie at or below `(epoch - 2) * e`: on the
+            // canonical branch below the fork, they are the canonical block's.
+            let (fork_height, on_canonical) = match self.index.get(&fork) {
+                Some(f) => (f.header.height, self.is_canonical(&fork)),
+                None => (0, fork == self.genesis.block_id()),
+            };
+            let canonical = usize::try_from(height)
+                .ok()
+                .and_then(|h| self.canonical.get(h.checked_sub(1)?, &self.index))
+                .filter(|c| {
+                    on_canonical
+                        && fork_height >= (epoch - 2) * e
+                        && self.entry(c).limits == last.limits
+                });
+            match canonical {
+                Some(c) => self.limits_after(c)?,
+                None => return Err(BEHIND.into()),
+            }
+        };
+        consensus::validate_header_at(&self.genesis, &ancestry, header, limits)
+            .map_err(|e| format!("{INVALID}header: {e}"))?;
+        Ok((last.work.clone() + consensus::work(&header.target), limits))
+    }
+    /// Stores a held run whose last block overtakes the tip, oldest first,
+    /// each as an import of that peer's, then connects the best branch. Its
+    /// headers are checked again first, by the node's own path for a block
+    /// whose parent is indexed (`index_held`); nothing is stored unless every
+    /// one of them agrees.
+    fn store_held(&mut self, run: Held, peer: &str) -> Result<Value> {
+        let (Some(last), Some(fork)) = (run.last(), run.parent()) else {
+            return Err("nothing held".into());
+        };
+        let result = (|| -> Result<()> {
+            // What it forks from may have failed or been marked since.
+            if !self.index.complete(&fork) {
+                return Err(BEHIND.into());
+            }
+            for i in self.index_held(&run, peer)? {
+                let block = &run.blocks[i];
+                self.store_body(
+                    &block.header,
+                    &block.work,
+                    block.limits,
+                    true,
+                    &block.bytes,
+                    None,
+                )?;
+                if self.sources.len() >= 65_536 {
+                    self.sources.clear();
+                }
+                self.sources.insert(block.id, peer.to_string());
+            }
+            self.activate(true)
+        })();
+        if result.is_err() && self.store.has_unindexed() {
+            self.fail("unindexed durable block tail; restart required".into());
+        }
+        result?;
+        Ok(
+            json!({"id":hex(&last),"known":false,"canonical":self.is_canonical(&last),"height":self.height()}),
+        )
+    }
+    /// Checks each block of a held run again, parents first, by the path every
+    /// block whose parent is indexed takes (`checked_header`, whose limits are
+    /// `limits_after` its parent), and indexes its header; returns the blocks
+    /// still to store, those not stored meanwhile. The work and limits it
+    /// finds must be the ones the run was held with, which `check_held_child`
+    /// found along the run: they are what the block is stored and executed
+    /// with. Should the two disagree, which is this node's fault and not the
+    /// peer's, the run is refused for now and the headers indexed here go
+    /// again: nothing is marked invalid and nobody is banned.
+    fn index_held(&mut self, run: &Held, peer: &str) -> Result<Vec<usize>> {
+        let mut indexed = std::collections::HashSet::new();
+        let mut store = Vec::new();
+        let mut refusal: Option<(String, bool)> = None;
+        for (i, block) in run.blocks.iter().enumerate() {
+            if self.marks.contains(&block.id) {
+                refusal = Some((MARKED.into(), false));
+                break;
+            }
+            let entry = self
+                .index
+                .get(&block.id)
+                .map(|e| (e.status, e.has_data(), e.work.clone(), e.limits));
+            match entry {
+                Some((Kept::Invalid, ..)) => {
+                    let error = if self.by_operator(&block.id) {
+                        MARKED.to_string()
+                    } else {
+                        format!("{INVALID}block: it failed validation")
+                    };
+                    refusal = Some((error, false));
+                    break;
+                }
+                // Stored meanwhile, as when a peer was asked for it.
+                Some((_, true, ..)) => continue,
+                // Indexed meanwhile, its header from a peer's headers.
+                Some((_, false, work, limits)) => {
+                    if work != block.work || limits != block.limits {
+                        refusal = Some(("its indexed work or limits differ".into(), true));
+                        break;
+                    }
+                }
+                None => {
+                    let checked = self.checked_header(&block.header).and_then(|(_, limits)| {
+                        let parent = block.header.parent;
+                        let below = if parent == self.genesis.block_id() {
+                            BigUint::default()
+                        } else {
+                            self.index
+                                .get(&parent)
+                                .ok_or("unknown parent")?
+                                .work
+                                .clone()
+                        };
+                        Ok((below + consensus::work(&block.header.target), limits))
+                    });
+                    match checked {
+                        Ok((work, limits)) if work == block.work && limits == block.limits => {
+                            self.index_header(block.header.clone(), work, limits);
+                            indexed.insert(block.id);
+                        }
+                        Ok(_) => {
+                            refusal = Some(("its work or limits differ".into(), true));
+                            break;
+                        }
+                        Err(error) => {
+                            refusal = Some((error, true));
+                            break;
+                        }
+                    }
+                }
+            }
+            store.push(i);
+        }
+        let Some((error, fault)) = refusal else {
+            self.sync_best();
+            return Ok(store);
+        };
+        // A stored block that waited for one of these headers, as after a
+        // restart, keeps them indexed; otherwise they go.
+        let waited = indexed.iter().any(|id| {
+            self.index
+                .children(id)
+                .iter()
+                .any(|child| !indexed.contains(child))
+        });
+        if !waited {
+            self.index.forget(&indexed);
+        }
+        self.sync_best();
+        if !fault {
+            return Err(error);
+        }
+        crate::log!(
+            "warning: blocks {peer} pushed were checked one way along their run and another from their parents ({error}); refused, a fault of this node, not the peer's"
+        );
+        Err(BEHIND.into())
+    }
+    /// The answer to a pushed block whose parent is neither indexed nor held
+    /// for its connection: for the child of a run the connection had let go,
+    /// what that run's end calls for, and otherwise `unknown parent`.
+    fn unheld_parent(&self, peer: &str, parent: &Hash) -> String {
+        match self.let_go.get(peer) {
+            Some((last, answer)) if last == parent => (*answer).into(),
+            _ => "unknown parent".into(),
+        }
+    }
+    /// Keeps what all held runs count within `HELD_MAX`: the largest run of
+    /// another connection than `keep`'s gives way, as long as one must.
+    fn make_held_room(&mut self, keep: &str) {
+        let mut total = self
+            .held
+            .values()
+            .fold(0usize, |sum, run| sum.saturating_add(run.bytes));
+        while total > HELD_MAX {
+            let Some(largest) = self
+                .held
+                .iter()
+                .filter(|(peer, _)| peer.as_str() != keep)
+                .max_by_key(|(_, run)| run.bytes)
+                .map(|(peer, _)| peer.clone())
+            else {
+                break;
+            };
+            if let Some(run) = self.held.remove(&largest) {
+                total = total.saturating_sub(run.bytes);
+                if let Some(last) = run.last() {
+                    self.let_go.insert(largest, (last, LET_GO));
+                }
+            }
+        }
+    }
     /// Stores a block whose header is, or now becomes, indexed and whose body
     /// matches it; nothing is executed until its branch is connected
     /// (`activate`). Returns its id and whether it was stored already.
@@ -1331,6 +1750,13 @@ impl Chain {
                 (work, limits, false)
             }
         };
+        Self::check_body(&header, bytes, limits)?;
+        self.store_body(&header, &work, limits, indexed, bytes, recovered)?;
+        Ok((id, false))
+    }
+    /// The checks of a block's body before it is stored or held: within its
+    /// data capacity, and matching its header's commitments.
+    fn check_body(header: &Header, bytes: &[u8], limits: Resources) -> Result<()> {
         if bytes.len() as u64 > limits.0[2] {
             return Err(format!("{INVALID}block: block byte limit"));
         }
@@ -1346,6 +1772,20 @@ impl Chain {
         {
             return Err(format!("{INVALID}block: body commitment mismatch"));
         }
+        Ok(())
+    }
+    /// Stores a checked block whose body matches it, indexing its header first
+    /// unless it is indexed already.
+    fn store_body(
+        &mut self,
+        header: &Header,
+        work: &BigUint,
+        limits: Resources,
+        indexed: bool,
+        bytes: &[u8],
+        recovered: Option<Location>,
+    ) -> Result<()> {
+        let id = header.id();
         if !indexed {
             self.index_header(header.clone(), work.clone(), limits);
             self.sync_best();
@@ -1355,7 +1795,7 @@ impl Chain {
             None => self.store.append(bytes)?,
         };
         let tx = self.store.begin()?;
-        Store::save_data(&tx, &header, &work, location)?;
+        Store::save_data(&tx, header, work, location)?;
         // A failed commit may have reached disk. Stop instead of continuing with stale RAM.
         if let Err(error) = self.store.commit_block(tx, location) {
             return Err(self.fail(format!("database commit failed; restart required: {error}")));
@@ -1365,7 +1805,7 @@ impl Chain {
         self.index.set_data(&id);
         self.in_flight.remove(&id);
         self.advance_frontier();
-        Ok((id, false))
+        Ok(())
     }
     /// Connects the best branch that can be connected (wiki: node/storage):
     /// while a branch whose blocks are all stored has more work than the tip
@@ -2061,10 +2501,10 @@ impl Chain {
         result.map_err(|error| self.fail(error))
     }
     /// Headers a peer sent, in order (wiki: node/sync). Each is indexed when
-    /// its chain comes within the work threshold of the tip; below it, the
-    /// chain is checked by a presync for that peer, fetched again once it
-    /// reaches the threshold, and indexed then. Returns where the peer's next
-    /// answer should start, and whether the chain is being fetched again.
+    /// its chain overtakes the best header; short of that, the chain is
+    /// checked by a presync for that peer, fetched again once it overtakes,
+    /// and indexed then. Returns where the peer's next answer should start,
+    /// and whether the chain is being fetched again.
     fn headers_from(&mut self, peer: &str, headers: &[Header]) -> Result<Value> {
         let mut indexed = 0usize;
         let mut next: Option<Hash> = None;
@@ -2081,7 +2521,7 @@ impl Chain {
                     self.presync.insert(peer.into(), state);
                     break;
                 }
-                match state.add(&self.genesis, header)? {
+                match state.add(&self.genesis, header, &self.best_work())? {
                     Outcome::Continue => {
                         next = Some(state.next());
                         self.presync.insert(peer.into(), state);
@@ -2137,14 +2577,8 @@ impl Chain {
                             .header
                             .timestamp
                     };
-                    let mut state = Presync::new(
-                        start,
-                        self.walk_from(start)?,
-                        self.threshold(),
-                        start_time,
-                        now(),
-                    );
-                    let outcome = state.add(&self.genesis, header)?;
+                    let mut state = Presync::new(start, self.walk_from(start)?, start_time, now());
+                    let outcome = state.add(&self.genesis, header, &self.best_work())?;
                     next = Some(state.next());
                     let refetch = matches!(outcome, Outcome::Refetch);
                     self.presync.insert(peer.into(), state);
@@ -3010,6 +3444,8 @@ impl Chain {
                     "producer_hex":hex(&self.config.producer()),
                     "stored_blocks":self.index.stored(),"best_height":self.best.len(),"state_records":self.runtime.record_count(),"uptime_seconds":now().saturating_sub(self.started),
                     "undo_pruned":self.pruned,"settled_height":self.index.floor(),"held_headers":self.index.held(),"replaying":self.recovery.is_some(),
+                    "held_pushed_blocks":self.held.values().map(|run| run.blocks.len()).sum::<usize>(),
+                    "held_pushed_bytes":self.held.values().fold(0usize, |sum, run| sum.saturating_add(run.bytes)),
                     "marked":self.marks.iter().map(|id| hex(id)).collect::<Vec<_>>(),"reorganization":self.reorganization,
                     "warnings":self.fork_warning().into_iter().collect::<Vec<_>>()}),
                 )
@@ -3051,7 +3487,27 @@ impl Chain {
                 if known {
                     return Ok(json!({"id":hex(&h.id()),"known":true}));
                 }
-                let (_, limits) = self.checked_header(&h)?;
+                // A block the pushing connection holds is known to it, and the
+                // child of one is checked along its run, as a whole push is.
+                let peer = p["peer"].as_str();
+                let run = peer.and_then(|peer| self.held.get(peer));
+                if run.is_some_and(|run| run.blocks.iter().any(|b| b.id == h.id())) {
+                    return Ok(json!({"id":hex(&h.id()),"known":true,"held":true}));
+                }
+                let within = run.and_then(|run| {
+                    let at = run.blocks.iter().position(|b| b.id == h.parent)?;
+                    Some(&run.blocks[..=at])
+                });
+                let limits = match (within, peer) {
+                    (Some(blocks), _) => self.check_held_child(blocks, &h)?.1,
+                    (None, Some(peer))
+                        if h.parent != self.genesis.block_id()
+                            && !self.index.contains(&h.parent) =>
+                    {
+                        return Err(self.unheld_parent(peer, &h.parent));
+                    }
+                    (None, _) => self.checked_header(&h)?.1,
+                };
                 Self::timely(&h)?;
                 // The block's data capacity bounds its size.
                 Ok(json!({"id":hex(&h.id()),"known":false,"max":limits.0[2]}))
@@ -3094,9 +3550,15 @@ impl Chain {
                 Ok(json!({"ids":ids,"max":max}))
             }
             // A peer that could not give a block, or whose connection ended: what
-            // it was asked goes back to the others.
+            // it was asked goes back to the others. A pushing peer's connection
+            // that ended lets its held blocks go.
             "release" => {
                 let peer = str_param(&p, "peer")?.to_string();
+                if p["pushed"] == true {
+                    self.held.remove(&peer);
+                    self.let_go.remove(&peer);
+                    return Ok(json!({}));
+                }
                 match p["id"].as_str() {
                     Some(id) => {
                         let id = hash_arg(id)?;
@@ -3122,7 +3584,12 @@ impl Chain {
                     Some(bytes) => bytes,
                     None => unhex(str_param(&p, "hex")?, usize::MAX)?,
                 };
-                self.import_from(&bytes, true, p["peer"].as_str())
+                // A block a peer pushed unasked, or one this node asked for or
+                // its operator offers.
+                match p["peer"].as_str() {
+                    Some(peer) if p["pushed"] == true => self.import_pushed(&bytes, peer),
+                    peer => self.import_from(&bytes, true, peer),
+                }
             }
             // Peers whose blocks failed since the last time this was asked.
             "offenders" => Ok(json!({"peers":std::mem::take(&mut self.offenders)})),
@@ -3722,6 +4189,92 @@ mod tests {
         let entry = chain.index.get(&second.header.id()).unwrap();
         assert_ne!(entry.status, Kept::Invalid);
         assert_eq!(chain.tip(), first.header.id());
+        drop(chain);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A held run whose work or limits the node's own check of each block
+    /// from its parent does not confirm is refused whole, for now: nothing is
+    /// stored or indexed, nothing is marked invalid, and no peer is blamed.
+    /// Pushed again, unchanged, the same run is taken.
+    #[test]
+    fn a_held_run_the_check_from_its_parents_does_not_confirm_is_refused() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".node-tests")
+            .join(format!("held-unit-{}-{}", std::process::id(), crate::now()));
+        let g = Genesis::experimental();
+        let c = Config {
+            control: "127.0.0.1:0".parse().unwrap(),
+            p2p: "127.0.0.1:0".parse().unwrap(),
+            api: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        };
+        config::initialize_empty(&dir, &c, g.clone()).unwrap();
+        let mut chain = Chain::open(&dir, Arc::new(AtomicBool::new(false))).unwrap();
+        let mine = |runtime: &Runtime, history: &mut Vec<Header>, producer: &[u8]| {
+            let mut block = runtime
+                .build_candidate(
+                    &g,
+                    history,
+                    vec![],
+                    g.timestamp + 60 * (history.len() as u64 + 1),
+                    [0; 4],
+                    producer.to_vec(),
+                )
+                .unwrap();
+            while !consensus::valid_pow(&block.header) {
+                block.header.nonce += 1;
+            }
+            runtime
+                .validate_and_apply_block(&g, history, &block)
+                .unwrap();
+            history.push(block.header.clone());
+            block
+        };
+        let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+        let mut history = Vec::new();
+        let a: Vec<Block> = (0..3).map(|_| mine(&runtime, &mut history, b"A")).collect();
+        for block in &a {
+            chain.import(&block.encode(), true).unwrap();
+        }
+        let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+        let mut history = Vec::new();
+        for block in &a[..2] {
+            runtime
+                .validate_and_apply_block(&g, &history, block)
+                .unwrap();
+            history.push(block.header.clone());
+        }
+        let b3 = mine(&runtime, &mut history, b"B");
+        let c4 = mine(&runtime, &mut history, b"B");
+        let (stored, held_headers) = (chain.index.stored(), chain.index.held());
+        let corruptions: [fn(&mut HeldBlock); 2] =
+            [|block| block.limits.0[2] -= 1, |block| block.work += 1u32];
+        for (k, corrupt) in corruptions.into_iter().enumerate() {
+            let peer = format!("10.0.0.{k}:1");
+            let held = chain.import_pushed(&b3.encode(), &peer).unwrap();
+            assert_eq!(held["held"], true);
+            corrupt(&mut chain.held.get_mut(&peer).unwrap().blocks[0]);
+            assert_eq!(
+                chain.import_pushed(&c4.encode(), &peer).unwrap_err(),
+                BEHIND
+            );
+            assert!(chain.held.is_empty());
+            assert_eq!(
+                (chain.index.stored(), chain.index.held()),
+                (stored, held_headers)
+            );
+            for block in [&b3, &c4] {
+                assert!(!chain.index.contains(&block.header.id()));
+            }
+            assert!(chain.offenders.is_empty(), "no peer is blamed");
+            assert_eq!(chain.tip(), a[2].header.id());
+        }
+        // Unchanged, the run is stored and connected.
+        chain.import_pushed(&b3.encode(), "10.0.0.9:1").unwrap();
+        chain.import_pushed(&c4.encode(), "10.0.0.9:1").unwrap();
+        assert_eq!(chain.tip(), c4.header.id());
+        assert_eq!(chain.index.stored(), stored + 2);
         drop(chain);
         let _ = std::fs::remove_dir_all(&dir);
     }

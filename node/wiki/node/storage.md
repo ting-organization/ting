@@ -130,7 +130,12 @@ sets the window in blocks; `0` keeps everything.
 - **Header.** Checked and in the header tree, in memory only
   ([headers first](sync.md#headers-first)).
 - **Stored.** The body is in a block file and matches its header, but has not been
-  executed. Its location, header and work are in the database.
+  executed. Its location, header and work are in the database. A body is stored when
+  the node asked for it along the best header's branch, or when a peer pushed it and
+  it is executed at once; a pushed block whose branch does not overtake the tip is
+  only held in memory ([pushed blocks](sync.md#pushed-blocks)). Block files are only
+  ever appended to, so what a peer can make a node write is what the node either
+  asked for or executes.
 - **Valid.** Executed on its branch, with its record changes kept. Only valid blocks
   are ever connected.
 - **Invalid.** Its execution failed, or the operator marked it invalid, or it sits
@@ -143,8 +148,10 @@ sets the window in blocks; `0` keeps everything.
 The node keeps an index of the blocks it knows: for each, its header, its
 accumulated work, the limits it runs under and what the node holds of it. Choosing,
 downloading and connecting the best branch work from it. The index holds in memory
-the most recent canonical blocks, every side branch, and the headers whose blocks are
-not stored yet. Canonical blocks further down are **settled**: the index reads them
+the most recent canonical blocks, every stored side branch, and the headers whose
+blocks are not stored yet, which headers sync indexes only for a chain that overtook
+the best header ([headers first](sync.md#headers-first)). Canonical blocks further
+down are **settled**: the index reads them
 from the database when it needs them, their header and work from `headers` and
 their limits from `block_limits`. Its memory therefore does not grow with the length
 of the chain.

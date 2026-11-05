@@ -646,12 +646,17 @@ struct Pushed {
     total: u64,
     deadline: Instant,
 }
-/// The chain's answer to a push taken whole.
-fn taken(answer: Value) -> Result<wire::Answer> {
-    Ok(wire::Answer::Taken {
-        id: crate::hash_arg(answer["id"].as_str().ok_or("invalid chain answer")?)?,
-        known: answer["known"] == true,
-    })
+/// The chain's answer to a push taken whole, and whether it stored a block
+/// the node lacked: one it holds without storing it does not count.
+fn taken(answer: Value) -> Result<(wire::Answer, bool)> {
+    let known = answer["known"] == true;
+    Ok((
+        wire::Answer::Taken {
+            id: crate::hash_arg(answer["id"].as_str().ok_or("invalid chain answer")?)?,
+            known,
+        },
+        !known && answer["held"] != true,
+    ))
 }
 /// A block (`import`) or transaction (`submit`, with `not_before` for a
 /// deferred one) a peer pushes (wiki: node/sync). One that comes whole, in a
@@ -659,7 +664,8 @@ fn taken(answer: Value) -> Result<wire::Answer> {
 /// the size: a block's header, which it holds, bounds it by the data capacity
 /// at its height, and a transaction is bounded by the next block's. The
 /// others follow in order, within the item's transfer time, and the last
-/// takes the whole item in.
+/// takes the whole item in. Returns the answer, and whether a block the node
+/// lacked was stored.
 async fn pushed(
     node: &Node,
     peer: &str,
@@ -667,9 +673,9 @@ async fn pushed(
     method: &'static str,
     part: wire::Part,
     not_before: Option<u64>,
-) -> Result<wire::Answer> {
+) -> Result<(wire::Answer, bool)> {
     let params = if method == "import" {
-        json!({"peer":peer})
+        json!({"peer":peer,"pushed":true})
     } else {
         json!({"relayed":true,"peer":peer,"not_before":not_before})
     };
@@ -689,7 +695,7 @@ async fn pushed(
                 .ok_or(format!("{INVALID}block: truncated header"))?;
             let checked = node
                 .handle
-                .call_external_bytes("check_header", Value::Null, Some(header.to_vec()))
+                .call_external_bytes("check_header", json!({"peer":peer}), Some(header.to_vec()))
                 .await?;
             if checked["known"] == true {
                 return taken(checked);
@@ -725,7 +731,7 @@ async fn pushed(
     }
     item.bytes.extend(part.bytes);
     if end < part.total {
-        return Ok(wire::Answer::Received(end));
+        return Ok((wire::Answer::Received(end), false));
     }
     let item = pushed.take().ok_or("nothing being pushed")?;
     taken(
@@ -836,6 +842,8 @@ async fn serve(
     let peer = remote.to_string();
     let (mut tokens, mut filled) = (BURST, Instant::now());
     let mut pushing = None;
+    // Whether the peer pushed a block, which the chain may hold for it.
+    let mut pushed_block = false;
     loop {
         let frame = tokio::select! {
             r=read_wire(&mut reader, Some(IDLE), FRAME_MAX)=>r,
@@ -869,7 +877,8 @@ async fn serve(
             filled = Instant::now();
         }
         tokens -= cost;
-        let import = matches!(request, wire::Request::Import(_));
+        // Whether a pushed block this node lacked was stored.
+        let mut delivered = false;
         let result = match request {
             wire::Request::Hello(_) => Err(wire::UNKNOWN_REQUEST.into()),
             wire::Request::Addresses => {
@@ -891,10 +900,18 @@ async fn serve(
                 }
             }
             wire::Request::Import(part) => {
-                pushed(&node, &peer, &mut pushing, "import", part, None).await
+                pushed_block = true;
+                pushed(&node, &peer, &mut pushing, "import", part, None)
+                    .await
+                    .map(|(answer, stored)| {
+                        delivered = stored;
+                        answer
+                    })
             }
             wire::Request::Submit { part, not_before } => {
-                pushed(&node, &peer, &mut pushing, "submit", part, not_before).await
+                pushed(&node, &peer, &mut pushing, "submit", part, not_before)
+                    .await
+                    .map(|(answer, _)| answer)
             }
             // Header pages and block slices come from the database, beside
             // the chain thread.
@@ -913,9 +930,9 @@ async fn serve(
         if let Ok(wire::Answer::Slice { bytes, .. }) = &result {
             tokens -= carried(bytes.len());
         }
-        // A peer that brings a block this node lacks keeps its slot when
-        // every slot is taken.
-        if import && let Ok(wire::Answer::Taken { known: false, .. }) = &result {
+        // A peer that brings a block this node lacks, and stores, keeps its
+        // slot when every slot is taken.
+        if delivered {
             node.inbound.lock().unwrap().delivered(key);
         }
         let failed = match &result {
@@ -938,6 +955,13 @@ async fn serve(
         task.abort();
     }
     drop(out);
+    // The blocks the connection pushed and the chain holds unstored go with it.
+    if pushed_block {
+        let _ = node
+            .handle
+            .call("release", json!({"peer":peer,"pushed":true}))
+            .await;
+    }
     let _ = tokio::time::timeout(FRAME_DEADLINE, writing).await;
 }
 pub async fn wait_stopped(shutdown: &AtomicBool) {

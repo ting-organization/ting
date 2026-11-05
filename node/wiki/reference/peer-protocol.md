@@ -140,7 +140,7 @@ length has, and every answer 30 seconds from its request.
 | 1 | Headers | A list of at most 2,000 headers |
 | 2 | Slice | `offset` `u64`, `total` `u64`, the item's full length, and bytes of at most 1 MiB |
 | 3 | Received | `u64`: the bytes of a push taken so far |
-| 4 | Taken | `id` of the block or transaction, and `known` flag: the node held it already |
+| 4 | Taken | `id` of the block or transaction, and `known` flag: the node had it already |
 | 5 | Inventory | A list of at most 1,024 ids, and `next` option of an id: the last id listed, the `after` of the next page, or none at the end |
 | 6 | Items | A list of at most 32 items: `id`, `not_before` option of a `u64` (set for deferred ones), then `0` and the transaction as bytes, or `1` and its size `total` as a `u64` |
 | 7 | Addresses | A list of at most 32 addresses |
@@ -225,6 +225,12 @@ item ends the push with `slice out of order` or `empty slice`.
 
 - A block's first slice holds its header, which sets its bound: the data capacity at
   its height. A larger `total` is invalid data.
+- A reference node stores a pushed block only when it is executed at once, as one
+  whose branch overtakes its tip; one that does not, such as a sibling of its tip, it
+  holds in memory for the connection, answered Taken all the same, until the next
+  blocks pushed make the branch overtake ([pushed
+  blocks](../node/sync.md#pushed-blocks)). So push a branch whole, from the block you
+  share, in order.
 - A transaction is bounded by the data capacity of the next block, and a larger one
   is refused with `transaction larger than the data capacity`.
 - The whole item must arrive within its transfer time: a minute, and ten seconds
@@ -259,7 +265,7 @@ has moved, at most the next block's data capacity of them each way at each tip.
 | `block not found` | `raw` of a block the node does not serve |
 | `transaction not found` | `transaction_raw` of a transaction the node does not hold |
 | `no common ancestor` | `headers` whose locator names no canonical block |
-| `branch too far behind the tip` | A block on a branch more than a day's work behind the tip, whose header the node has not indexed |
+| `branch too far behind the tip` | A pushed block the node does not take now: on a branch more than a day's work behind the tip whose header it has not indexed, on a branch it does not store whole, or past what a connection holds unstored |
 | `timestamp ahead of the clock` | A block more than 7,200 seconds ahead of the node's clock; offer it again later |
 | `block marked invalid by this node's operator` | A block the operator marked invalid, or one above it; held against no peer |
 | `mempool is full`, `deferred set is full` | No room for the transaction |
@@ -267,6 +273,7 @@ has moved, at most the next block's data capacity of them each way at each tip.
 | `transaction larger than the data capacity` | A transaction beyond the next block's data capacity |
 | `transaction already included` | A recent block included the transaction |
 | `slice out of order`, `empty slice` | A push broke its order |
+| `the blocks this connection pushed were let go to make room; push them again from the block both nodes hold` | The node held the pushed blocks this one follows and let them go for others' ([pushed blocks](../node/sync.md#pushed-blocks)): connect again and push the branch from the block you share |
 
 Other texts may come from the node's own state, such as a storage error; they are
 answers too, and the connection stays open.

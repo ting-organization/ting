@@ -123,6 +123,23 @@ Windows has no such limit.
   Markdown and no filesystem path is ever rendered.
 - Peer traffic is unencrypted and unauthenticated, but it carries only public chain
   data, and no peer message reaches administration.
+- Proof of work bounds what blocks cost, not how many alternatives to one block there
+  are: every child of a block has the same target, so each sibling of the tip costs
+  one block of work. A block a peer pushes unasked is stored only when its branch
+  overtakes the tip, and it is executed at once: valid, it moves the tip; invalid, it
+  stays on disk and its sender is banned for a day. One that does not overtake is
+  held in memory, 64 MiB at most for all connections
+  ([pushed blocks](sync.md#pushed-blocks)). Nor can a peer grow the node's header tree
+  with such alternatives: headers sync keeps a chain only once it overtakes the best
+  header, and checks any other without keeping it
+  ([headers first](sync.md#headers-first)).
+- What a node asks for along the best header's branch it stores whether or not it is
+  ever executed, as Bitcoin does: a peer the node follows, whose header chain
+  overtakes the best header, can withhold one of its blocks and have the node store
+  the others, which it never connects without that one. Each such block costs the
+  peer a block of work on a branch heavier than any the node knows, and only a peer
+  the node chose to follow can do it; on a network with little hashpower that work
+  is cheap, so this bounds the cost of such storage, not its possibility.
 - With discovery on, a node tells its peers the addresses of nodes it has recently
   synchronized with, and announces its own listening port. With
   `"discovery": false` it does neither. Its address can still spread: a node that

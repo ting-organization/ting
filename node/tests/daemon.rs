@@ -1365,6 +1365,8 @@ struct ChainPeer {
     bluff: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// How many hellos it has answered.
     hellos: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Blocks it holds past `blocks`, added while it runs.
+    grown: std::sync::Arc<std::sync::Mutex<Vec<ting_core::protocol::Block>>>,
 }
 impl ChainPeer {
     fn new(
@@ -1381,17 +1383,25 @@ impl ChainPeer {
             shares: vec![],
             bluff: Default::default(),
             hellos: Default::default(),
+            grown: Default::default(),
         }
+    }
+    /// Its chain: `blocks`, then what it has grown.
+    fn chain(&self) -> Vec<ting_core::protocol::Block> {
+        let mut chain = self.blocks.to_vec();
+        chain.extend(self.grown.lock().unwrap().iter().cloned());
+        chain
     }
     fn bluffing(&self) -> bool {
         self.bluff.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn tip(&self) -> (Hash, u64) {
-        let height = self.blocks.len() as u64;
+        let chain = self.chain();
+        let height = chain.len() as u64;
         if self.bluffing() {
             ([9; 32], height + 1)
         } else {
-            (self.blocks.last().unwrap().header.id(), height)
+            (chain.last().unwrap().header.id(), height)
         }
     }
     fn answer(&self, request: &wire::Request) -> Result<wire::Answer, String> {
@@ -1413,12 +1423,13 @@ impl ChainPeer {
             wire::Request::Hello(_) | wire::Request::State => Ok(wire::Answer::State(state)),
             // After the most recent locator entry it holds, as a node answers.
             wire::Request::Headers { locator } if self.serves && !self.bluffing() => {
+                let chain = self.chain();
                 let from = locator
                     .iter()
-                    .find_map(|id| self.blocks.iter().position(|b| b.header.id() == *id))
+                    .find_map(|id| chain.iter().position(|b| b.header.id() == *id))
                     .map_or(0, |k| k + 1);
                 Ok(wire::Answer::Headers(
-                    self.blocks[from..]
+                    chain[from..]
                         .iter()
                         .map(|b| b.header.encode().try_into().unwrap())
                         .collect(),
@@ -1426,7 +1437,8 @@ impl ChainPeer {
             }
             wire::Request::Headers { .. } => Ok(wire::Answer::Headers(vec![])),
             wire::Request::Raw { id, offset, length } if self.serves => {
-                let block = self.blocks.iter().find(|b| b.header.id() == *id);
+                let chain = self.chain();
+                let block = chain.iter().find(|b| b.header.id() == *id);
                 let bytes = block.ok_or("block not found")?.encode();
                 let from = (*offset as usize).min(bytes.len());
                 let to = (from + *length as usize).min(bytes.len());
@@ -3371,5 +3383,244 @@ async fn rest_switches_off_at_once_whatever_its_clients_do() {
         assert!(closed.is_ok(), "still open after 5 seconds");
         assert!(rest.len() <= most, "{} bytes", rest.len());
     }
+    n.stop().await;
+}
+
+/// `n` blocks on the branch of `below`, a second apart from `start`, with
+/// producer data of their own.
+fn fork_on(
+    g: &ting_core::protocol::Genesis,
+    below: &[ting_core::protocol::Block],
+    n: u64,
+    start: u64,
+    producer: &[u8],
+) -> Vec<ting_core::protocol::Block> {
+    let runtime = Runtime::new(State::default(), Context::from_genesis(g));
+    let mut history = Vec::new();
+    for block in below {
+        runtime
+            .validate_and_apply_block(g, &history, block)
+            .unwrap();
+        history.push(block.header.clone());
+    }
+    (0..n)
+        .map(|i| {
+            let mut block = runtime
+                .build_candidate(g, &history, vec![], start + i, [0; 4], producer.to_vec())
+                .unwrap();
+            while !consensus::valid_pow(&block.header) {
+                block.header.nonce += 1;
+            }
+            runtime
+                .validate_and_apply_block(g, &history, &block)
+                .unwrap();
+            history.push(block.header.clone());
+            block
+        })
+        .collect()
+}
+/// Pushes `block` whole over `stream`, as a pushing node does.
+async fn push_block(
+    stream: &mut TcpStream,
+    block: &ting_core::protocol::Block,
+) -> Result<wire::Answer, String> {
+    transport::ask(stream, wire::Request::Import(whole(&block.encode()))).await
+}
+/// Waits until a node's status satisfies `done`.
+async fn wait_status(n: &Node, done: impl Fn(&Value) -> bool) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = n.call("status", json!({})).await;
+        if done(&status) {
+            return status;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{status}{}",
+            node_log(&n.dir.0)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sibling_pushed_by_a_second_peer_waits_unstored_until_its_child_moves_the_node() {
+    // The node follows one peer to A5. A second peer, which reaches the node
+    // only by connecting to it, as a miner behind a NAT does, mined B5 on A4
+    // and then C6 on B5, and pushes both from the block they share. B5 is
+    // answered as taken but neither stored nor indexed; C6 makes its branch
+    // overtake the tip, and the node moves to it at once.
+    let g = support::test_genesis();
+    let a = std::sync::Arc::new(blocks_on(&g, 5));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let first = listener.local_addr().unwrap();
+    ChainPeer::new(g.chain_id(), 0xa1, a.clone()).spawn(listener);
+    let n = Node::start(false, "natural fork");
+    command(&n.dir.0, &["add", "node", &first.to_string()]);
+    n.wait_height(5).await;
+    let before = n.call("status", json!({})).await;
+    assert_eq!(before["tip"], hex(&a[4].header.id()));
+    let b = fork_on(&g, &a[..4], 2, ting_node::now() + 10, b"B");
+    let (mut stream, _) = greet(n.info.p2p, hello(g.chain_id())).await;
+    assert_eq!(
+        push_block(&mut stream, &b[0]).await.unwrap(),
+        wire::Answer::Taken {
+            id: b[0].header.id(),
+            known: false
+        }
+    );
+    let held = n.call("status", json!({})).await;
+    for field in ["tip", "stored_blocks", "held_headers", "best_height"] {
+        assert_eq!(held[field], before[field], "{field}");
+    }
+    assert_eq!(held["held_pushed_blocks"], 1);
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        push_block(&mut stream, &b[1]).await.unwrap(),
+        wire::Answer::Taken {
+            id: b[1].header.id(),
+            known: false
+        }
+    );
+    let moved = wait_status(&n, |s| s["tip"] == hex(&b[1].header.id())).await;
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(moved["height"], 6);
+    assert_eq!(moved["stored_blocks"], 7);
+    assert_eq!(moved["held_pushed_blocks"], 0);
+    assert_eq!(moved["reorganization"]["replaced"], 1);
+    n.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_branch_six_deep_pushed_by_a_peer_with_more_work_replaces_the_tip() {
+    // The node follows one peer to A10. Another peer, connecting to the node,
+    // pushes a branch from A4 with seven blocks: the first six do not
+    // overtake the tip and are held unstored; its connection ends, and what
+    // it held goes. Connected again, it pushes them once more, and the
+    // seventh, past the tip, moves the node six blocks deep.
+    let g = support::test_genesis();
+    let a = std::sync::Arc::new(blocks_on(&g, 10));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let first = listener.local_addr().unwrap();
+    ChainPeer::new(g.chain_id(), 0xa2, a.clone()).spawn(listener);
+    let n = Node::start(false, "six deep");
+    command(&n.dir.0, &["add", "node", &first.to_string()]);
+    n.wait_height(10).await;
+    let before = n.call("status", json!({})).await;
+    let b = fork_on(&g, &a[..4], 7, ting_node::now() + 20, b"B");
+    let (mut stream, _) = greet(n.info.p2p, hello(g.chain_id())).await;
+    for block in &b[..6] {
+        push_block(&mut stream, block).await.unwrap();
+    }
+    let held = n.call("status", json!({})).await;
+    for field in ["tip", "stored_blocks", "held_headers", "best_height"] {
+        assert_eq!(held[field], before[field], "{field}");
+    }
+    assert_eq!(held["held_pushed_blocks"], 6);
+    drop(stream);
+    wait_status(&n, |s| s["held_pushed_blocks"] == 0).await;
+    let (mut stream, _) = greet(n.info.p2p, hello(g.chain_id())).await;
+    assert_eq!(
+        push_block(&mut stream, &b[6]).await.unwrap_err(),
+        "unknown parent"
+    );
+    for block in &b {
+        push_block(&mut stream, block).await.unwrap();
+    }
+    let moved = wait_status(&n, |s| s["tip"] == hex(&b[6].header.id())).await;
+    assert_eq!(moved["height"], 11);
+    assert_eq!(moved["reorganization"]["replaced"], 6);
+    assert_eq!(moved["reorganization"]["deep"], true);
+    assert_eq!(moved["stored_blocks"], 17);
+    n.stop().await;
+}
+/// Waits until a node has completed a round with the peer at `address`.
+async fn wait_round(n: &Node, address: SocketAddr) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let peers = n.call("peers", json!({})).await;
+        if peer_status(&peers, address)["last_success"].is_u64() {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{peers}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sibling_a_followed_peer_shows_waits_unkept_until_its_child_moves_the_node() {
+    // The node follows two peers: the first serves A to A5, the second A to
+    // A4 and then B5. The node checks B5's header and keeps nothing of it.
+    // Once the second peer mines C6 on B5 and announces it, the node takes
+    // B5 and C6 from it and moves to C6 within a few seconds.
+    let g = support::test_genesis();
+    let a = std::sync::Arc::new(blocks_on(&g, 5));
+    let b = fork_on(&g, &a[..4], 2, ting_node::now() + 10, b"B");
+    let (first, second) = (
+        tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+    );
+    let (first_address, second_address) =
+        (first.local_addr().unwrap(), second.local_addr().unwrap());
+    ChainPeer::new(g.chain_id(), 0xa3, a.clone()).spawn(first);
+    let mut below: Vec<_> = a[..4].to_vec();
+    below.push(b[0].clone());
+    let other = ChainPeer::new(g.chain_id(), 0xb3, std::sync::Arc::new(below));
+    let grown = other.grown.clone();
+    other.spawn(second);
+    let n = Node::start(false, "fork by headers");
+    command(&n.dir.0, &["add", "node", &first_address.to_string()]);
+    n.wait_height(5).await;
+    let before = n.call("status", json!({})).await;
+    command(&n.dir.0, &["add", "node", &second_address.to_string()]);
+    wait_round(&n, second_address).await;
+    // Past several rounds of announcements, B5 is still neither indexed nor
+    // stored.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let now = n.call("status", json!({})).await;
+    for field in ["tip", "held_headers", "best_height", "stored_blocks"] {
+        assert_eq!(now[field], before[field], "{field}");
+    }
+    let started = tokio::time::Instant::now();
+    grown.lock().unwrap().push(b[1].clone());
+    let moved = wait_status(&n, |s| s["tip"] == hex(&b[1].header.id())).await;
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(moved["reorganization"]["replaced"], 1);
+    n.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_branch_forty_deep_from_a_followed_peer_is_taken_through_presync() {
+    // The node follows a peer at A60, and then one whose branch leaves A at
+    // A20 and is as long. Its 40 headers are checked without being kept, so
+    // the node's index holds what it held. One block more on that branch
+    // makes it the heaviest: its headers are asked for again, indexed, and
+    // the node moves to it, 40 blocks deep.
+    let g = support::test_genesis();
+    let a = std::sync::Arc::new(blocks_on(&g, 60));
+    let b = fork_on(&g, &a[..20], 41, ting_node::now() + 100, b"B");
+    let (first, second) = (
+        tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+    );
+    let (first_address, second_address) =
+        (first.local_addr().unwrap(), second.local_addr().unwrap());
+    ChainPeer::new(g.chain_id(), 0xa4, a.clone()).spawn(first);
+    let mut below: Vec<_> = a[..20].to_vec();
+    below.extend(b[..40].iter().cloned());
+    let other = ChainPeer::new(g.chain_id(), 0xb4, std::sync::Arc::new(below));
+    let grown = other.grown.clone();
+    other.spawn(second);
+    let n = Node::start(false, "deep by headers");
+    command(&n.dir.0, &["add", "node", &first_address.to_string()]);
+    n.wait_height(60).await;
+    let before = n.call("status", json!({})).await;
+    command(&n.dir.0, &["add", "node", &second_address.to_string()]);
+    wait_round(&n, second_address).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let now = n.call("status", json!({})).await;
+    for field in ["tip", "held_headers", "best_height", "stored_blocks"] {
+        assert_eq!(now[field], before[field], "{field}");
+    }
+    grown.lock().unwrap().push(b[40].clone());
+    let moved = wait_status(&n, |s| s["tip"] == hex(&b[40].header.id())).await;
+    assert_eq!(moved["height"], 61);
+    assert_eq!(moved["reorganization"]["replaced"], 40);
     n.stop().await;
 }
