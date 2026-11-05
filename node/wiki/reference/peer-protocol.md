@@ -320,9 +320,10 @@ shown by `ting peers`; nothing depends on it.
 - Frames of 1 byte to 16 MiB, a `hello` frame of at most 4 KiB, and every field
   within its bound. A frame's buffer grows as its bytes arrive, so a length alone
   reserves nothing
-- On a connection it opened, a node reads at most 8 MiB and 8 KiB of frames ahead
-  of handling them, eight slices with their framing, or one frame if it is larger;
-  until it catches up, the rest waits in the peer's sending
+- On a connection it opened, a node holds at most 8 MiB and 8 KiB of frames ahead
+  of handling them, eight slices with their framing, or one frame if it is larger,
+  and one frame more, read whole, that waits for room among them: at most 32 MiB,
+  with frames of 16 MiB. Until it catches up, the rest waits in the peer's sending
 - Blocks and transactions larger than 1 MiB travel in slices of at most 1 MiB; a
   block of at most its height's data capacity and a transaction of at most the next
   block's, within its transfer time

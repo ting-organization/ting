@@ -84,13 +84,14 @@ const PROBE_INTERVAL: u64 = 120;
 /// connected until it moves.
 const STALE_TIP: u64 = 600;
 
-/// The most bytes of frames a connection reads ahead of handling them
+/// The most bytes of frames a connection holds ahead of handling them
 /// (wiki: reference/peer-protocol#limits): what its eight places for frames
 /// hold of the largest answers a syncing node asks for, a slice and its
 /// framing each, as before. A frame larger than the room left, such as a
-/// launch-era node's `pending` answer of up to 8 MiB, waits until the frames
-/// before it are handled, so a peer sending frames of 16 MiB has one waiting
-/// at a time, not eight.
+/// launch-era node's `pending` answer of up to 8 MiB, is read whole and waits
+/// until the frames before it are handled, so a peer sending frames of 16 MiB
+/// has one held and one waiting at a time, not eight: a connection reads at
+/// most this room, or one larger frame, and one frame more ahead.
 const QUEUED_MAX: usize = 8 * (SLICE_MAX + 1024);
 /// A frame read and not yet handled, with its share of `QUEUED_MAX`.
 type Queued = (Result<wire::Frame>, OwnedSemaphorePermit);
