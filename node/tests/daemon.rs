@@ -804,6 +804,33 @@ async fn daemon_cli_rest_wiki_sync_and_restart_work_together() {
         assert!((400..500).contains(&status), "{status} {body}");
         assert!(serde_json::from_str::<Value>(&body).unwrap()["error"].is_string());
     }
+    // A whole batch with proofs is read, compact or pretty-printed. A body
+    // larger than any batch needs, 256 bytes a record and 4 KiB, is refused
+    // before it is parsed, whatever it names.
+    let json_body = [("Content-Type", "application/json")];
+    let whole = json!({"reads":vec![read([0; 32]); 1_024],"proof":true});
+    for body in [
+        whole.to_string(),
+        serde_json::to_string_pretty(&whole).unwrap(),
+    ] {
+        let (status, _, answer) = http_full(api, "POST", "/v1/storage", &json_body, &body).await;
+        assert_eq!(status, 200, "{answer}");
+        let answer: Value = serde_json::from_str(&answer).unwrap();
+        assert_eq!(answer["values"].as_array().unwrap().len(), 1_024);
+    }
+    let over = 1_024 * 256 + 4096 + 1;
+    let mut empty = r#"{"reads":["#.to_owned();
+    while empty.len() + 40 < over {
+        empty.push_str(r#"{"contract":"","key":""},"#);
+    }
+    empty.pop();
+    empty.push_str("]}");
+    for body in [whole.to_string(), empty] {
+        let body = " ".repeat(over - body.len()) + &body;
+        let (status, _, answer) = http_full(api, "POST", "/v1/storage", &json_body, &body).await;
+        assert_eq!(status, 413, "{answer}");
+        assert!(!error_of(&answer).is_empty());
+    }
     // The raw block comes whole, or in slices that add up to it.
     let (status, whole) = http(api, "GET", "/v1/blocks/4/raw", None, None).await;
     assert_eq!(status, 200);
