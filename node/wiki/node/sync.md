@@ -210,7 +210,9 @@ branch costs nothing to execute until it is the heaviest.
 
 A block pushed by a peer, or offered to the API, is taken on the same terms: its
 header must be within a day's work of the tip, or already indexed. A block from
-further behind is answered with `branch too far behind the tip`.
+further behind is answered with `branch too far behind the tip`. A pushed block's
+header joins the header tree only with its body, once the body matches it, so one
+whose body fails leaves no header behind for the node to download toward.
 
 A peer pushes a block larger than one slice in slices, one item at a time on a
 connection. The slice at offset 0 holds the header, which is checked first: a block

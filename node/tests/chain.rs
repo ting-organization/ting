@@ -594,6 +594,54 @@ fn rejects_invalid_bodies_unknown_parents_and_header_work() {
     assert!(dir.0.join("chain.redb").exists());
 }
 #[test]
+fn a_pushed_block_whose_body_fails_leaves_no_header_behind() {
+    // Blocks above the tip pushed with no body that matches their headers,
+    // as by a peer that never means to deliver them: each is invalid data,
+    // and none leaves its header indexed, so the best header stays where
+    // the node's blocks are and nothing waits for a block nobody has.
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let r = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut h = vec![];
+    for _ in 0..3 {
+        let b = mine(&r, &g, &mut h, vec![], "A");
+        chain.import(&b.encode(), true).unwrap();
+    }
+    let b4 = mine(&r, &g, &mut h, vec![support::tx()], "A");
+    let b5 = mine(&r, &g, &mut h, vec![], "A");
+    let mut receipt = b4.clone();
+    receipt.receipts[0].result[0] ^= 1;
+    let mut producer = b4.clone();
+    producer.producer = b"B".to_vec();
+    let mut trailing = b4.encode();
+    trailing.push(0);
+    for bytes in [
+        b4.header.encode(),
+        receipt.encode(),
+        producer.encode(),
+        trailing,
+    ] {
+        let error = chain.import(&bytes, true).unwrap_err();
+        assert!(ting_node::chain::is_invalid(&error), "{error}");
+        assert_eq!(chain.event().best, 3, "{error}");
+    }
+    // The next block's header finds no parent.
+    assert_eq!(
+        chain.import(&b5.header.encode(), true).unwrap_err(),
+        "unknown parent"
+    );
+    assert_eq!(chain.event().best, 3);
+    // The blocks themselves are taken whole as before.
+    chain.import(&b4.encode(), true).unwrap();
+    let error = chain.import(&b5.header.encode(), true).unwrap_err();
+    assert!(ting_node::chain::is_invalid(&error), "{error}");
+    assert_eq!((chain.event().height, chain.event().best), (4, 4));
+    chain.import(&b5.encode(), true).unwrap();
+    assert_eq!((chain.event().height, chain.event().best), (5, 5));
+}
+#[test]
 fn truncated_tail_repairs_and_indexed_block_corruption_is_rejected_on_read() {
     let dir = Directory::new();
     dir.config(false, "test");
