@@ -104,7 +104,7 @@ Errors are JSON with an `error` string:
 |---|---|
 | `400` | A malformed request: a bad identifier, page or transaction |
 | `404` | No such block, transaction, contract or endpoint |
-| `413` | A submission's body over twice the data capacity of the next block and 4 KiB more, the most a transaction in hex can need; any other body over 16 MiB |
+| `413` | A submission's body over twice the data capacity of the next block and 4 KiB more, the most a transaction in hex can need; a batch storage read's body over 260 KiB, room for 1,024 records; any other body over 16 MiB |
 | `415`, `422` | A submission that is not JSON, or JSON of the wrong shape |
 | `503` | The node cannot serve the request now: REST's share of its request queue or its HTTP slots (32 per processor core) are full, its pool or deferred set is full, or it has stopped |
 | `504` | The request took more than 35 seconds (a submission, ten more for every MiB its body may have), or the node's own 30-second request deadline passed |

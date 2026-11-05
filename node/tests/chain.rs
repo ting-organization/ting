@@ -594,6 +594,54 @@ fn rejects_invalid_bodies_unknown_parents_and_header_work() {
     assert!(dir.0.join("chain.redb").exists());
 }
 #[test]
+fn a_pushed_block_whose_body_fails_leaves_no_header_behind() {
+    // Blocks above the tip pushed with no body that matches their headers,
+    // as by a peer that never means to deliver them: each is invalid data,
+    // and none leaves its header indexed, so the best header stays where
+    // the node's blocks are and nothing waits for a block nobody has.
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let r = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut h = vec![];
+    for _ in 0..3 {
+        let b = mine(&r, &g, &mut h, vec![], "A");
+        chain.import(&b.encode(), true).unwrap();
+    }
+    let b4 = mine(&r, &g, &mut h, vec![support::tx()], "A");
+    let b5 = mine(&r, &g, &mut h, vec![], "A");
+    let mut receipt = b4.clone();
+    receipt.receipts[0].result[0] ^= 1;
+    let mut producer = b4.clone();
+    producer.producer = b"B".to_vec();
+    let mut trailing = b4.encode();
+    trailing.push(0);
+    for bytes in [
+        b4.header.encode(),
+        receipt.encode(),
+        producer.encode(),
+        trailing,
+    ] {
+        let error = chain.import(&bytes, true).unwrap_err();
+        assert!(ting_node::chain::is_invalid(&error), "{error}");
+        assert_eq!(chain.event().best, 3, "{error}");
+    }
+    // The next block's header finds no parent.
+    assert_eq!(
+        chain.import(&b5.header.encode(), true).unwrap_err(),
+        "unknown parent"
+    );
+    assert_eq!(chain.event().best, 3);
+    // The blocks themselves are taken whole as before.
+    chain.import(&b4.encode(), true).unwrap();
+    let error = chain.import(&b5.header.encode(), true).unwrap_err();
+    assert!(ting_node::chain::is_invalid(&error), "{error}");
+    assert_eq!((chain.event().height, chain.event().best), (4, 4));
+    chain.import(&b5.encode(), true).unwrap();
+    assert_eq!((chain.event().height, chain.event().best), (5, 5));
+}
+#[test]
 fn truncated_tail_repairs_and_indexed_block_corruption_is_rejected_on_read() {
     let dir = Directory::new();
     dir.config(false, "test");
@@ -2489,6 +2537,73 @@ fn a_branch_below_the_undo_window_is_reached_by_replaying_from_genesis() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_eq!(chain.height(), 11);
+}
+#[test]
+fn the_pruned_height_holds_when_the_tip_falls_below_where_it_was() {
+    // An undo window of three: eight blocks, every other one changing state,
+    // leave no undo data at heights 1 to 5.
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut c = config::Config::load(&dir.0).unwrap();
+    c.undo_window = 3;
+    c.save(&dir.0).unwrap();
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = vec![];
+    let a: Vec<Block> = (0..8u8)
+        .map(|i| {
+            let txs = if i % 2 == 0 {
+                vec![variant(vec![i])]
+            } else {
+                vec![]
+            };
+            mine(&runtime, &g, &mut history, txs, "A")
+        })
+        .collect();
+    for block in &a {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let pruned =
+        |chain: &mut Chain| chain.request("status", json!({})).unwrap()["undo_pruned"].clone();
+    assert_eq!(pruned(&mut chain), 5);
+    let fork = |at: usize, n: usize, producer: &str| -> Vec<Block> {
+        let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+        let mut history = vec![];
+        for block in &a[..at] {
+            runtime
+                .validate_and_apply_block(&g, &history, block)
+                .unwrap();
+            history.push(block.header.clone());
+        }
+        (0..n)
+            .map(|_| mine(&runtime, &g, &mut history, vec![], producer))
+            .collect()
+    };
+    // The tip falls to height 6, as in the middle of a reorganization or
+    // after the operator's mark, and a block connects at 7: the window now
+    // ends at 4, but height 5 has no undo data any more, and the pruned
+    // height says so still.
+    chain
+        .request("invalidate", json!({"id":hex(&a[6].header.id())}))
+        .unwrap();
+    assert_eq!(chain.height(), 6);
+    chain.import(&fork(6, 1, "C")[0].encode(), true).unwrap();
+    assert_eq!(chain.height(), 7);
+    assert_eq!(pruned(&mut chain), 5);
+    // So a heavier branch forking at height 4 is reached by the replay
+    // rather than by undoing height 5 with data it no longer has.
+    let b = fork(4, 4, "B");
+    for block in &b {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while chain.tip() != b[3].header.id() {
+        assert!(std::time::Instant::now() < deadline, "no reorganization");
+        chain.resume_activation();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(chain.height(), 8);
 }
 #[test]
 fn settled_blocks_leave_memory_and_branches_below_them_are_still_followed() {

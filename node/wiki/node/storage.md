@@ -221,13 +221,15 @@ waits for confirmations may want to look.
 
 ## Deep reorganizations
 
-A branch that forks below the window needs undo data the node no longer has. The
-node then stays on its tip and, in the background, replays its canonical blocks
-from genesis into a temporary database next to its own, from block files alone,
-checking every state root on the way. It keeps the undo data of each block between
-the fork and the window as the replay passes it, copies it into its database a step
-at a time, and carries out the reorganization as any other. There is no depth limit:
-the deeper the fork, the longer the replay, never a refusal. A restart during the
+A branch that forks below the window needs undo data the node no longer has, and so
+does one that forks below where the node pruned it while its tip stood higher, as
+before a reorganization: undo data once pruned stays pruned. The node then stays on
+its tip and, in the background, replays its canonical blocks from genesis into a
+temporary database next to its own, from block files alone, checking every state
+root on the way. It keeps the undo data of each block between the fork and the
+window as the replay passes it, copies it into its database a step at a time, and
+carries out the reorganization as any other. There is no depth limit: the deeper the
+fork, the longer the replay, never a refusal. A restart during the
 replay starts it again.
 
 The temporary database holds a second copy of the state until the replay ends, so a
