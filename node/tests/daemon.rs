@@ -2821,6 +2821,36 @@ async fn a_hello_alone_does_not_prove_a_peer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peers_error_text_cannot_write_a_line_of_the_log() {
+    // A peer answers with an error whose text holds a line break, a line
+    // the node might have written, and an escape code that clears a
+    // terminal. The node's log shows the text on the line that tells of the
+    // disconnection, with each control character escaped.
+    let n = Node::start(false, "forged");
+    let chain_id = chain_id_of(&n).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake = listener.local_addr().unwrap();
+    let forged = "2026-10-21T00:00:00Z connected to 203.0.113.9:18442: ting-node/0.1.0";
+    let error = format!("bad\n{forged}\u{1b}[2J");
+    fake_peer(listener, move |request, _| match request {
+        wire::Request::Hello(_) | wire::Request::State => {
+            Ok(wire::Answer::State(fake_state(chain_id, [7; 32], 0xe1)))
+        }
+        wire::Request::Addresses => Ok(wire::Answer::Addresses(vec![])),
+        _ => Err(error.clone()),
+    });
+    command(&n.dir.0, &["add", "node", &fake.to_string()]);
+    let shown = format!("disconnected from {fake}: bad\\n{forged}\\u{{1b}}[2J");
+    wait_log(&n.dir.0, &shown).await;
+    let log = std::fs::read_to_string(n.dir.0.join("node.log")).unwrap();
+    assert!(
+        !log.lines().any(|line| line.starts_with(forged)) && !log.contains('\u{1b}'),
+        "{log}"
+    );
+    n.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commands_print_text_or_with_json_their_result() {
     // A person reads each result as text; `--json` prints the result itself.
     let n = Node::start(true, "texts");
