@@ -1,7 +1,7 @@
 //! The node's messages (wiki: start/node#what-the-node-writes): one line
 //! each on standard error, after the UTC time it was written, so that
 //! `node.log` tells when each thing happened.
-use std::fmt;
+use std::{fmt, io::Write};
 
 /// `seconds` since the Unix epoch as a UTC time, `2026-10-21T00:00:00Z`.
 pub fn utc(seconds: u64) -> String {
@@ -62,7 +62,26 @@ pub fn count(n: u64) -> String {
 
 /// Writes one message, after the time.
 pub fn line(message: fmt::Arguments) {
-    eprintln!("{} {message}", utc(crate::now()));
+    write_line(&mut std::io::stderr().lock(), crate::now(), message);
+}
+
+/// Writes one message to `out`, after the time `now`. A control character in
+/// it is escaped, as `\n` or `\u{1b}`, so that text a peer sent can neither
+/// begin a line of its own nor reach a terminal as an escape code. A write
+/// that fails, as on a full disk, is passed over: the node goes on without
+/// its log rather than stop wherever it writes one.
+fn write_line(out: &mut impl Write, now: u64, message: fmt::Arguments) {
+    let mut line = utc(now);
+    line.push(' ');
+    for c in message.to_string().chars() {
+        if c.is_control() {
+            line.extend(c.escape_default());
+        } else {
+            line.push(c);
+        }
+    }
+    line.push('\n');
+    let _ = out.write_all(line.as_bytes());
 }
 
 /// Writes one message of the node, formatted as by `format!`.
@@ -75,7 +94,43 @@ macro_rules! log {
 
 #[cfg(test)]
 mod tests {
-    use super::{count, duration, utc};
+    use super::{count, duration, utc, write_line};
+
+    #[test]
+    fn a_line_holds_no_control_character_and_a_failed_write_is_passed_over() {
+        // A peer's error text that would begin a line of its own, and clear
+        // the terminal of whoever reads the log.
+        let error = "bad\r\n2026-10-21T00:00:00Z connected to 1.2.3.4:18442\u{1b}[2J\u{85}";
+        let mut out = Vec::new();
+        write_line(&mut out, 0, format_args!("disconnected from peer: {error}"));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "1970-01-01T00:00:00Z disconnected from peer: bad\\r\\n2026-10-21T00:00:00Z \
+             connected to 1.2.3.4:18442\\u{1b}[2J\\u{85}\n"
+        );
+        // Text without control characters is written as it is.
+        let mut out = Vec::new();
+        write_line(
+            &mut out,
+            0,
+            format_args!("caught up at height {}, \"é\"", 5),
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "1970-01-01T00:00:00Z caught up at height 5, \"é\"\n"
+        );
+        // A full disk.
+        struct Full;
+        impl std::io::Write for Full {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("no space left on device"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other("no space left on device"))
+            }
+        }
+        write_line(&mut Full, 0, format_args!("block 1"));
+    }
 
     #[test]
     fn spans_and_counts_read_as_people_write_them() {

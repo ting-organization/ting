@@ -134,7 +134,10 @@ stopped; the CLI then edits `config.json` itself. Details are on
 `ting run` writes the node's log to the terminal, and a node started with
 `ting start` appends it to `node.log` in the data directory, where
 `tail -f ~/.ting/node.log` follows it. Each line begins with the time in UTC. A
-new node on the production network writes, for example:
+control character in a message, such as one in the error text a peer sent, is
+written escaped, as `\n` or `\u{1b}`, so no peer can begin a line of the log or send
+your terminal an escape code. A log that cannot be written, as on a full disk, does
+not stop the node. A new node on the production network writes, for example:
 
 ```text
 2026-10-25T13:10:12Z Ting ready: control=127.0.0.1:18440 peers=0.0.0.0:18442 REST=disabled

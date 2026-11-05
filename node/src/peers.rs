@@ -248,6 +248,11 @@ struct Link {
     succeeded: Option<u64>,
     connected: u64,
     delivered: Option<u64>,
+    /// Whether the peer claimed more than it holds since it last delivered a
+    /// block: at a tip as high as the best header, it lacked a block it was
+    /// asked for, or it could not show the headers to the tip it announced.
+    /// Such a peer cannot serve this node (wiki: node/sync#finding-more-peers).
+    lacking: bool,
 }
 /// A block on its way from a peer: the bytes so far, its most bytes, when it
 /// was asked for and by when it must be complete.
@@ -346,10 +351,11 @@ impl Link {
     async fn headers(&mut self) -> Result<bool> {
         let handle = self.node.handle.clone();
         for _ in 0..PAGES {
-            let locator = match self.next {
-                Some(next) => vec![next],
-                None => state(&self.node).await?.locator,
+            let (locator, own) = match self.next {
+                Some(next) => (vec![next], false),
+                None => (state(&self.node).await?.locator, true),
             };
+            let unlisted = own && !locator.contains(&self.tip);
             let page = match self.conn.request(Request::Headers { locator }).await {
                 Ok(Answer::Headers(page)) => page,
                 Ok(_) => return Err(unexpected("headers")),
@@ -363,6 +369,14 @@ impl Link {
             };
             if page.is_empty() {
                 self.next = None;
+                // Nothing past this node's own locator: the peer's tip is
+                // one of its entries, so an announced tip that is none of
+                // them, and that this node does not hold, is one the peer
+                // cannot show.
+                if unlisted {
+                    self.check_tip().await?;
+                    self.lacking |= self.checked.is_none();
+                }
                 return Ok(false);
             }
             let full = page.len() == HEADERS_PAGE;
@@ -421,6 +435,10 @@ impl Link {
             // this one again once it announces a new tip.
             Ok(Some(Stop::Missing)) => {
                 self.fetch = false;
+                // The blocks asked for lead to the best header: a peer whose
+                // tip is as high claimed more than it holds.
+                let best = handle.events().borrow().best;
+                self.lacking |= self.checked.is_some_and(|(_, height)| height >= best);
                 handle.call("release", json!({"peer":self.peer})).await?;
                 Ok(())
             }
@@ -600,6 +618,7 @@ impl Link {
                 Ok(imported) => {
                     if imported["known"] == false {
                         self.delivered = Some(crate::now());
+                        self.lacking = false;
                         // A first download can take a round of hours: the
                         // peer shows as delivering all along.
                         self.report();
@@ -1030,7 +1049,7 @@ impl Link {
         let status = json!({"address":self.address,"source":self.source,"agent":self.agent,
             "connected":self.connected,"last_success":self.succeeded,"height":self.height,
             "checked_height":self.checked.map(|(_, height)| height),
-            "last_block":self.delivered,"error":null});
+            "last_block":self.delivered,"lacking":self.lacking,"error":null});
         self.node
             .peers
             .lock()
@@ -1076,6 +1095,7 @@ async fn follow(
         succeeded: None,
         connected: crate::now(),
         delivered: None,
+        lacking: false,
     };
     link.publish();
     crate::log!(
@@ -1178,48 +1198,86 @@ async fn ended(node: &Node, address: SocketAddr, source: &str, result: Result<()
 }
 
 type Ended = (SocketAddr, Result<()>);
+type Links = BTreeMap<SocketAddr, (AbortHandle, &'static str)>;
+
+/// The links of `links` whose tasks have finished, taken out, each with its
+/// source and how it ended. A task that panicked ends as a connection that
+/// failed: its peer no longer shows as connected, and is connected again as
+/// any is after a failure. A link that was aborted was taken out then.
+fn finished(
+    tasks: &mut JoinSet<Ended>,
+    links: &mut Links,
+) -> Vec<(SocketAddr, &'static str, Result<()>)> {
+    let mut done = Vec::new();
+    while let Some(joined) = tasks.try_join_next_with_id() {
+        let (address, result) = match joined {
+            Ok((_, ended)) => ended,
+            Err(error) => match links.iter().find(|(_, (link, _))| link.id() == error.id()) {
+                Some((address, _)) => (*address, Err(format!("connection task failed: {error}"))),
+                None => continue,
+            },
+        };
+        if let Some((_, source)) = links.remove(&address) {
+            done.push((address, source, result));
+        }
+    }
+    done
+}
 
 /// Whether the node does without the seeds (wiki:
 /// node/sync#finding-more-peers), having done so before if `left`, by its
-/// connections `linked` that `peers` shows connected and `best`, the height of
-/// its best header. What a peer claims of its own height counts for nothing:
-/// only the height of its tip once the node holds that header, whose work it
-/// has checked. The node leaves the seeds once it holds a seed's tip, holds
-/// headers past genesis, and holds the tips of at least half of `max_peers`
-/// others, configured or discovered, at least as high as its best header: a
-/// peer still behind cannot serve it yet. It goes back to them only once fewer
-/// than a quarter of `max_peers` others are connected, or none, so that a peer
-/// that drops for a while does not bring them back.
+/// connections `linked` that `peers` shows connected, its tip and best header
+/// in `local`, and whether its tip is `stale`. What a peer claims of its own
+/// height counts for nothing: only the height of its tip once the node holds
+/// that header, whose work it has checked, and only while the peer has not
+/// been caught lacking what it claims. The node leaves the seeds once its own
+/// tip is within a block of its best header, as a node that is not still
+/// downloading is, it holds a seed's tip, and at least half of `max_peers`
+/// others, configured or discovered, are not lacking and at tips at least as
+/// high as its best header: a peer still behind cannot serve it yet. It goes
+/// back to them once fewer than a quarter of `max_peers` others that are not
+/// lacking are connected, or none, so that a peer that drops for a while does
+/// not bring them back; and while its tip is stale, since the peers it has
+/// may not relay blocks.
 fn without_seeds(
     left: bool,
     linked: impl IntoIterator<Item = SocketAddr>,
     book: &AddressBook,
     peers: &BTreeMap<String, Value>,
     max_peers: u32,
-    best: u64,
+    local: &Event,
+    stale: bool,
 ) -> bool {
-    // Each connected link: whether to a seed, and its peer's checked height.
-    let connected: Vec<(bool, Option<u64>)> = linked
-        .into_iter()
-        .filter_map(|a| {
-            let status = peers.get(&a.to_string())?;
-            status["connected"]
-                .is_u64()
-                .then(|| (book.is_seed(&a), status["checked_height"].as_u64()))
-        })
-        .collect();
-    let others = connected.iter().filter(|(seed, _)| !seed).count();
-    if left {
-        return others >= (max_peers as usize / 4).max(1);
+    if stale {
+        return false;
     }
-    let seeded = connected
+    // Each connected link that is not a seed's and not lacking, by its
+    // peer's checked height; and whether one to a seed has its checked.
+    let mut serving = Vec::new();
+    let mut seeded = false;
+    for a in linked {
+        let Some(status) = peers.get(&a.to_string()) else {
+            continue;
+        };
+        if !status["connected"].is_u64() {
+            continue;
+        }
+        let checked = status["checked_height"].as_u64();
+        if book.is_seed(&a) {
+            seeded |= checked.is_some();
+        } else if status["lacking"] == false {
+            serving.push(checked);
+        }
+    }
+    if left {
+        return serving.len() >= (max_peers as usize / 4).max(1);
+    }
+    let caught_up = serving
         .iter()
-        .any(|(seed, checked)| *seed && checked.is_some());
-    let caught_up = connected
-        .iter()
-        .filter(|(seed, checked)| !seed && checked.is_some_and(|height| height >= best))
+        .filter(|checked| checked.is_some_and(|height| height >= local.best))
         .count();
-    best > 0 && seeded && caught_up >= (max_peers as usize).div_ceil(2)
+    let synced = local.best > 0 && local.best <= local.height.saturating_add(1);
+    synced && seeded && caught_up >= (max_peers as usize).div_ceil(2)
 }
 
 /// The discovered peers of the links `(address, source)` that take one of the
@@ -1248,8 +1306,10 @@ pub async fn run(node: Node) {
     // Addresses that reached this node itself, configured ones included: not
     // connected again in this run.
     let mut itself: BTreeSet<SocketAddr> = BTreeSet::new();
-    // Whether the node has left the seeds.
+    // Whether the node has left the seeds, and whether it came back to them
+    // since it last did.
     let mut left_seeds = false;
+    let mut recalled = false;
     loop {
         // A busy or slow chain thread is waited out, never a reason to stop
         // keeping the connections.
@@ -1275,15 +1335,11 @@ pub async fn run(node: Node) {
             .collect();
         let now = crate::now();
         node.book.lock().unwrap().configure(&config.peers);
-        while let Some(done) = tasks.try_join_next() {
-            if let Ok((address, result)) = done
-                && let Some((_, source)) = links.remove(&address)
-            {
-                if matches!(&result, Err(e) if e == ITSELF) {
-                    itself.insert(address);
-                }
-                ended(&node, address, source, result).await;
+        for (address, source, result) in finished(&mut tasks, &mut links) {
+            if matches!(&result, Err(e) if e == ITSELF) {
+                itself.insert(address);
             }
+            ended(&node, address, source, result).await;
         }
         while let Some(done) = probes.try_join_next() {
             if let Ok((address, result)) = done {
@@ -1345,13 +1401,23 @@ pub async fn run(node: Node) {
         // seeds take none of the `max_peers` slots, and end once the node
         // holds enough other peers that can serve it, so that the seeds keep
         // room for nodes that are new.
-        let best = events.borrow().best;
+        let local = events.borrow().clone();
         let (seeds, discovered) = {
             let book = node.book.lock().unwrap();
             let peers = node.peers.lock().unwrap();
             let gone = |a: &SocketAddr| ending.iter().any(|(e, _)| e == a);
             let linked = links.keys().copied().filter(|a| !gone(a));
-            left_seeds = without_seeds(left_seeds, linked, &book, &peers, config.max_peers, best);
+            let was = left_seeds;
+            left_seeds = without_seeds(
+                left_seeds,
+                linked,
+                &book,
+                &peers,
+                config.max_peers,
+                &local,
+                stale,
+            );
+            recalled = !left_seeds && (recalled || was);
             let seeds: Vec<(SocketAddr, &str)> = links
                 .keys()
                 .copied()
@@ -1419,6 +1485,17 @@ pub async fn run(node: Node) {
                         start.push((address, "discovered"));
                     }
                 }
+                // Back from its other peers, or with a stale tip, the node
+                // connects the seeds at once, however many others it has:
+                // they are its way back to the network.
+                if !left_seeds && (recalled || stale) {
+                    for seed in book.seeds() {
+                        let picked = start.iter().any(|(a, _)| *a == seed);
+                        if !picked && !busy.contains(&seed) && book.due(&seed, now) {
+                            start.push((seed, "discovered"));
+                        }
+                    }
+                }
                 if missing == 0
                     && probes.is_empty()
                     && now >= last_probe + PROBE_INTERVAL
@@ -1481,57 +1558,59 @@ mod tests {
         for i in 4..=8 {
             book.learn(a(i), Source::Peer);
         }
-        // Connected peers, each with the height it claims and the height of
-        // its tip if the node holds that header.
+        // Connected peers, each with the height it claims, the height of its
+        // tip if the node holds that header, and whether it was caught
+        // lacking what it claims.
+        let status = |claimed: u64, checked: Option<u64>, lacking: bool| -> Value {
+            json!({"connected":1,"height":claimed,"checked_height":checked,"lacking":lacking})
+        };
         let connected = |peers: &[(u8, u64, Option<u64>)]| -> BTreeMap<String, Value> {
             peers
                 .iter()
-                .map(|(i, claimed, checked)| {
-                    let status = json!({"connected":1,"height":claimed,"checked_height":checked});
-                    (a(*i).to_string(), status)
-                })
+                .map(|(i, claimed, checked)| (a(*i).to_string(), status(*claimed, *checked, false)))
                 .collect()
         };
         let held = |peers: &[u8], height: u64| {
             let peers: Vec<_> = peers.iter().map(|i| (*i, height, Some(height))).collect();
             connected(&peers)
         };
+        let lacking = |peers: &[u8], height: u64| -> BTreeMap<String, Value> {
+            peers
+                .iter()
+                .map(|i| (a(*i).to_string(), status(height, Some(height), true)))
+                .collect()
+        };
+        // The node's tip and best header, both at `height`.
+        let at = |height: u64| Event {
+            height,
+            best: height,
+            ..Default::default()
+        };
         let linked: Vec<SocketAddr> = (1..=7).map(a).collect();
+        let leaves = |left: bool, peers: &BTreeMap<String, Value>, local: &Event| {
+            without_seeds(left, linked.clone(), &book, peers, 8, local, false)
+        };
         // The seeds and two others, a configured one among them, at the
         // node's best header, 500; two more still at genesis, and one still
         // connecting: the seeds stay.
         let mut peers = held(&[1, 2, 3, 4], 500);
         peers.extend(held(&[5, 6], 0));
-        assert!(!without_seeds(false, linked.clone(), &book, &peers, 8, 500));
+        assert!(!leaves(false, &peers, &at(500)));
         // Once two more catch up, half of eight can serve the node.
         peers.extend(held(&[5, 6], 500));
-        assert!(without_seeds(false, linked.clone(), &book, &peers, 8, 500));
+        assert!(leaves(false, &peers, &at(500)));
         // A peer that failed is not connected, whatever its status says.
         let mut failed = peers.clone();
         failed.insert(
             a(6).to_string(),
-            json!({"connected":null,"checked_height":500}),
+            json!({"connected":null,"checked_height":500,"lacking":false}),
         );
-        assert!(!without_seeds(
-            false,
-            linked.clone(),
-            &book,
-            &failed,
-            8,
-            500
-        ));
+        assert!(!leaves(false, &failed, &at(500)));
         // One that claims a height far beyond, with a tip the node does not
         // hold, does not raise the bar for the others.
         let mut boasting = peers.clone();
         boasting.extend(connected(&[(7, 1_000_000_000, None)]));
-        assert!(without_seeds(
-            false,
-            linked.clone(),
-            &book,
-            &boasting,
-            8,
-            500
-        ));
+        assert!(leaves(false, &boasting, &at(500)));
         // Nor do four that claim the node's height with tips it does not hold
         // count as serving it.
         let mut claiming = held(&[1, 2], 500);
@@ -1541,52 +1620,87 @@ mod tests {
             (5, 500, None),
             (6, 500, None),
         ]));
+        assert!(!leaves(false, &claiming, &at(500)));
+        // Nor four at the node's best header that were caught lacking a
+        // block on the way to it, or the headers to their tips.
+        let mut caught = held(&[1, 2], 500);
+        caught.extend(lacking(&[3, 4, 5, 6], 500));
+        assert!(!leaves(false, &caught, &at(500)));
+        // However many peers are at its best header, a node still
+        // downloading toward it keeps the seeds: here a new node that holds
+        // the seed's 325 blocks and the production chain's headers to 20,829.
+        let downloading = Event {
+            height: 325,
+            best: 20_829,
+            ..Default::default()
+        };
+        let mut far = held(&[1, 2], 20_829);
+        far.extend(held(&[3, 4, 5, 6], 20_829));
+        assert!(!leaves(false, &far, &downloading));
+        // One block behind, as while the newest block downloads, it is
+        // caught up; two behind, it is not.
+        let behind = |by: u64| Event {
+            height: 20_829 - by,
+            best: 20_829,
+            ..Default::default()
+        };
+        assert!(leaves(false, &far, &behind(1)));
+        assert!(!leaves(false, &far, &behind(2)));
+        // Nor does a node whose tip is stale leave them, nor one whose tip
+        // has gone stale since stay away.
         assert!(!without_seeds(
             false,
             linked.clone(),
             &book,
-            &claiming,
+            &peers,
             8,
-            500
+            &at(500),
+            true
+        ));
+        assert!(leaves(true, &peers, &at(500)));
+        assert!(!without_seeds(
+            true,
+            linked.clone(),
+            &book,
+            &peers,
+            8,
+            &at(500),
+            true
         ));
         // Peers as high as the node's best header, before it holds a seed's
         // tip, do not keep it from the seeds: they may all be behind, as a
         // cluster on its own is until the seed's headers come.
         let mut cluster = held(&[3, 4, 5, 6], 10);
         cluster.extend(connected(&[(1, 500, None)]));
-        assert!(!without_seeds(
-            false,
-            linked.clone(),
-            &book,
-            &cluster,
-            8,
-            10
-        ));
+        assert!(!leaves(false, &cluster, &at(10)));
         cluster.extend(held(&[1], 500));
-        assert!(!without_seeds(
-            false,
-            linked.clone(),
-            &book,
-            &cluster,
-            8,
-            500
-        ));
+        assert!(!leaves(false, &cluster, &at(500)));
         // Nor does a node that holds no header past genesis leave them.
         let genesis = held(&[1, 3, 4, 5, 6], 0);
-        assert!(!without_seeds(false, linked.clone(), &book, &genesis, 8, 0));
+        assert!(!leaves(false, &genesis, &at(0)));
         // Gone, a node comes back to the seeds only once fewer than a quarter
-        // of its peers are connected, and with fewer than four, none.
+        // of its peers are connected and not lacking, and with fewer than
+        // four, none.
         let mut few = held(&[3], 500);
         few.extend(connected(&[(4, 0, None)]));
-        assert!(without_seeds(true, linked.clone(), &book, &few, 8, 500));
+        assert!(leaves(true, &few, &at(500)));
         let mut one = held(&[1], 500);
         one.extend(connected(&[(4, 0, None)]));
-        assert!(!without_seeds(true, linked.clone(), &book, &one, 8, 500));
-        assert!(without_seeds(true, linked.clone(), &book, &one, 3, 500));
-        assert!(!without_seeds(true, seeds, &book, &peers, 3, 500));
+        assert!(!leaves(true, &one, &at(500)));
+        let mut found_out = held(&[1], 500);
+        found_out.extend(lacking(&[3, 4], 500));
+        assert!(!leaves(true, &found_out, &at(500)));
+        let three = |left, peers: &BTreeMap<String, Value>, linked: &[SocketAddr]| {
+            without_seeds(left, linked.to_vec(), &book, peers, 3, &at(500), false)
+        };
+        assert!(three(true, &one, &linked));
+        assert!(!three(true, &peers, &seeds));
         // A node that reaches only the seeds keeps them, however few it wants.
-        assert!(!without_seeds(false, seeds, &book, &peers, 1, 500));
-        assert!(without_seeds(false, [a(1), a(4)], &book, &peers, 1, 500));
+        let one_slot = |linked: &[SocketAddr]| {
+            without_seeds(false, linked.to_vec(), &book, &peers, 1, &at(500), false)
+        };
+        assert!(!one_slot(&seeds));
+        assert!(one_slot(&[a(1), a(4)]));
         // The seeds take none of its slots: of these links, only the
         // discovered peer that is not a seed takes one.
         let links = [
@@ -1596,5 +1710,38 @@ mod tests {
             (a(4), "discovered"),
         ];
         assert_eq!(slotted(links, &book), [a(4)]);
+    }
+
+    #[tokio::test]
+    async fn a_link_whose_task_panicked_ends_as_one_that_failed() {
+        let (a, b) = (
+            SocketAddr::from(([8, 1, 1, 1], 18442)),
+            SocketAddr::from(([8, 2, 1, 1], 18442)),
+        );
+        let mut tasks: JoinSet<Ended> = JoinSet::new();
+        let mut links: Links = BTreeMap::new();
+        links.insert(a, (tasks.spawn(async { panic!("a bug") }), "config"));
+        links.insert(b, (tasks.spawn(std::future::pending()), "discovered"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let done = loop {
+            let done = finished(&mut tasks, &mut links);
+            if !done.is_empty() || Instant::now() > deadline {
+                break done;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        // The panicked one is taken out as failed, so that it is connected
+        // again; the other goes on.
+        assert_eq!(done.len(), 1);
+        let (address, source, result) = &done[0];
+        assert_eq!((*address, *source), (a, "config"));
+        assert!(result.as_ref().is_err_and(|e| e.contains("panicked")));
+        assert_eq!(links.keys().copied().collect::<Vec<_>>(), [b]);
+        // One aborted, as a link that ends for a reason is, was taken out
+        // when it was, and is passed over.
+        links.remove(&b).unwrap().0.abort();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(finished(&mut tasks, &mut links).is_empty());
+        assert!(tasks.is_empty());
     }
 }

@@ -19,8 +19,8 @@ reference node does with it.
 The production network's seed nodes are `node1.ting-node.com:18442` and
 `node2.ting-node.com:18442`. A node learns of the others through the
 [`addresses`](#requests) request. A reference node asks for them first on every
-new connection, and leaves the seeds once it has enough other peers, so that the
-seeds keep room for new nodes
+new connection, and leaves the seeds once it has caught up and enough other peers
+can serve it, so that the seeds keep room for new nodes
 ([finding more peers](../node/sync.md#finding-more-peers)).
 
 ## A connection

@@ -162,8 +162,11 @@ difficulty, can be made cheaply, header by header. Presync lets a node check suc
 chain at the cost of the headers' checks alone, without its memory growing with the
 chain: what a presync keeps grows with the time since the fork, never with the
 number of headers, and the clock bounds the headers it accepts at six a second of
-that time. A real competing chain, however long, is indexed once it shows its work,
-so there is no depth limit and no checkpoint.
+that time. A page of headers is one chain, so it begins at most one presync: a header
+from far back that does not follow the one the page began ends the page, and a page
+that repeats such a header costs no more than one that holds it once. A real
+competing chain, however long, is indexed once it shows its work, so there is no
+depth limit and no checkpoint.
 
 A `headers` answer starts after the highest locator entry on the answering node's
 canonical branch, wherever that entry sits in the list, so two nodes on competing
@@ -334,13 +337,29 @@ and a new node, which knows no other address, could not join. A connection to a 
 takes none of the `max_peers` slots, so a node starts other peers beside the seeds
 however few slots it has. What a peer claims of its own height counts for nothing
 here: only the height of its tip once the node holds that header, whose work it has
-checked. Once the node holds a seed's tip and headers past genesis, and holds the
-tips of at least half of `max_peers` of its other connections, configured or
-discovered, at least as high as its best header, its connections to the seed nodes
-end: a peer still behind, as another new node is, cannot serve it yet. The node then
-picks a seed again only once fewer than a quarter of `max_peers` other peers are
-connected, or none, so that a peer that drops for a while does not bring the seeds
-back. A node that reaches only the seeds keeps them. A configured seed is a
+checked. Nor does a peer caught claiming more than it holds, until it delivers a
+block: one at a tip as high as the node's best header that lacks a block the node
+asks it for, all of which lead to that header, and one that announces a tip and,
+asked for the headers past the node's own, shows none, while the node holds no such
+tip. The node's connections to the seed nodes end once all of these hold:
+
+- its own tip is within one block of its best header, as while the newest block
+  downloads, the test by which the built-in miner waits too: a node further behind
+  is still downloading, and only the seeds may be serving it;
+- it holds a seed's tip;
+- at least half of `max_peers` of its other connections, configured or discovered,
+  are at tips at least as high as its best header and not caught lacking: a peer
+  still behind, as another new node is, cannot serve it yet;
+- its tip is not [stale](#a-stale-tip).
+
+A peer need not have delivered a block itself to count: a node that has caught up
+takes each new block from the first peer to tell it of the block, and the others only
+announce it. The node goes back to the seeds, and connects them at once however many
+other peers it has, when its tip goes stale or once fewer than a quarter of
+`max_peers` other peers that are not caught lacking are connected, or none. So a peer
+that drops for a while does not bring the seeds back, and peers that announce blocks
+they then do not serve keep the node from them for no longer than it takes to catch
+them. A node that reaches only the seeds keeps them. A configured seed is a
 configured peer like any other, and an address a peer shared is marked as a seed's
 when the seed's name resolves to it. A seed's address is never dropped from a full
 book.
@@ -371,11 +390,13 @@ completes rounds with it and has discovery on shares it like any other.
 
 ## A stale tip
 
-When the tip has not moved for ten minutes, the node may be cut off from the rest of
-the network by peers that do not relay blocks. It then connects one discovered peer
-more than it otherwise keeps, until the tip moves again; then the discovered peer
-whose last new block came longest ago is dropped. This follows Bitcoin; on a quiet
-network it costs one extra connection.
+When the tip has not moved for ten minutes, ten times the block spacing, the node may
+be cut off from the rest of the network by peers that do not relay blocks. It then
+connects one discovered peer more than it otherwise keeps, until the tip moves again;
+then the discovered peer whose last new block came longest ago is dropped. This
+follows Bitcoin. It also connects the seed nodes, whether it had left them or not,
+and keeps them until its tip moves and it can [leave them](#finding-more-peers) again.
+On a quiet network this costs one extra connection and the connections to the seeds.
 
 ## Limits
 
