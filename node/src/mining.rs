@@ -487,27 +487,38 @@ impl Miner {
 /// Whether the built-in miner waits for its node to catch up with its best
 /// header (wiki: node/mining#the-built-in-miner). Far behind it, the node's
 /// tip is about to be replaced, and a block on it with it: the miner waits
-/// while the node is more than one block behind and its tip moves, or while
-/// it rebuilds undo data to move it. A tip that stays put for a block's
-/// transfer time, the time a peer has to deliver a block before it is asked
-/// of another, has no download behind it, as when a peer showed headers
-/// whose blocks it never sends; the miner then mines on it. That time counts
-/// from the tip's last move, or from when the node fell behind.
+/// while the node is more than one block behind and its tip moves or it
+/// stores blocks, or while it rebuilds undo data to move it. A heavier
+/// branch that forks below the tip moves it only once enough of the branch
+/// is stored, so its download shows only in the blocks stored. A node that
+/// stores no block and whose tip stays put for a block's transfer time, the
+/// time a peer has to deliver a block before it is asked of another, has no
+/// download behind it, as when a peer showed headers whose blocks it never
+/// sends; the miner then mines on its tip. That time counts from the last
+/// block stored or move of the tip, or from when the node fell behind.
 struct CatchUp {
     tip: Hash,
+    stored: usize,
     since: Instant,
 }
 impl CatchUp {
-    fn new(tip: Hash, now: Instant) -> Self {
-        Self { tip, since: now }
+    fn new(event: &Event, now: Instant) -> Self {
+        Self {
+            tip: event.tip,
+            stored: event.stored,
+            since: now,
+        }
     }
     /// How far behind its best header the node is, if the miner waits.
     fn waits(&mut self, event: &Event, replaying: bool, now: Instant) -> Option<u64> {
         let behind = event.best.saturating_sub(event.height);
-        if behind <= 1 || event.tip != self.tip {
+        if behind <= 1 || event.tip != self.tip || event.stored > self.stored {
             self.tip = event.tip;
             self.since = now;
         }
+        // Forgetting an old side branch lowers the count without a block
+        // stored; the next one stored raises it again.
+        self.stored = event.stored;
         let moving =
             now.saturating_duration_since(self.since) < crate::chain::transfer_time(event.data);
         (behind > 1 && (moving || replaying)).then_some(behind)
@@ -525,7 +536,7 @@ fn run(
     let mut nonce_start: u128 = 0;
     let mut last_block = 0u64;
     let events = handle.events();
-    let mut catch_up = CatchUp::new(events.borrow().tip, Instant::now());
+    let mut catch_up = CatchUp::new(&events.borrow(), Instant::now());
     while !stop.load(Ordering::Relaxed) {
         if spacing > 0 && now() < last_block.saturating_add(spacing) {
             std::thread::sleep(Duration::from_millis(200));
@@ -663,7 +674,7 @@ mod tests {
             data: 262_144,
             ..Default::default()
         };
-        let mut catch_up = CatchUp::new(event(10, 10).tip, at(0));
+        let mut catch_up = CatchUp::new(&event(10, 10), at(0));
         assert_eq!(catch_up.waits(&event(10, 10), false, at(0)), None);
         // A header just ahead of its block is no reason to wait.
         assert_eq!(catch_up.waits(&event(10, 11), false, at(1)), None);
@@ -695,7 +706,7 @@ mod tests {
         );
         // Two headers above the tip whose blocks never come: the miner waits
         // a transfer time from when they came, then mines on its tip.
-        let mut catch_up = CatchUp::new(event(20, 20).tip, at(0));
+        let mut catch_up = CatchUp::new(&event(20, 20), at(0));
         assert_eq!(catch_up.waits(&event(20, 20), false, at(100)), None);
         assert_eq!(catch_up.waits(&event(20, 22), false, at(101)), Some(2));
         assert_eq!(catch_up.waits(&event(20, 22), false, at(169)), Some(2));
@@ -707,8 +718,42 @@ mod tests {
             data: 8 << 20,
             ..event(height, best)
         };
-        let mut catch_up = CatchUp::new(large(5, 5).tip, at(0));
+        let mut catch_up = CatchUp::new(&large(5, 5), at(0));
         assert_eq!(catch_up.waits(&large(5, 7), false, at(139)), Some(2));
         assert_eq!(catch_up.waits(&large(5, 7), false, at(140)), None);
+    }
+
+    #[test]
+    fn the_miner_waits_while_a_branch_below_the_tip_is_stored() {
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        // A heavier branch forks 300 blocks below the tip at height 1,000:
+        // the tip stays put until enough of it is stored to outweigh it.
+        let event = |stored: usize| Event {
+            tip: hash("tip", b"old"),
+            height: 1_000,
+            best: 1_002,
+            stored,
+            data: 262_144,
+            ..Default::default()
+        };
+        let mut catch_up = CatchUp::new(&event(1_000), at(0));
+        // One block of the branch stored a second for five minutes: the
+        // miner waits throughout, far longer than a transfer time.
+        for second in 1..300 {
+            assert_eq!(
+                catch_up.waits(&event(1_000 + second as usize), false, at(second)),
+                Some(2)
+            );
+        }
+        // Then none is stored: it waits a transfer time, then mines.
+        assert_eq!(catch_up.waits(&event(1_299), false, at(368)), Some(2));
+        assert_eq!(catch_up.waits(&event(1_299), false, at(369)), None);
+        // An old side branch forgotten is no block stored.
+        assert_eq!(catch_up.waits(&event(1_290), false, at(370)), None);
+        // The next block stored is.
+        assert_eq!(catch_up.waits(&event(1_291), false, at(371)), Some(2));
+        assert_eq!(catch_up.waits(&event(1_291), false, at(440)), Some(2));
+        assert_eq!(catch_up.waits(&event(1_291), false, at(441)), None);
     }
 }

@@ -24,7 +24,7 @@ use crate::{
 use num_bigint::BigUint;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque, btree_map},
     net::SocketAddr,
     sync::{
         Arc,
@@ -84,13 +84,14 @@ const PROBE_INTERVAL: u64 = 120;
 /// connected until it moves.
 const STALE_TIP: u64 = 600;
 
-/// The most bytes of frames a connection reads ahead of handling them
+/// The most bytes of frames a connection holds ahead of handling them
 /// (wiki: reference/peer-protocol#limits): what its eight places for frames
 /// hold of the largest answers a syncing node asks for, a slice and its
 /// framing each, as before. A frame larger than the room left, such as a
-/// launch-era node's `pending` answer of up to 8 MiB, waits until the frames
-/// before it are handled, so a peer sending frames of 16 MiB has one waiting
-/// at a time, not eight.
+/// launch-era node's `pending` answer of up to 8 MiB, is read whole and waits
+/// until the frames before it are handled, so a peer sending frames of 16 MiB
+/// has one held and one waiting at a time, not eight: a connection reads at
+/// most this room, or one larger frame, and one frame more ahead.
 const QUEUED_MAX: usize = 8 * (SLICE_MAX + 1024);
 /// A frame read and not yet handled, with its share of `QUEUED_MAX`.
 type Queued = (Result<wire::Frame>, OwnedSemaphorePermit);
@@ -1247,22 +1248,29 @@ type Links = BTreeMap<SocketAddr, (AbortHandle, &'static str)>;
 /// The links of `links` whose tasks have finished, taken out, each with its
 /// source and how it ended. A task that panicked ends as a connection that
 /// failed: its peer no longer shows as connected, and is connected again as
-/// any is after a failure. A link that was aborted was taken out then.
+/// any is after a failure. A link that was aborted was taken out then, even
+/// one whose task had already finished, and its address may have a new link
+/// since: its end is passed over.
 fn finished(
     tasks: &mut JoinSet<Ended>,
     links: &mut Links,
 ) -> Vec<(SocketAddr, &'static str, Result<()>)> {
     let mut done = Vec::new();
     while let Some(joined) = tasks.try_join_next_with_id() {
-        let (address, result) = match joined {
-            Ok((_, ended)) => ended,
+        let (id, (address, result)) = match joined {
+            Ok(ended) => ended,
             Err(error) => match links.iter().find(|(_, (link, _))| link.id() == error.id()) {
-                Some((address, _)) => (*address, Err(format!("connection task failed: {error}"))),
+                Some((address, _)) => (
+                    error.id(),
+                    (*address, Err(format!("connection task failed: {error}"))),
+                ),
                 None => continue,
             },
         };
-        if let Some((_, source)) = links.remove(&address) {
-            done.push((address, source, result));
+        if let btree_map::Entry::Occupied(link) = links.entry(address)
+            && link.get().0.id() == id
+        {
+            done.push((address, link.remove().1, result));
         }
     }
     done
@@ -1847,6 +1855,34 @@ mod tests {
         // One aborted, as a link that ends for a reason is, was taken out
         // when it was, and is passed over.
         links.remove(&b).unwrap().0.abort();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(finished(&mut tasks, &mut links).is_empty());
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_link_that_ends_after_its_task_finished_leaves_the_next_one_in_place() {
+        let a = SocketAddr::from(([8, 1, 1, 1], 18442));
+        let mut tasks: JoinSet<Ended> = JoinSet::new();
+        let mut links: Links = BTreeMap::new();
+        let closed = tasks.spawn(async move { (a, Err("connection closed".to_string())) });
+        links.insert(a, (closed, "discovered"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !links[&a].0.is_finished() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Its task finished, not yet joined, when the link is ended for a
+        // reason, as a peer connected again as a configured one is, and a
+        // new one takes its address.
+        links.remove(&a).unwrap().0.abort();
+        let again = tasks.spawn(std::future::pending());
+        let again_id = again.id();
+        links.insert(a, (again, "config"));
+        // The old task's end leaves the new link alone.
+        assert!(finished(&mut tasks, &mut links).is_empty());
+        assert_eq!(links[&a].0.id(), again_id);
+        assert_eq!(links[&a].1, "config");
+        links.remove(&a).unwrap().0.abort();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(finished(&mut tasks, &mut links).is_empty());
         assert!(tasks.is_empty());
