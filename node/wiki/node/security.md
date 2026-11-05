@@ -64,7 +64,8 @@ treated as authority to stop a process.
 REST is off by default. When on, it binds to loopback unless you choose another
 address, and it can be switched on or off while the node runs. Enabling it binds the
 listener before recording success, so a failed bind leaves REST off and reports the
-error.
+error. Switching it off, or stopping the node, closes idle connections at once and
+gives requests in progress a second to finish; then their connections close too.
 
 Everything it offers is public by design:
 

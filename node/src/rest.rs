@@ -48,6 +48,12 @@ pub const HEADER_TIME: Duration = Duration::from_secs(10);
 /// way. Only processes on this machine open such connections, and the total
 /// still bounds them.
 pub const LOCAL_TIME: Duration = Duration::from_secs(300);
+/// How long REST, once told to stop, lets its connections finish the
+/// requests they are on: a second, in which an answer goes out over this
+/// machine or a fast link; then it drops the rest, so that switching REST off
+/// or stopping the node never waits on a slow client. An idle connection
+/// closes at once.
+pub const CLOSING: Duration = Duration::from_secs(1);
 /// What a connection buffers: it reads a request's header into about this
 /// much, and takes more of an answer to write only while less than this
 /// waits, in pieces of as much (`api`), so less than twice this waits. A
@@ -220,8 +226,9 @@ struct Due {
     earlier: Option<Instant>,
 }
 /// Serves `router` on `listener` within `limits` until `stop` resolves; then
-/// it accepts no more connections, lets each finish the request it is on, and
-/// returns once all have closed.
+/// it accepts no more connections, closes the idle ones, lets the others
+/// finish the request they are on for up to `CLOSING`, drops what is left, and
+/// returns.
 pub async fn serve(
     listener: TcpListener,
     router: Router,
@@ -235,6 +242,7 @@ pub async fn serve(
         most: limits.per_client,
     });
     let (stopping, stopped) = watch::channel(false);
+    let (ending, ended) = watch::channel(false);
     let mut stop = pin!(stop);
     loop {
         // A connection is accepted only once there is room for it; until
@@ -263,13 +271,19 @@ pub async fn serve(
             limits,
             (place, client),
             stopped.clone(),
+            ended.clone(),
         ));
     }
     let _ = stopping.send(true);
     drop(listener);
-    let _ = room
-        .acquire_many(u32::try_from(capacity).expect("CONNECTIONS_MAX fits"))
-        .await;
+    let all = u32::try_from(capacity).expect("CONNECTIONS_MAX fits");
+    if tokio::time::timeout(CLOSING, room.acquire_many(all))
+        .await
+        .is_err()
+    {
+        let _ = ending.send(true);
+        let _ = room.acquire_many(all).await;
+    }
 }
 /// An answer going out on a connection, whose time lasts at least `idle`
 /// more once the connection has taken all of it and lets it go.
@@ -300,7 +314,9 @@ impl Drop for Sending {
         self.due.send_modify(|d| d.until = d.until.max(Some(rest)));
     }
 }
-/// One connection, until it closes, its client is too slow, or REST stops.
+/// One connection, until it closes, its client is too slow, or REST stops:
+/// `stopped` asks it to finish the request it is on, `ended` to end at once,
+/// as does REST's own end.
 async fn connection(
     stream: TcpStream,
     remote: SocketAddr,
@@ -308,6 +324,7 @@ async fn connection(
     limits: Limits,
     _held: (OwnedSemaphorePermit, Client),
     mut stopped: watch::Receiver<bool>,
+    mut ended: watch::Receiver<bool>,
 ) {
     let (due, mut watching) = watch::channel(Due::default());
     let due = Arc::new(due);
@@ -351,6 +368,7 @@ async fn connection(
                 connection.as_mut().graceful_shutdown();
                 closing = true;
             }
+            _ = ended.wait_for(|end| *end) => break,
         }
     }
 }
@@ -632,6 +650,41 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(TcpStream::connect(address).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rest_stops_within_a_second_whatever_its_clients_do() {
+        // An idle connection closes at once, and one whose client stopped
+        // reading an answer, which had 30 seconds more, is dropped after a
+        // second.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve(
+            listener,
+            app(),
+            limits(Duration::from_secs(30)),
+            async {
+                let _ = stopped.await;
+            },
+        ));
+        let mut idle = TcpStream::connect(address).await.unwrap();
+        idle.write_all(&get_request("/")).await.unwrap();
+        answer(&mut idle).await;
+        let mut stalled = TcpStream::connect(address).await.unwrap();
+        stalled.write_all(&get_request("/large")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let stopping = Instant::now();
+        stop.send(()).unwrap();
+        assert!(until_closed(&mut idle, Duration::from_millis(500)).await.1);
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+        let elapsed = stopping.elapsed();
+        assert!(elapsed >= CLOSING && elapsed < CLOSING * 2, "{elapsed:?}");
+        let (bytes, closed) = until_closed(&mut stalled, Duration::from_secs(5)).await;
+        assert!(closed && bytes.len() < LARGE, "{}", bytes.len());
     }
 
     #[test]
