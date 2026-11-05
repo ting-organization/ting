@@ -157,10 +157,13 @@ limits of its branch. What happens next depends on the work its chain carries:
   kept: the node holds only the running state a check needs (the last header, the
   last eleven timestamps, the work so far and the vote tallies of the last voting
   epochs) and, every 600 headers, one bit of a salted hash of the header. When the
-  chain carries that much work, the node asks the peer for the same headers again
-  from where the chain forked, checks them again, compares the kept bits, and
-  indexes them, 14,400 at a time, once enough bits have matched. A peer that sends a
-  different chain the second time is caught by a bit that does not match.
+  chain overtakes the best header as it is when that header arrives, the node asks
+  the peer for the same headers again from where the chain forked, checks them
+  again, compares the kept bits, and indexes them, 14,400 at a time, once enough
+  bits have matched, each time only if the whole chain still overtakes the best
+  header as it is then: one that the best header has passed meanwhile is dropped,
+  and checked again if it comes again. A peer that sends a different chain the
+  second time is caught by a bit that does not match.
 
 Proof of work bounds what a header costs, not how many alternatives to one block
 there are: every child of one block has the same target, so each sibling of the best

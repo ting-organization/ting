@@ -2471,7 +2471,7 @@ impl Chain {
                     self.presync.insert(peer.into(), state);
                     break;
                 }
-                match state.add(&self.genesis, header)? {
+                match state.add(&self.genesis, header, &self.best_work())? {
                     Outcome::Continue => {
                         next = Some(state.next());
                         self.presync.insert(peer.into(), state);
@@ -2527,14 +2527,8 @@ impl Chain {
                             .header
                             .timestamp
                     };
-                    let mut state = Presync::new(
-                        start,
-                        self.walk_from(start)?,
-                        self.best_work(),
-                        start_time,
-                        now(),
-                    );
-                    let outcome = state.add(&self.genesis, header)?;
+                    let mut state = Presync::new(start, self.walk_from(start)?, start_time, now());
+                    let outcome = state.add(&self.genesis, header, &self.best_work())?;
                     next = Some(state.next());
                     let refetch = matches!(outcome, Outcome::Refetch);
                     self.presync.insert(peer.into(), state);

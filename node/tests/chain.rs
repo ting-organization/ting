@@ -4864,3 +4864,91 @@ fn a_side_header_waits_unkept_until_its_branch_overtakes_and_is_then_fetched() {
     }
     assert_eq!(chain.tip(), c4.header.id());
 }
+/// `blocks`' headers again on another branch, from `parent`, each of the same
+/// work as the one it copies.
+fn copies(blocks: &[Block], mut parent: Hash, n: u64) -> Vec<Header> {
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let h = other_header(&b.header, Some(parent), n * 1_000 + i as u64);
+            parent = h.id();
+            h
+        })
+        .collect()
+}
+#[test]
+fn a_presync_indexes_a_chain_only_while_it_overtakes_the_best_header_as_it_is_now() {
+    // A peer begins a presync with a branch from A10 as heavy as the best
+    // header, waits for the honest chain to move one block, and sends one
+    // header more: that ties the best header as it is now, and nothing is
+    // fetched again or kept, round after round. A branch that did overtake
+    // the best header when its first pass ended, but no longer does when it
+    // comes again, is not indexed either. One that overtakes the best header
+    // as it is is indexed, and is the best header by its work alone.
+    let dir = Directory::new();
+    dir.config(false, "presync now");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let a = branch(&g, 50, "A");
+    let mut honest = 40;
+    for block in &a[..honest] {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let before = status(&mut chain);
+    let fork = a[9].header.id();
+    for round in 0..3u64 {
+        let mut side = copies(&a[10..honest], fork, round);
+        assert_eq!(headers_from(&mut chain, &side).unwrap()["indexed"], 0);
+        chain.import(&a[honest].encode(), true).unwrap();
+        honest += 1;
+        let last = other_header(
+            &a[honest - 1].header,
+            Some(side.last().unwrap().id()),
+            round * 1_000 + 999,
+        );
+        let answer = headers_from(&mut chain, std::slice::from_ref(&last)).unwrap();
+        assert_eq!(
+            (answer["refetch"].clone(), answer["indexed"].clone()),
+            (json!(false), json!(0)),
+            "{answer}"
+        );
+        side.push(last);
+        assert_eq!(headers_from(&mut chain, &side).unwrap()["indexed"], 0);
+    }
+    let now = status(&mut chain);
+    assert_eq!(
+        now["held_headers"].as_u64().unwrap(),
+        before["held_headers"].as_u64().unwrap() + 3,
+        "the three honest blocks alone"
+    );
+    assert_eq!(now["best_height"], honest);
+    // One block more than the best header: fetched again, then the honest
+    // chain moves two blocks before the chain comes again.
+    let side = copies(&a[10..honest + 1], fork, 10);
+    let first = headers_from(&mut chain, &side).unwrap();
+    assert_eq!(first["refetch"], true, "{first}");
+    for block in &a[honest..honest + 2] {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    honest += 2;
+    let error = headers_from(&mut chain, &side).unwrap_err();
+    assert_eq!(error, "the chain no longer overtakes the best header");
+    assert!(
+        !ting_node::chain::is_invalid(&error),
+        "held against no peer"
+    );
+    let now = status(&mut chain);
+    assert_eq!(
+        now["held_headers"].as_u64().unwrap(),
+        before["held_headers"].as_u64().unwrap() + 5
+    );
+    assert_eq!(now["best_height"], honest);
+    // A branch that overtakes the best header as it is: indexed, and the best
+    // header, with more work than the tip.
+    let side = copies(&a[10..honest + 1], fork, 20);
+    assert_eq!(sync_headers(&mut chain, &side)["indexed"], side.len());
+    let now = status(&mut chain);
+    assert_eq!(now["best_height"], honest + 1);
+    assert_eq!(now["tip"], json!(hex(&a[honest - 1].header.id())));
+}
