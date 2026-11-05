@@ -292,7 +292,8 @@ A reference node that connects to you sends, after its hello, in rounds:
 - `state`, then `import` of up to 32 of its blocks past your locator, when its tip
   has more work than yours;
 - `inventory`, `pending`, `deferred`, `transaction_raw` and `submit` to exchange
-  pooled and deferred transactions;
+  pooled and deferred transactions, when your pool or its own has changed and
+  every 30 seconds, at most once in two seconds and up to a second more at random;
 - `addresses` every ten seconds while it looks for peers, otherwise every ten
   minutes, when its discovery is on.
 

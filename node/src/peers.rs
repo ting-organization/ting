@@ -66,6 +66,15 @@ const LOOKING: Duration = Duration::from_secs(10);
 /// Rounds of one connection start at least this far apart, whatever the peer
 /// announces.
 const ROUND_GAP: Duration = Duration::from_millis(100);
+/// One connection exchanges pooled and deferred transactions at most once in
+/// this long, and up to `SWAP_JITTER` more at random, so that a node's
+/// connections do not list pools in step: each exchange lists the peer's pool
+/// and deferred set, up to five pages of 32 KiB, while pools may change many
+/// times a second. A change after a quiet while is exchanged at once, so a new
+/// transaction waits at most about three seconds a connection, as Bitcoin
+/// announces transactions to an outbound peer about every two.
+const SWAP_GAP: Duration = Duration::from_secs(2);
+const SWAP_JITTER: Duration = Duration::from_secs(1);
 /// Addresses are asked of each peer this often while the node has the
 /// connections it wants.
 const ASK_INTERVAL: u64 = 600;
@@ -237,6 +246,8 @@ struct Link {
     /// while it is on this node's branch.
     pushed: Option<Hash>,
     swap: bool,
+    /// When the next exchange of transactions may start.
+    swap_due: Instant,
     /// The exchange of pooled and of deferred transactions with the peer.
     relay: [Relay; 2],
     /// The tip at which transactions refused for want of room were last
@@ -335,9 +346,11 @@ impl Link {
             self.push = false;
             more |= self.push_blocks(local).await?;
         }
-        if self.swap {
+        if self.swap && Instant::now() >= self.swap_due {
             self.swap = false;
             self.swap_pool(local).await?;
+            let jitter = SWAP_JITTER * (discovery::seed() % 1_000) as u32 / 1_000;
+            self.swap_due = Instant::now() + SWAP_GAP + jitter;
         }
         if let Some(error) = &self.conn.broken {
             return Err(error.clone());
@@ -1088,6 +1101,7 @@ async fn follow(
         push: true,
         pushed: None,
         swap: true,
+        swap_due: Instant::now(),
         relay: Default::default(),
         retried: None,
         asked: 0,
@@ -1115,6 +1129,8 @@ async fn follow(
             } else {
                 KEEPALIVE
             };
+            // An exchange that waits for its time wakes the connection then.
+            let (swapping, swap_due) = (link.swap, link.swap_due);
             tokio::select! {
                 changed = events.changed() => {
                     if changed.is_err() {
@@ -1127,6 +1143,7 @@ async fn follow(
                     link.fetch = true;
                     link.swap = true;
                 }
+                _ = tokio::time::sleep_until(swap_due), if swapping => {}
                 _ = node.stopped() => return Ok(()),
             }
         }

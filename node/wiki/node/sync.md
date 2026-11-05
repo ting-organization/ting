@@ -75,7 +75,14 @@ tip changes, and the node follows:
      tip has moved, since a block makes room, at most the next block's data
      capacity of them each way at each tip: no more than a block can have freed.
      A transaction larger than one 1 MiB slice travels in slices both ways
-     ([transactions in slices](#transactions-in-slices)).
+     ([transactions in slices](#transactions-in-slices)). A connection exchanges
+     at most once in two seconds, and up to a second more at random, so that the
+     node's connections do not exchange in step: each exchange lists the peer's
+     pool and deferred set, up to five pages of 32 KiB, and pools may change many
+     times a second. A change after a quiet while is exchanged at once, so a new
+     transaction waits at most about three seconds at each connection, well
+     within a block's minute, as Bitcoin announces transactions to an outbound
+     peer about every two seconds.
    - **Addresses**, with discovery on: it asks for `addresses` and adds what it
      receives to its address book, every ten seconds while it has fewer peers than it
      wants, otherwise every ten minutes.
