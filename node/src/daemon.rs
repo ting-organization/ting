@@ -85,6 +85,11 @@ async fn terminated() {
 /// The addresses `seeds`, `host:port` names, resolve to, each looked up for at
 /// most five seconds; a name that does not resolve is passed over.
 pub async fn seed_addresses(seeds: &[&str]) -> Vec<std::net::SocketAddr> {
+    resolve(seeds, true).await
+}
+/// The addresses `seeds` resolve to, with what each gave written to the log
+/// if `logged`.
+async fn resolve(seeds: &[&str], logged: bool) -> Vec<std::net::SocketAddr> {
     let mut addresses = Vec::new();
     for seed in seeds {
         let lookup = tokio::net::lookup_host(*seed);
@@ -93,15 +98,57 @@ pub async fn seed_addresses(seeds: &[&str]) -> Vec<std::net::SocketAddr> {
                 let before = addresses.len();
                 addresses.extend(found);
                 let n = addresses.len() - before;
-                crate::log!(
-                    "seed node {seed}: {n} address{}",
-                    if n == 1 { "" } else { "es" }
-                );
+                if logged {
+                    crate::log!(
+                        "seed node {seed}: {n} address{}",
+                        if n == 1 { "" } else { "es" }
+                    );
+                }
             }
-            _ => crate::log!("seed node {seed} did not resolve"),
+            _ if logged => crate::log!("seed node {seed} did not resolve"),
+            _ => {}
         }
     }
     addresses
+}
+/// The seed names are looked up again this often, as often as an address that
+/// keeps failing is tried again, so that a seed whose address changed is found
+/// by the time its old one would have been tried; and every minute, the first
+/// wait after a failure, while the book holds no seed address the node may
+/// connect to.
+pub const SEED_LOOKUP: Duration = Duration::from_secs(3600);
+pub const SEED_RETRY: Duration = Duration::from_secs(60);
+/// Keeps the seed nodes' addresses in `book` until `shutdown`: looks `seeds` up
+/// at once, then every `every`, and every `retry` while the book holds no seed
+/// address the node may connect to, as when bans or failures cover them all, so
+/// that a node going back to the seeds finds them. Only the first lookup is
+/// written to the log: a later one that fails is passed over quietly.
+pub async fn keep_seeds(
+    book: Arc<Mutex<AddressBook>>,
+    seeds: &[&str],
+    shutdown: Arc<AtomicBool>,
+    every: Duration,
+    retry: Duration,
+) {
+    let mut logged = true;
+    loop {
+        for address in resolve(seeds, logged).await {
+            book.lock().unwrap().learn_seed(address);
+        }
+        logged = false;
+        let looked = tokio::time::Instant::now();
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(retry.min(Duration::from_secs(2))) => {}
+                _ = transport::wait_stopped(&shutdown) => return,
+            }
+            let none = !book.lock().unwrap().seed_due(crate::now());
+            let since = looked.elapsed();
+            if since >= every || none && since >= retry {
+                break;
+            }
+        }
+    }
 }
 /// What a fork of this node replaces: how templates pick transactions and how
 /// nonces are searched. The reference node uses first-in selection and the CPU.
@@ -453,16 +500,18 @@ pub async fn run_with(dir: &Path, mining: Mining) -> Result<()> {
         changes,
     };
     // On the production network, the built-in seeds are looked up in the
-    // background; their addresses join the book as seeds', picked after every
-    // other (wiki: node/sync#finding-more-peers).
+    // background, and again from time to time; their addresses join the book
+    // as seeds', picked after every other (wiki: node/sync#finding-more-peers).
     let production = config::production_genesis().map(|g| g.chain_id());
     if c.discovery && production == Some(config::genesis(dir)?.chain_id()) {
-        let book = node.book.clone();
-        tokio::spawn(async move {
-            for address in seed_addresses(config::SEEDS).await {
-                book.lock().unwrap().learn_seed(address);
-            }
-        });
+        let (book, shutdown) = (node.book.clone(), node.shutdown.clone());
+        tokio::spawn(keep_seeds(
+            book,
+            config::SEEDS,
+            shutdown,
+            SEED_LOOKUP,
+            SEED_RETRY,
+        ));
     }
     if c.miner_enabled {
         *node.miner.lock().unwrap() = Some(Miner::start(

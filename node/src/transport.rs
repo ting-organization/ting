@@ -3,8 +3,7 @@ use crate::{
     chain::{Event, INVALID, TOO_LARGE, is_invalid, transfer_time},
     config,
     daemon::Node,
-    discovery::{self, Source},
-    peers, wire,
+    discovery, peers, wire,
 };
 use serde_json::{Value, json};
 use std::{
@@ -783,7 +782,10 @@ async fn serve(
     if node.discovery
         && let Some(address) = announced
     {
-        node.book.lock().unwrap().learn(address, Source::Inbound);
+        node.book
+            .lock()
+            .unwrap()
+            .learn_announced(address, crate::now());
     }
     let mut events = node.handle.events();
     let mut told = announcement(&events.borrow_and_update());
@@ -863,7 +865,7 @@ async fn serve(
             wire::Request::Hello(_) => Err(wire::UNKNOWN_REQUEST.into()),
             wire::Request::Addresses => {
                 let addresses = if node.discovery {
-                    let book = node.book.lock().unwrap();
+                    let mut book = node.book.lock().unwrap();
                     book.share(remote.ip(), announced, crate::now(), discovery::seed())
                 } else {
                     Vec::new()

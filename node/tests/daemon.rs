@@ -2544,6 +2544,48 @@ async fn seed_names_resolve_to_addresses_and_bad_ones_are_passed_over() {
     assert!(found.iter().all(|a| a.port() != 0));
     assert!(ting_node::config::SEEDS.iter().all(|s| s.contains(':')));
 }
+#[tokio::test]
+async fn looking_the_seeds_up_again_restores_a_seed_gone_from_the_book() {
+    use std::sync::{Arc, Mutex, atomic::AtomicBool};
+    use ting_node::{daemon::keep_seeds, discovery::AddressBook};
+    let names: &'static [&'static str] = &["127.0.0.1:18442", "127.0.0.1:18443"];
+    let seeds: Vec<SocketAddr> = names.iter().map(|n| n.parse().unwrap()).collect();
+    let held = |book: &Arc<Mutex<AddressBook>>, address: &SocketAddr| {
+        book.lock().unwrap().is_seed(address)
+    };
+    let wait = |book: Arc<Mutex<AddressBook>>, seeds: Vec<SocketAddr>| async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !seeds.iter().all(|a| held(&book, a)) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "not looked up again"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let hour = Duration::from_secs(3600);
+    // With no seed address left to connect to, the names are looked up again
+    // within `retry`, however far off the next regular lookup is.
+    let book = Arc::new(Mutex::new(AddressBook::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let short = Duration::from_millis(100);
+    tokio::spawn(keep_seeds(book.clone(), names, stop.clone(), hour, short));
+    wait(book.clone(), seeds.clone()).await;
+    for seed in &seeds {
+        book.lock().unwrap().forget(seed);
+    }
+    wait(book.clone(), seeds.clone()).await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    // With one left, the other comes back at the next regular lookup.
+    let book = Arc::new(Mutex::new(AddressBook::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let every = Duration::from_millis(200);
+    tokio::spawn(keep_seeds(book.clone(), names, stop.clone(), every, hour));
+    wait(book.clone(), seeds.clone()).await;
+    book.lock().unwrap().forget(&seeds[1]);
+    wait(book.clone(), seeds.clone()).await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blocks_are_asked_for_many_at_once_and_assembled_from_their_slices() {
     use std::sync::{
@@ -3135,4 +3177,91 @@ async fn an_inventory_whose_pages_do_not_move_on_ends_the_connection() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     n.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_of_tiny_transactions_lists_a_peers_pools_at_most_once_in_two_seconds() {
+    // The node takes a tiny transaction ten times a second, and its peer
+    // announces after every exchange that its pool changed. Each exchange
+    // lists the peer's pool and deferred set, which may be five pages of
+    // 32 KiB, so a connection lists them at most once in two seconds.
+    let n = Node::start(false, "stream");
+    let g = config::genesis(&n.dir.0).unwrap();
+    let (pool, asked): (Pool, Asked) = Default::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    pool_peer(
+        listener,
+        fake_state(g.chain_id(), g.block_id(), 0xd0),
+        pool,
+        asked.clone(),
+    );
+    command(&n.dir.0, &["add", "node", &address.to_string()]);
+    wait_exchanges(&n, &asked, 1).await;
+    let pages = |asked: &Asked| {
+        let asked = asked.lock().unwrap();
+        asked
+            .iter()
+            .filter(|r| matches!(r, wire::Request::Inventory { .. }))
+            .count()
+    };
+    let (begun, listed) = (exchanges(&asked).0, pages(&asked));
+    let start = tokio::time::Instant::now();
+    let mut input = 0;
+    while start.elapsed() < Duration::from_secs(8) {
+        n.call("submit", json!({"hex":hex(&pooled(input).encode())}))
+            .await;
+        input += 1;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (begun, listed) = (exchanges(&asked).0 - begun, pages(&asked) - listed);
+    eprintln!("{input} transactions in 8 s: {begun} exchanges, {listed} inventory pages");
+    // One exchange every two seconds at most, four in eight, and one that
+    // may have begun as they ended; each lists one page of either set.
+    assert!(begun <= 5 && listed <= 2 * 5, "{begun} {listed}");
+    // The node's own transactions still went out to the peer.
+    assert!(exchanges(&asked).1 > 0);
+    n.stop().await;
+}
+/// How long it took, since `since`, until `n` pooled `count` transactions.
+async fn pooled_within(n: &Node, count: u64, since: tokio::time::Instant) -> Duration {
+    let deadline = since + Duration::from_secs(30);
+    loop {
+        let status = n.call("status", json!({})).await;
+        if status["mempool_count"].as_u64() >= Some(count) {
+            return since.elapsed();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{status}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_transaction_reaches_a_peer_within_seconds_however_many_follow() {
+    // From when A takes it until B pools it: a transaction on its own, after a
+    // quiet while, and the last of forty that A takes ten a second.
+    let a = Node::start(false, "relay A");
+    let b = Node::start(false, "relay B");
+    command(&a.dir.0, &["add", "node", &b.info.p2p.to_string()]);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !a.call("peers", json!({})).await["items"][0]["last_success"].is_u64() {
+        assert!(tokio::time::Instant::now() < deadline, "never connected");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let sent = tokio::time::Instant::now();
+    a.call("submit", json!({"hex":hex(&pooled(0).encode())}))
+        .await;
+    let alone = pooled_within(&b, 1, sent).await;
+    let mut last = sent;
+    for input in 1..=40 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        a.call("submit", json!({"hex":hex(&pooled(input).encode())}))
+            .await;
+        last = tokio::time::Instant::now();
+    }
+    let streamed = pooled_within(&b, 41, last).await;
+    eprintln!("a transaction alone reached B in {alone:?}, the last of a stream in {streamed:?}");
+    assert!(alone < Duration::from_secs(5), "{alone:?}");
+    assert!(streamed < Duration::from_secs(5), "{streamed:?}");
+    a.stop().await;
+    b.stop().await;
 }
