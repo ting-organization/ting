@@ -218,8 +218,8 @@ impl Drop for Client {
 /// handed to the connection, at least the connection's header time from then,
 /// for what is left to write, at most twice `BUFFER`, and for the wait for the
 /// next request, so that an answer's time never ends a connection sooner than
-/// its idle time. A pipelined request's answer keeps the time left to the one
-/// before it, if longer.
+/// its idle time. A pipelined request keeps the time left to the answer
+/// before it until it begins, and its own answer that time, if longer.
 #[derive(Clone, Copy, Default)]
 struct Due {
     until: Option<Instant>,
@@ -332,10 +332,14 @@ async fn connection(
     let idle = limits.header_for(remote.ip());
     let service = service_fn(move |mut request: hyper::Request<Incoming>| {
         request.extensions_mut().insert(ConnectInfo(remote));
-        due.send_modify(|d| d.earlier = d.earlier.max(d.until.take()));
         let answer = inner.call(request);
         let due = due.clone();
         async move {
+            // Hyper reads the next request's header as soon as it has drained
+            // a body the route left unread, while the answer before it may
+            // still be waiting to be written, but begins the request only
+            // once it is: until then, that answer's time holds.
+            due.send_modify(|d| d.earlier = d.earlier.max(d.until.take()));
             let response = answer.await?;
             // No answer is near 4 GiB: the bound only keeps the time
             // within what a clock reading can add.
@@ -380,6 +384,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const LARGE: usize = 64 << 20;
+    /// An answer the connection takes whole, within `BUFFER`.
+    const MEDIUM: usize = 32 << 10;
     /// A body of so many bytes in frames of 64 KiB, as `api` hands answers
     /// to the connection: written a few frames at a time, so that a client
     /// that does not read stops it on every system.
@@ -410,6 +416,7 @@ mod tests {
         Router::new()
             .route("/", get(|| async { "ok" }))
             .route("/large", get(|| async { Body::new(Frames(LARGE)) }))
+            .route("/medium", get(|| async { Body::new(Frames(MEDIUM)) }))
             .route(
                 "/slow",
                 get(|| async {
@@ -561,6 +568,36 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(300));
         let (bytes, closed) = until_closed(&mut stalled, Duration::from_secs(10)).await;
         assert!(closed && bytes.len() < LARGE, "{}", bytes.len());
+    }
+
+    #[tokio::test]
+    async fn pipelined_answers_not_taken_in_time_close_the_connection() {
+        // Requests with a body the route never reads, sent at once and their
+        // answers never read: each body is drained once its answer is handed
+        // to the connection, and the next header read while that answer
+        // waits to be written. One connection at a time, so the second is
+        // served only once the first is closed.
+        let (address, _stop) = start(Limits {
+            connections: 1,
+            send: |_| Duration::from_millis(500),
+            ..limits(Duration::from_millis(500))
+        })
+        .await;
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        let mut stalled = socket.connect(address).await.unwrap();
+        // Far more answers than the sockets between them hold, on any system.
+        let request = "GET /medium HTTP/1.1\r\nHost: test\r\n\
+                       Expect: 100-continue\r\nContent-Length: 1\r\n\r\nx";
+        stalled
+            .write_all(request.repeat(512).as_bytes())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut next = TcpStream::connect(address).await.unwrap();
+        next.write_all(&get_request("/")).await.unwrap();
+        answer(&mut next).await;
+        drop(stalled);
     }
 
     #[tokio::test]
