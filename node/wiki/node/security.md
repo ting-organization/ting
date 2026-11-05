@@ -124,8 +124,9 @@ listed on [Explore the chain](../start/explore.md#the-rest-api).
   ever executed, as Bitcoin does: a peer the node follows, whose header chain
   overtakes the best header, can withhold one of its blocks and have the node store
   the others, which it never connects without that one. Each such block costs the
-  peer a block of work on a branch heavier than any the node knows, so it takes more
-  hashpower than the network's, and only a peer the node chose to follow can do it.
+  peer a block of work on a branch heavier than any the node knows, and only a peer
+  the node chose to follow can do it; on a network with little hashpower that work
+  is cheap, so this bounds the cost of such storage, not its possibility.
 - With discovery on, a node tells its peers the addresses of nodes it has recently
   synchronized with, and announces its own listening port. With
   `"discovery": false` it does neither. Its address can still spread: a node that

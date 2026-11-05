@@ -267,7 +267,10 @@ answered with `the blocks this connection pushed were let go to make room; push 
 again from the block both nodes hold`. That is no policy refusal: the pushing node
 ends its connection and, connected again, pushes its branch once more from the block
 the two share, which is how a peer that only connects to this node gets its blocks
-here, so an honest branch is delayed, not lost. A run goes when its connection ends.
+here. A sender that keeps adding runs from fresh connections can make that happen
+again after every reconnection, a block of work each time, so pushing alone does not
+promise that an honest branch arrives: headers sync from any followed peer that has
+the branch still brings it in. A run goes when its connection ends.
 The node's
 status shows what the runs hold, as `held_pushed_blocks` and `held_pushed_bytes`. A
 held block does not count as one the peer delivered, for its place among inbound
