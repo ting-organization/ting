@@ -241,8 +241,12 @@ Any other pushed block whose parent the node stores with its whole branch, a sib
 of the tip for one, is held in memory instead, and answered as taken. Neither its
 header nor its body is kept. A connection holds one run of such blocks, each the
 child of the one before, the next checked against the ones held; the block that
-makes the run overtake the tip stores the whole run and connects it at once. A block
-that does not follow the run begins a new one in its place. So a natural fork ends as
+makes the run overtake the tip stores the whole run and connects it at once. Before
+anything is stored, each block's header is checked again from its parent as any
+block's is, and the run is stored only if that finds the work and capacities it was
+held with; were the two checks to disagree, a fault of the node, the run would be
+refused for now and nothing held against the peer. A block that does not follow the
+run begins a new one in its place. So a natural fork ends as
 soon as it can: a miner that mined B on the tip's parent and then C on B pushes both
 from the block the nodes share, as a pushing node does, and the node moves to C when C
 arrives.

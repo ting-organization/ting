@@ -1508,7 +1508,10 @@ impl Chain {
         Ok((last.work.clone() + consensus::work(&header.target), limits))
     }
     /// Stores a held run whose last block overtakes the tip, oldest first,
-    /// each as an import of that peer's, then connects the best branch.
+    /// each as an import of that peer's, then connects the best branch. Its
+    /// headers are checked again first, by the node's own path for a block
+    /// whose parent is indexed (`index_held`); nothing is stored unless every
+    /// one of them agrees.
     fn store_held(&mut self, run: Held, peer: &str) -> Result<Value> {
         let (Some(last), Some(fork)) = (run.last(), run.parent()) else {
             return Err("nothing held".into());
@@ -1518,27 +1521,13 @@ impl Chain {
             if !self.index.complete(&fork) {
                 return Err(BEHIND.into());
             }
-            for block in &run.blocks {
-                if self.marks.contains(&block.id) {
-                    return Err(MARKED.into());
-                }
-                let indexed = match self.index.get(&block.id) {
-                    Some(entry) if entry.status == Kept::Invalid => {
-                        if self.by_operator(&block.id) {
-                            return Err(MARKED.into());
-                        }
-                        return Err(format!("{INVALID}block: it failed validation"));
-                    }
-                    // Stored meanwhile, as when a peer was asked for it.
-                    Some(entry) if entry.has_data() => continue,
-                    Some(_) => true,
-                    None => false,
-                };
+            for i in self.index_held(&run, peer)? {
+                let block = &run.blocks[i];
                 self.store_body(
                     &block.header,
                     &block.work,
                     block.limits,
-                    indexed,
+                    true,
                     &block.bytes,
                     None,
                 )?;
@@ -1556,6 +1545,103 @@ impl Chain {
         Ok(
             json!({"id":hex(&last),"known":false,"canonical":self.is_canonical(&last),"height":self.height()}),
         )
+    }
+    /// Checks each block of a held run again, parents first, by the path every
+    /// block whose parent is indexed takes (`checked_header`, whose limits are
+    /// `limits_after` its parent), and indexes its header; returns the blocks
+    /// still to store, those not stored meanwhile. The work and limits it
+    /// finds must be the ones the run was held with, which `check_held_child`
+    /// found along the run: they are what the block is stored and executed
+    /// with. Should the two disagree, which is this node's fault and not the
+    /// peer's, the run is refused for now and the headers indexed here go
+    /// again: nothing is marked invalid and nobody is banned.
+    fn index_held(&mut self, run: &Held, peer: &str) -> Result<Vec<usize>> {
+        let mut indexed = std::collections::HashSet::new();
+        let mut store = Vec::new();
+        let mut refusal: Option<(String, bool)> = None;
+        for (i, block) in run.blocks.iter().enumerate() {
+            if self.marks.contains(&block.id) {
+                refusal = Some((MARKED.into(), false));
+                break;
+            }
+            let entry = self
+                .index
+                .get(&block.id)
+                .map(|e| (e.status, e.has_data(), e.work.clone(), e.limits));
+            match entry {
+                Some((Kept::Invalid, ..)) => {
+                    let error = if self.by_operator(&block.id) {
+                        MARKED.to_string()
+                    } else {
+                        format!("{INVALID}block: it failed validation")
+                    };
+                    refusal = Some((error, false));
+                    break;
+                }
+                // Stored meanwhile, as when a peer was asked for it.
+                Some((_, true, ..)) => continue,
+                // Indexed meanwhile, its header from a peer's headers.
+                Some((_, false, work, limits)) => {
+                    if work != block.work || limits != block.limits {
+                        refusal = Some(("its indexed work or limits differ".into(), true));
+                        break;
+                    }
+                }
+                None => {
+                    let checked = self.checked_header(&block.header).and_then(|(_, limits)| {
+                        let parent = block.header.parent;
+                        let below = if parent == self.genesis.block_id() {
+                            BigUint::default()
+                        } else {
+                            self.index
+                                .get(&parent)
+                                .ok_or("unknown parent")?
+                                .work
+                                .clone()
+                        };
+                        Ok((below + consensus::work(&block.header.target), limits))
+                    });
+                    match checked {
+                        Ok((work, limits)) if work == block.work && limits == block.limits => {
+                            self.index_header(block.header.clone(), work, limits);
+                            indexed.insert(block.id);
+                        }
+                        Ok(_) => {
+                            refusal = Some(("its work or limits differ".into(), true));
+                            break;
+                        }
+                        Err(error) => {
+                            refusal = Some((error, true));
+                            break;
+                        }
+                    }
+                }
+            }
+            store.push(i);
+        }
+        let Some((error, fault)) = refusal else {
+            self.sync_best();
+            return Ok(store);
+        };
+        // A stored block that waited for one of these headers, as after a
+        // restart, keeps them indexed; otherwise they go.
+        let waited = indexed.iter().any(|id| {
+            self.index
+                .children(id)
+                .iter()
+                .any(|child| !indexed.contains(child))
+        });
+        if !waited {
+            self.index.forget(&indexed);
+        }
+        self.sync_best();
+        if !fault {
+            return Err(error);
+        }
+        crate::log!(
+            "warning: blocks {peer} pushed were checked one way along their run and another from their parents ({error}); refused, a fault of this node, not the peer's"
+        );
+        Err(BEHIND.into())
     }
     /// Keeps what all held runs count within `HELD_MAX`: the largest run of
     /// another connection than `keep`'s gives way, as long as one must.
@@ -3970,6 +4056,92 @@ mod tests {
         );
         assert!(chain.failed.is_some());
         assert!(chain.offenders.is_empty(), "the source is not blamed");
+        drop(chain);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A held run whose work or limits the node's own check of each block
+    /// from its parent does not confirm is refused whole, for now: nothing is
+    /// stored or indexed, nothing is marked invalid, and no peer is blamed.
+    /// Pushed again, unchanged, the same run is taken.
+    #[test]
+    fn a_held_run_the_check_from_its_parents_does_not_confirm_is_refused() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".node-tests")
+            .join(format!("held-unit-{}-{}", std::process::id(), crate::now()));
+        let g = Genesis::experimental();
+        let c = Config {
+            control: "127.0.0.1:0".parse().unwrap(),
+            p2p: "127.0.0.1:0".parse().unwrap(),
+            api: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        };
+        config::initialize_empty(&dir, &c, g.clone()).unwrap();
+        let mut chain = Chain::open(&dir, Arc::new(AtomicBool::new(false))).unwrap();
+        let mine = |runtime: &Runtime, history: &mut Vec<Header>, producer: &[u8]| {
+            let mut block = runtime
+                .build_candidate(
+                    &g,
+                    history,
+                    vec![],
+                    g.timestamp + 60 * (history.len() as u64 + 1),
+                    [0; 4],
+                    producer.to_vec(),
+                )
+                .unwrap();
+            while !consensus::valid_pow(&block.header) {
+                block.header.nonce += 1;
+            }
+            runtime
+                .validate_and_apply_block(&g, history, &block)
+                .unwrap();
+            history.push(block.header.clone());
+            block
+        };
+        let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+        let mut history = Vec::new();
+        let a: Vec<Block> = (0..3).map(|_| mine(&runtime, &mut history, b"A")).collect();
+        for block in &a {
+            chain.import(&block.encode(), true).unwrap();
+        }
+        let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+        let mut history = Vec::new();
+        for block in &a[..2] {
+            runtime
+                .validate_and_apply_block(&g, &history, block)
+                .unwrap();
+            history.push(block.header.clone());
+        }
+        let b3 = mine(&runtime, &mut history, b"B");
+        let c4 = mine(&runtime, &mut history, b"B");
+        let (stored, held_headers) = (chain.index.stored(), chain.index.held());
+        let corruptions: [fn(&mut HeldBlock); 2] =
+            [|block| block.limits.0[2] -= 1, |block| block.work += 1u32];
+        for (k, corrupt) in corruptions.into_iter().enumerate() {
+            let peer = format!("10.0.0.{k}:1");
+            let held = chain.import_pushed(&b3.encode(), &peer).unwrap();
+            assert_eq!(held["held"], true);
+            corrupt(&mut chain.held.get_mut(&peer).unwrap().blocks[0]);
+            assert_eq!(
+                chain.import_pushed(&c4.encode(), &peer).unwrap_err(),
+                BEHIND
+            );
+            assert!(chain.held.is_empty());
+            assert_eq!(
+                (chain.index.stored(), chain.index.held()),
+                (stored, held_headers)
+            );
+            for block in [&b3, &c4] {
+                assert!(!chain.index.contains(&block.header.id()));
+            }
+            assert!(chain.offenders.is_empty(), "no peer is blamed");
+            assert_eq!(chain.tip(), a[2].header.id());
+        }
+        // Unchanged, the run is stored and connected.
+        chain.import_pushed(&b3.encode(), "10.0.0.9:1").unwrap();
+        chain.import_pushed(&c4.encode(), "10.0.0.9:1").unwrap();
+        assert_eq!(chain.tip(), c4.header.id());
+        assert_eq!(chain.index.stored(), stored + 2);
         drop(chain);
         let _ = std::fs::remove_dir_all(&dir);
     }
