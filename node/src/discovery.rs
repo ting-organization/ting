@@ -301,6 +301,13 @@ impl AddressBook {
             .get(address)
             .is_some_and(|e| e.source == Source::Seed)
     }
+    /// The seed nodes' addresses.
+    pub fn seeds(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+        self.entries
+            .values()
+            .filter(|e| e.source == Source::Seed)
+            .map(|e| e.address)
+    }
     /// Bans an address's range until `until`, dropping every address in it;
     /// returns whether it did. A range holding a configured peer is never
     /// banned, nor is this machine: banning it would ban every node on it.
