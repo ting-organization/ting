@@ -2827,9 +2827,12 @@ async fn rest_switches_off_at_once_whatever_its_clients_do() {
         "{:?}",
         started.elapsed()
     );
-    // Both are closed, the reader without the rest of the answer it was in:
-    // the first copy, of 1,585,988 bytes, never arrives whole.
-    for (stream, most) in [(&mut idle, 0), (&mut stalled, 1_500_000)] {
+    // Both are closed, the reader long before the sixteen copies it asked
+    // for, about 25 MB, have reached it. What it still reads after the close
+    // is what the two machines' socket buffers held by then, which depends on
+    // the system: on Linux, whose send buffers grow to megabytes, more than
+    // the first copy of 1,585,988 bytes.
+    for (stream, most) in [(&mut idle, 0), (&mut stalled, 8_000_000)] {
         let mut rest = Vec::new();
         let closed = tokio::time::timeout_at(
             started + Duration::from_secs(5),
