@@ -37,8 +37,8 @@ with another node.
 `ting run`. Ctrl+C stops it, and so does SIGTERM on Linux and macOS, which service
 managers such as systemd and container runtimes send.
 
-The node needs no peer address. It looks up the network's seed nodes at every start
-and finds further peers through them
+The node needs no peer address. It looks up the network's seed nodes as it starts,
+and again from time to time, and finds further peers through them
 ([finding more peers](../node/sync.md#finding-more-peers)), then downloads and
 validates every block from genesis. `ting status` shows the height it has reached,
 and `ting peers` the peers it is connected to. Its log, `node.log` in the data

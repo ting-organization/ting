@@ -11,6 +11,10 @@ publish = false
 [dependencies]
 ting-core = { path = ".." }
 axum = "=0.8.9"
+# REST's own accept loop: axum's serve sets no timeouts. Both already come
+# with axum, at these versions and features.
+hyper = { version = "=1.12.0", features = ["http1", "server"] }
+hyper-util = { version = "=0.1.21", features = ["tokio", "service"] }
 tower-http = { version = "=0.6.6", features = ["cors"] }
 tokio = { version = "=1.47.1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 clap = { version = "=4.5.48", features = ["derive"] }
@@ -25,6 +29,10 @@ sha2 = { version = "=0.10.9", features = ["compress"] }
 [dev-dependencies]
 vm-model = { path = "../vm-model" }
 wat = "=1.240.0"
+
+# The open-file limit; already in the build through tokio.
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.190"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [

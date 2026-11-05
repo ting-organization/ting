@@ -37,8 +37,8 @@ use ting_core::{
     protocol::{HEADER_LEN, Header},
 };
 use tokio::{
-    net::tcp::OwnedWriteHalf,
-    sync::mpsc,
+    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
     task::{AbortHandle, JoinSet},
     time::Instant,
 };
@@ -66,6 +66,15 @@ const LOOKING: Duration = Duration::from_secs(10);
 /// Rounds of one connection start at least this far apart, whatever the peer
 /// announces.
 const ROUND_GAP: Duration = Duration::from_millis(100);
+/// One connection exchanges pooled and deferred transactions at most once in
+/// this long, and up to `SWAP_JITTER` more at random, so that a node's
+/// connections do not list pools in step: each exchange lists the peer's pool
+/// and deferred set, up to five pages of 32 KiB, while pools may change many
+/// times a second. A change after a quiet while is exchanged at once, so a new
+/// transaction waits at most about three seconds a connection, as Bitcoin
+/// announces transactions to an outbound peer about every two.
+const SWAP_GAP: Duration = Duration::from_secs(2);
+const SWAP_JITTER: Duration = Duration::from_secs(1);
 /// Addresses are asked of each peer this often while the node has the
 /// connections it wants.
 const ASK_INTERVAL: u64 = 600;
@@ -75,13 +84,48 @@ const PROBE_INTERVAL: u64 = 120;
 /// connected until it moves.
 const STALE_TIP: u64 = 600;
 
+/// The most bytes of frames a connection reads ahead of handling them
+/// (wiki: reference/peer-protocol#limits): what its eight places for frames
+/// hold of the largest answers a syncing node asks for, a slice and its
+/// framing each, as before. A frame larger than the room left, such as a
+/// launch-era node's `pending` answer of up to 8 MiB, waits until the frames
+/// before it are handled, so a peer sending frames of 16 MiB has one waiting
+/// at a time, not eight.
+const QUEUED_MAX: usize = 8 * (SLICE_MAX + 1024);
+/// A frame read and not yet handled, with its share of `QUEUED_MAX`.
+type Queued = (Result<wire::Frame>, OwnedSemaphorePermit);
+/// Reads frames from `read` as they come, each once `room` has its size, or
+/// all of it for a larger one; a frame gives its share back as it is taken.
+fn reading(
+    mut read: OwnedReadHalf,
+    room: Arc<Semaphore>,
+) -> (tokio::task::JoinHandle<()>, mpsc::Receiver<Queued>) {
+    let (sender, frames) = mpsc::channel(8);
+    let reader = tokio::spawn(async move {
+        loop {
+            let frame = transport::read_wire_sized(&mut read, None, FRAME_MAX).await;
+            let end = frame.is_err();
+            let size = frame.as_ref().map_or(0, |(_, size)| *size).min(QUEUED_MAX);
+            let share = room
+                .clone()
+                .acquire_many_owned(u32::try_from(size).expect("QUEUED_MAX fits"))
+                .await
+                .expect("never closed");
+            let frame = frame.map(|(frame, _)| frame);
+            if sender.send((frame, share)).await.is_err() || end {
+                break;
+            }
+        }
+    });
+    (reader, frames)
+}
 /// One outbound connection's transport: requests go out, one at a time or
 /// several before their answers, and frames come back through a reader task,
 /// so that the announcements a peer sends between answers are noticed while
 /// the connection is idle.
 struct Conn {
     writer: OwnedWriteHalf,
-    frames: mpsc::Receiver<Result<wire::Frame>>,
+    frames: mpsc::Receiver<Queued>,
     reader: tokio::task::JoinHandle<()>,
     /// The peer's latest announcement not yet acted on.
     news: Option<wire::Announcement>,
@@ -119,17 +163,8 @@ impl Conn {
         if remote.nonce == node.nonce {
             return Err(ITSELF.into());
         }
-        let (mut read, writer) = stream.into_split();
-        let (sender, frames) = mpsc::channel(8);
-        let reader = tokio::spawn(async move {
-            loop {
-                let frame = transport::read_wire(&mut read, None, FRAME_MAX).await;
-                let end = frame.is_err();
-                if sender.send(frame).await.is_err() || end {
-                    break;
-                }
-            }
-        });
+        let (read, writer) = stream.into_split();
+        let (reader, frames) = reading(read, Arc::new(Semaphore::new(QUEUED_MAX)));
         let conn = Self {
             writer,
             frames,
@@ -177,7 +212,8 @@ impl Conn {
             let frame = tokio::time::timeout_at(deadline, self.frames.recv())
                 .await
                 .map_err(|_| "reply deadline exceeded")?
-                .ok_or("connection closed")??;
+                .ok_or("connection closed")?
+                .0?;
             match frame {
                 wire::Frame::Announcement(news) => self.news = Some(news),
                 wire::Frame::Answer(answer) => return Ok(Ok(answer)),
@@ -188,7 +224,7 @@ impl Conn {
     }
     /// Waits for the peer's next announcement.
     async fn announced(&mut self) -> Result<()> {
-        match self.frames.recv().await.ok_or("connection closed")?? {
+        match self.frames.recv().await.ok_or("connection closed")?.0? {
             wire::Frame::Announcement(news) => {
                 self.news = Some(news);
                 Ok(())
@@ -237,6 +273,8 @@ struct Link {
     /// while it is on this node's branch.
     pushed: Option<Hash>,
     swap: bool,
+    /// When the next exchange of transactions may start.
+    swap_due: Instant,
     /// The exchange of pooled and of deferred transactions with the peer.
     relay: [Relay; 2],
     /// The tip at which transactions refused for want of room were last
@@ -335,9 +373,11 @@ impl Link {
             self.push = false;
             more |= self.push_blocks(local).await?;
         }
-        if self.swap {
+        if self.swap && Instant::now() >= self.swap_due {
             self.swap = false;
             self.swap_pool(local).await?;
+            let jitter = SWAP_JITTER * (discovery::seed() % 1_000) as u32 / 1_000;
+            self.swap_due = Instant::now() + SWAP_GAP + jitter;
         }
         if let Some(error) = &self.conn.broken {
             return Err(error.clone());
@@ -1029,7 +1069,7 @@ impl Link {
             .book
             .lock()
             .unwrap()
-            .learn_shared(&shared, self.address.ip());
+            .learn_shared(&shared, self.address.ip(), crate::now());
     }
     /// A block delivered or a round completed: the peer is proven, and its
     /// status current.
@@ -1088,6 +1128,7 @@ async fn follow(
         push: true,
         pushed: None,
         swap: true,
+        swap_due: Instant::now(),
         relay: Default::default(),
         retried: None,
         asked: 0,
@@ -1115,6 +1156,8 @@ async fn follow(
             } else {
                 KEEPALIVE
             };
+            // An exchange that waits for its time wakes the connection then.
+            let (swapping, swap_due) = (link.swap, link.swap_due);
             tokio::select! {
                 changed = events.changed() => {
                     if changed.is_err() {
@@ -1127,6 +1170,7 @@ async fn follow(
                     link.fetch = true;
                     link.swap = true;
                 }
+                _ = tokio::time::sleep_until(swap_due), if swapping => {}
                 _ = node.stopped() => return Ok(()),
             }
         }
@@ -1545,6 +1589,69 @@ pub async fn run(node: Node) {
 mod tests {
     use super::*;
     use discovery::Source;
+
+    #[tokio::test]
+    async fn frames_read_ahead_of_handling_stay_within_their_room() {
+        // A peer sends frames of 15 MiB, as many as it can, and the node
+        // handles none for a while: what it reads ahead stays within the
+        // room, one frame here, however many places the queue has; then every
+        // frame comes through whole, in order.
+        fn items(n: u8, count: usize, size: usize) -> wire::Frame {
+            let item = wire::Item {
+                id: [n; 32],
+                not_before: None,
+                body: wire::Body::Whole(vec![n; size]),
+            };
+            wire::Frame::Answer(Answer::Items(vec![item; count]))
+        }
+        /// A peer at a new address that sends `frames`, and how many it got
+        /// out.
+        async fn peer(
+            frames: Vec<wire::Frame>,
+        ) -> (OwnedReadHalf, Arc<std::sync::atomic::AtomicUsize>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = sent.clone();
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                for frame in frames {
+                    transport::write_wire(&mut stream, &frame).await.unwrap();
+                    counted.fetch_add(1, Ordering::Relaxed);
+                }
+                // Open until the test ends.
+                std::future::pending::<()>().await;
+            });
+            let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            (stream.into_split().0, sent)
+        }
+        let large: Vec<_> = (0..12).map(|n| items(n, 15, SLICE_MAX)).collect();
+        let (read, sent) = peer(large.clone()).await;
+        let room = Arc::new(Semaphore::new(QUEUED_MAX));
+        let (_reader, mut frames) = reading(read, room.clone());
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(room.available_permits(), 0);
+        assert!(sent.load(Ordering::Relaxed) < large.len());
+        for frame in &large {
+            let (got, _share) = tokio::time::timeout(Duration::from_secs(10), frames.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&got.unwrap(), frame);
+            assert!(frames.len() <= 1);
+        }
+        // Frames of half a slice queue as before, eight in the queue's places
+        // and a ninth waiting for one, each holding its size of the room.
+        let small: Vec<_> = (0..16).map(|n| items(n, 1, SLICE_MAX / 2)).collect();
+        let size = small[0].encode().len();
+        let (read, _) = peer(small).await;
+        let room = Arc::new(Semaphore::new(QUEUED_MAX));
+        let (_reader, frames) = reading(read, room.clone());
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(frames.len(), 8);
+        assert_eq!(room.available_permits(), QUEUED_MAX - 9 * size);
+    }
 
     #[test]
     fn a_node_leaves_the_seeds_once_half_its_peers_can_serve_it() {

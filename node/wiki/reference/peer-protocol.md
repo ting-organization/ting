@@ -128,6 +128,9 @@ length has, and every answer 30 seconds from its request.
 - **`submit`.** Refused with `transaction already included` when one of the node's
   last 1,440 canonical blocks included the transaction and it succeeded there, or
   one of the last 10 included it at all.
+- **`addresses`.** The reference node gives every peer the same answer for an hour:
+  asking again within it is answered with the same list, never with an error
+  ([what a node shares](../node/sync.md#finding-more-peers)).
 
 ## Answers
 
@@ -296,7 +299,8 @@ A reference node that connects to you sends, after its hello, in rounds:
 - `state`, then `import` of up to 32 of its blocks past your locator, when its tip
   has more work than yours;
 - `inventory`, `pending`, `deferred`, `transaction_raw` and `submit` to exchange
-  pooled and deferred transactions;
+  pooled and deferred transactions, when your pool or its own has changed and
+  every 30 seconds, at most once in two seconds and up to a second more at random;
 - `addresses` every ten seconds while it looks for peers, otherwise every ten
   minutes, when its discovery is on.
 
@@ -316,6 +320,9 @@ shown by `ting peers`; nothing depends on it.
 - Frames of 1 byte to 16 MiB, a `hello` frame of at most 4 KiB, and every field
   within its bound. A frame's buffer grows as its bytes arrive, so a length alone
   reserves nothing
+- On a connection it opened, a node reads at most 8 MiB and 8 KiB of frames ahead
+  of handling them, eight slices with their framing, or one frame if it is larger;
+  until it catches up, the rest waits in the peer's sending
 - Blocks and transactions larger than 1 MiB travel in slices of at most 1 MiB; a
   block of at most its height's data capacity and a transaction of at most the next
   block's, within its transfer time
@@ -340,7 +347,9 @@ shown by `ting peers`; nothing depends on it.
   once, without an answer, even before its `hello`
 - 200 request units a second per inbound connection after a burst of 2,000, and 120
   seconds without a request before it is closed
-- At most 32 addresses in or from one `addresses` answer
+- At most 32 addresses in or from one `addresses` answer, the same answer to every
+  peer for an hour, and at most 32 addresses an hour learned from the peers of one
+  network group, shared or announced
 - Five seconds per connection attempt and per frame, 30 seconds per answer
 
 No message reaches administration: peer configuration, mining and shutdown exist

@@ -3,8 +3,7 @@ use crate::{
     chain::{Event, INVALID, TOO_LARGE, is_invalid, transfer_time},
     config,
     daemon::Node,
-    discovery::{self, Source},
-    peers, wire,
+    discovery, peers, wire,
 };
 use serde_json::{Value, json};
 use std::{
@@ -539,6 +538,15 @@ pub async fn read_wire<S: AsyncRead + Unpin>(
     let bytes = read_bytes(stream, idle, max).await?;
     wire::Frame::decode(&bytes)
 }
+/// A frame, as `read_wire` reads it, and its size in bytes.
+pub async fn read_wire_sized<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    idle: Option<Duration>,
+    max: usize,
+) -> Result<(wire::Frame, usize)> {
+    let bytes = read_bytes(stream, idle, max).await?;
+    Ok((wire::Frame::decode(&bytes)?, bytes.len()))
+}
 pub async fn write_wire<S: AsyncWrite + Unpin>(stream: &mut S, frame: &wire::Frame) -> Result<()> {
     write_bytes(stream, &frame.encode(), FRAME_MAX).await
 }
@@ -789,7 +797,10 @@ async fn serve(
     if node.discovery
         && let Some(address) = announced
     {
-        node.book.lock().unwrap().learn(address, Source::Inbound);
+        node.book
+            .lock()
+            .unwrap()
+            .learn_announced(address, crate::now());
     }
     let mut events = node.handle.events();
     let mut told = announcement(&events.borrow_and_update());
@@ -872,7 +883,7 @@ async fn serve(
             wire::Request::Hello(_) => Err(wire::UNKNOWN_REQUEST.into()),
             wire::Request::Addresses => {
                 let addresses = if node.discovery {
-                    let book = node.book.lock().unwrap();
+                    let mut book = node.book.lock().unwrap();
                     book.share(remote.ip(), announced, crate::now(), discovery::seed())
                 } else {
                     Vec::new()

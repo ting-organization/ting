@@ -77,7 +77,14 @@ tip changes, and the node follows:
      tip has moved, since a block makes room, at most the next block's data
      capacity of them each way at each tip: no more than a block can have freed.
      A transaction larger than one 1 MiB slice travels in slices both ways
-     ([transactions in slices](#transactions-in-slices)).
+     ([transactions in slices](#transactions-in-slices)). A connection exchanges
+     at most once in two seconds, and up to a second more at random, so that the
+     node's connections do not exchange in step: each exchange lists the peer's
+     pool and deferred set, up to five pages of 32 KiB, and pools may change many
+     times a second. A change after a quiet while is exchanged at once, so a new
+     transaction waits at most about three seconds at each connection, well
+     within a block's minute, as Bitcoin announces transactions to an outbound
+     peer about every two seconds.
    - **Addresses**, with discovery on: it asks for `addresses` and adds what it
      receives to its address book, every ten seconds while it has fewer peers than it
      wants, otherwise every ten minutes.
@@ -339,7 +346,9 @@ The peer that sent invalid data is also banned for a day, with its address range
 its IPv4 address, or the /64 of its IPv6 address, which one subscriber usually holds
 whole. While the ban lasts:
 
-- addresses in the range leave the address book and are not learned again;
+- addresses in the range leave the address book and are not learned again, except
+  a seed node's, which is not connected while the ban lasts and is connected as
+  before once it ends, so that a ban never costs a node its way back to the network;
 - connections from the range are refused, and open connections from it end at once;
 - open connections to the range end within two seconds.
 
@@ -356,7 +365,11 @@ node [warns](storage.md#warnings) that it may be the one out of step.
 At the heights of the chain's [seed](../reference/conformance.md#the-seed), only the
 listed blocks are taken: any other is an invalid header. A listed block that this
 node's own execution rejects is the node's fault, not the peer's: the node stops and
-reports that it does not conform, holding nothing against the peer.
+reports that it does not conform, holding nothing against the peer. So is a block
+whose parent's state the node does not hold, as when its stored state is damaged:
+that state is the node's own, its root checked when the parent connected, and the
+block takes no part in it, so the node stops and says so, marking nothing invalid
+and holding nothing against the peer.
 
 Some failures look like misbehavior without proving it, and cost the peer nothing
 beyond the request: headers that do not follow the chain they continue, a chain that
@@ -366,10 +379,10 @@ either side does not take.
 ## Finding more peers
 
 A node on the production network needs no configured peer: the node carries the
-names of the network's seed nodes, looks them up as it starts, and learns from
-them. On any network, one configured peer is enough. A node learns further
-addresses from its peers and keeps connections to up to `max_peers` of them, eight
-unless configured otherwise. Every new connection asks for addresses first, before
+names of the network's seed nodes, looks them up as it starts and from time to
+time, and learns from them. On any network, one configured peer is enough. A node
+learns further addresses from its peers and keeps connections to up to `max_peers`
+of them, eight unless configured otherwise. Every new connection asks for addresses first, before
 headers and blocks, so a node that knows only a seed learns of other peers at once.
 This follows the address exchange of Bitcoin, kept small: no separate discovery
 protocol, no distributed hash table, nothing beyond the connections above.
@@ -378,18 +391,42 @@ protocol, no distributed hash table, nothing beyond the connections above.
 listening addresses, filled from four sources:
 
 - on the production network, its seed nodes: `host:port` names built into the node,
-  each looked up for at most five seconds at every start; a name that does not
-  resolve is passed over;
+  each looked up for at most five seconds as the node starts, again every hour, as
+  often as an address that keeps failing is tried again, so that a seed whose
+  address changed is found by then, and every minute while the book holds no seed
+  address the node may connect to, as when bans or failures cover them all; a name
+  that does not resolve is passed over, and after the first lookup without a word
+  in the log;
 - its configured peers;
 - the listening port each connecting peer announces in its `hello`, taken at the IP
   address the connection came from;
 - the `addresses` its peers share, at most 32 from one answer, each only if the
   sending peer could reach it (below).
 
+No one source fills the book. Of the addresses it discovers, announced or shared, it
+keeps at most two of one public IP address, room for a node and a port it moved to,
+and 32 of one network group (an IPv4 /16, an IPv6 /32): a 32nd of the book, as
+Bitcoin's tried table keeps one group to 8 of its 256 buckets, so an attacker needs
+32 networks to fill it. A network group adds at most 32 in an hour, by announcing
+its own or by sharing others: as many as an honest peer's answer changes by in that
+time (below). When an address's IP address or network group holds its share, the
+least worth keeping of them gives way to it, never one the node has completed a
+round with. Configured peers and seeds count for none of this, and addresses on
+this machine or a private network have no share: they come only from there.
+
 **What a node shares.** An `addresses` answer holds at most 32 addresses in random
 order, and only addresses the node has itself completed a round with in the last 24
 hours, without a failure since. It never includes the asking peer's own announced
-address. An address reaches only peers that could reach it too:
+address. Every peer is given the same answer for an hour, drawn at the first request
+after the last one's hour, so that asking again, or over many connections, tells
+nothing new: neither the book nor the node's connections can be mapped by asking.
+Bitcoin keeps its answer for about a day, beside relaying addresses as it hears of
+them; here answers are the only way addresses spread, so a new node becomes known
+within hours rather than a day. An answer that held every address there was to
+share is drawn again as soon as there is another, so a node that has just started is
+not held to the few it knew, and an address that is banned leaves it at once. An
+address reaches only peers that could reach it too, and peers at private or loopback
+addresses have their own answer:
 
 | Address | Shared with and accepted from |
 |---|---|
@@ -442,7 +479,7 @@ they then do not serve keep the node from them for no longer than it takes to ca
 them. A node that reaches only the seeds keeps them. A configured seed is a
 configured peer like any other, and an address a peer shared is marked as a seed's
 when the seed's name resolves to it. A seed's address is never dropped from a full
-book.
+book, nor by a ban.
 
 **Probing.** When every slot is taken, the node tests one untried address every two
 minutes with a connection that only exchanges `hello`, never a seed's. An address
@@ -457,8 +494,11 @@ configured one.
 **The book.** It holds at most 1,024 addresses and lives in `peers.json` in the data
 directory, saved every two seconds when it has changed. When it is full, the address
 least worth keeping makes room: never a configured one, an untried one before one
-with a completed round, the most failed first. The file holds only hints; if it is
-missing or unreadable, the node starts with an empty book. A peer removed from the
+with a completed round, the most failed first, and of those alike one at random, so
+that no address can be chosen to stay or to go. The file holds only hints; if it is
+missing or unreadable, the node starts with an empty book. A book that holds more of
+one IP address or network group than its share keeps the best of them when it loads:
+the most recently proven, then the least failed. A peer removed from the
 configuration is forgotten, and connected again only if a peer shares its address
 later.
 
@@ -487,8 +527,11 @@ On a quiet network this costs one extra connection and the connections to the se
   connection, in place of the one least worth keeping: the peers that delivered new
   blocks latest, the longest connected, the connections of the node's own machine
   and those less than ten seconds old keep theirs. An operator raises
-  `max_inbound` for a seed node, and the process's open-file limit with it
-- An address book of at most 1,024 addresses
+  `max_inbound` for a seed node; on Unix the node raises its open-file limit to
+  match as it starts, as far as the system's hard limit allows
+- An address book of at most 1,024 addresses: of the discovered ones, at most 2 of
+  one public IP address and 32 of one network group, and at most 32 added by one
+  network group in an hour
 
 The transport's own limits, on connections, requests and frames, are on
 [Peer protocol](../reference/peer-protocol.md#limits).
