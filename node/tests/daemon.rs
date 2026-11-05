@@ -1991,7 +1991,9 @@ async fn the_node_answers_while_ting_mine_searches() {
 async fn the_built_in_miner_waits_while_the_node_is_behind_its_best_header() {
     // A fake peer shows three valid headers and never serves their blocks:
     // the node stays at height 0 behind a best header at 3, and its miner
-    // waits rather than mine a block about to be replaced.
+    // waits rather than mine a block about to be replaced, but only for a
+    // block's transfer time, 70 seconds at this chain's capacity: a tip that
+    // does not move has no download behind it.
     let n = Node::start(false, "behind");
     let g = config::genesis(&n.dir.0).unwrap();
     let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
@@ -2040,7 +2042,8 @@ async fn the_built_in_miner_waits_while_the_node_is_behind_its_best_header() {
     }
     n.call("miner", json!({"action":"start","threads":1,"spacing":0}))
         .await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_secs(30);
     loop {
         let status = n.call("miner", json!({"action":"status"})).await;
         if status["last_error"]
@@ -2054,6 +2057,13 @@ async fn the_built_in_miner_waits_while_the_node_is_behind_its_best_header() {
     }
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(n.height().await, 0);
+    let deadline = started + Duration::from_secs(150);
+    while n.height().await == 0 {
+        let status = n.call("miner", json!({"action":"status"})).await;
+        assert!(tokio::time::Instant::now() < deadline, "{status}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(started.elapsed() >= Duration::from_secs(60));
     n.call("miner", json!({"action":"stop"})).await;
     n.stop().await;
 }

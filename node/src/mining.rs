@@ -23,7 +23,11 @@
 //! stays the only owner of state and external tools can do by hand what the
 //! miner does in a loop.
 
-use crate::{Result, chain::Handle, now};
+use crate::{
+    Result,
+    chain::{Event, Handle},
+    now,
+};
 
 /// The answer to a solution for a template the node no longer holds, as after
 /// the tip moved.
@@ -37,7 +41,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use ting_core::{
     hash::{Hash, hex},
@@ -457,6 +461,36 @@ impl Miner {
     }
 }
 
+/// Whether the built-in miner waits for its node to catch up with its best
+/// header (wiki: node/mining#the-built-in-miner). Far behind it, the node's
+/// tip is about to be replaced, and a block on it with it: the miner waits
+/// while the node is more than one block behind and its tip moves, or while
+/// it rebuilds undo data to move it. A tip that stays put for a block's
+/// transfer time, the time a peer has to deliver a block before it is asked
+/// of another, has no download behind it, as when a peer showed headers
+/// whose blocks it never sends; the miner then mines on it. That time counts
+/// from the tip's last move, or from when the node fell behind.
+struct CatchUp {
+    tip: Hash,
+    since: Instant,
+}
+impl CatchUp {
+    fn new(tip: Hash, now: Instant) -> Self {
+        Self { tip, since: now }
+    }
+    /// How far behind its best header the node is, if the miner waits.
+    fn waits(&mut self, event: &Event, replaying: bool, now: Instant) -> Option<u64> {
+        let behind = event.best.saturating_sub(event.height);
+        if behind <= 1 || event.tip != self.tip {
+            self.tip = event.tip;
+            self.since = now;
+        }
+        let moving =
+            now.saturating_duration_since(self.since) < crate::chain::transfer_time(event.data);
+        (behind > 1 && (moving || replaying)).then_some(behind)
+    }
+}
+
 fn run(
     handle: Handle,
     search: Arc<dyn Search>,
@@ -468,21 +502,22 @@ fn run(
     let mut nonce_start: u128 = 0;
     let mut last_block = 0u64;
     let events = handle.events();
+    let mut catch_up = CatchUp::new(events.borrow().tip, Instant::now());
     while !stop.load(Ordering::Relaxed) {
         if spacing > 0 && now() < last_block.saturating_add(spacing) {
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
-        // Far behind its best header, the node's tip is about to be replaced
-        // and a block on it with it: the miner waits until it catches up.
-        let (height, best) = {
-            let event = events.borrow();
-            (event.height, event.best)
-        };
-        if best > height + 1 {
+        // Far behind its best header while blocks connect, the node's tip is
+        // about to be replaced, and a block on it with it.
+        let replaying = matches!(
+            &*handle.status().status,
+            Ok(status) if status["replaying"] == true
+        );
+        let waiting = catch_up.waits(&events.borrow(), replaying, Instant::now());
+        if let Some(behind) = waiting {
             stats.lock().unwrap().last_error = Some(format!(
-                "waiting: the node is {} blocks behind its best header",
-                best - height
+                "waiting: the node is {behind} blocks behind its best header"
             ));
             std::thread::sleep(Duration::from_millis(500));
             continue;
@@ -590,5 +625,67 @@ mod tests {
                 assert_eq!(id, header.id(), "seed {seed} nonce {nonce}");
             }
         }
+    }
+
+    #[test]
+    fn the_miner_waits_while_blocks_connect_and_mines_once_they_stop() {
+        // Production's data capacity, 256 KiB: a block's transfer time is 70
+        // seconds.
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        let event = |height: u64, best: u64| Event {
+            tip: hash("tip", &height.to_le_bytes()),
+            height,
+            best,
+            data: 262_144,
+            ..Default::default()
+        };
+        let mut catch_up = CatchUp::new(event(10, 10).tip, at(0));
+        assert_eq!(catch_up.waits(&event(10, 10), false, at(0)), None);
+        // A header just ahead of its block is no reason to wait.
+        assert_eq!(catch_up.waits(&event(10, 11), false, at(1)), None);
+        // A download: the miner waits for as long as blocks connect, here
+        // one a second for ten minutes.
+        for second in 2..600 {
+            assert_eq!(
+                catch_up.waits(&event(second + 10, 1_000), false, at(second)),
+                Some(990 - second)
+            );
+        }
+        // Then none comes: it waits a transfer time, then mines on its tip,
+        // until a block connects again.
+        assert_eq!(
+            catch_up.waits(&event(609, 1_000), false, at(668)),
+            Some(391)
+        );
+        assert_eq!(catch_up.waits(&event(609, 1_000), false, at(669)), None);
+        assert_eq!(catch_up.waits(&event(609, 1_000), false, at(900)), None);
+        assert_eq!(
+            catch_up.waits(&event(610, 1_000), false, at(901)),
+            Some(390)
+        );
+        // While the node rebuilds undo data to move its tip, the tip stays
+        // and the miner waits.
+        assert_eq!(
+            catch_up.waits(&event(610, 1_000), true, at(5_000)),
+            Some(390)
+        );
+        // Two headers above the tip whose blocks never come: the miner waits
+        // a transfer time from when they came, then mines on its tip.
+        let mut catch_up = CatchUp::new(event(20, 20).tip, at(0));
+        assert_eq!(catch_up.waits(&event(20, 20), false, at(100)), None);
+        assert_eq!(catch_up.waits(&event(20, 22), false, at(101)), Some(2));
+        assert_eq!(catch_up.waits(&event(20, 22), false, at(169)), Some(2));
+        assert_eq!(catch_up.waits(&event(20, 22), false, at(170)), None);
+        // Its own block moves the tip; one behind, it goes on mining.
+        assert_eq!(catch_up.waits(&event(21, 22), false, at(171)), None);
+        // A larger capacity gives a block longer: 8 MiB, 140 seconds.
+        let large = |height: u64, best: u64| Event {
+            data: 8 << 20,
+            ..event(height, best)
+        };
+        let mut catch_up = CatchUp::new(large(5, 5).tip, at(0));
+        assert_eq!(catch_up.waits(&large(5, 7), false, at(139)), Some(2));
+        assert_eq!(catch_up.waits(&large(5, 7), false, at(140)), None);
     }
 }
