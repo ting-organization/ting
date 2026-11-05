@@ -49,7 +49,7 @@ To build a template the node:
    force, and nothing executed yet;
 2. adds transactions one at a time, executing each into the candidate and keeping
    it only when the block still fits it. Its selector picks them from the pool (the
-   reference selector gives every transaction and every address its turn, as
+   reference selector lets the addresses take turns, first in, first served, as
    [the mempool](#the-mempool) describes); instead,
    `ting template --tx ID`, repeated, names exactly the pooled transactions to
    include, in order, bypassing the selector, and fails if one does not fit;
@@ -85,9 +85,9 @@ synchronization and relay.
   receipt, with its events, or nothing when the block would not fit it, and it can
   take the last one back out. So it can judge transactions by anything a receipt
   shows, such as what the programs it knows pay the producer, and remember what it
-  learned of each by its id. The reference `FirstIn` gives every pooled transaction
-  and every address its turn, first in, first served, and keeps each one the block
-  fits; when the pool is full, it makes room by the address rule below. The node itself knows nothing about
+  learned of each by its id. The reference `FirstIn` lets the addresses take turns,
+  first in, first served, and keeps each transaction the block fits; when the pool
+  is full, it makes room by the address rule below. The node itself knows nothing about
   fees or rewards; those belong to programs.
 - **Search** (`Search`): finding the nonce for a header within a bounded number of
   attempts. The reference `Cpu` hashes the header up to its nonce once, then each
@@ -201,11 +201,19 @@ Mempool rules are local policy, not consensus:
   give up theirs. Otherwise the submission is refused with `mempool is full`. A
   [mining fork](#what-a-mining-fork-replaces) may make room by its own rule, such as
   what transactions pay it;
-- the reference selector tries the transactions no template has run first, then
-  those run longest ago. Among them it takes the first of each address before the
-  second of any, and the addresses whose transactions it tried longest ago first, so
-  every address gets its turn even while another fills the pool with transactions
-  that never fit. A transaction whose id is already pooled is not added again;
+- the reference selector lets address ranges take turns: an IPv4 address, or the
+  /64 of an IPv6 address, which one subscriber usually holds whole, as
+  [bans](sync.md#invalid-data) count them; the operator's own transactions are one
+  more. The ranges wait in one queue. A range joins it at the back when it first has
+  a transaction in the pool, and goes to the back again whenever a template keeps
+  one of its transactions, or runs one into a block holding nothing else; one tried
+  after others, which the block no longer fits, keeps its place. A template takes the
+  first transaction of each range before the second of any, the ranges in queue
+  order, and arrival order within that, each one the block still fits. So no
+  transaction goes first for being new, a new address waits behind those already
+  waiting, and an address that fills the pool with transactions that never fit
+  spends one template's allowance per turn. A transaction whose id is already pooled
+  is not added again;
 - a transaction a peer relays is refused with `transaction already included` when
   one of the last 1,440 canonical blocks included it and it succeeded there: a pool
   keeps a transaction at most a day, so a relayed one this recent is one a block just
@@ -218,6 +226,17 @@ Mempool rules are local policy, not consensus:
   that have waited a day. A live reorganization returns displaced transactions that
   the new branch does not include, within the same limits;
 - the pool is not saved: a node starts, and recovers, with an empty pool.
+
+The queue makes taking blocks cost addresses, which is as far as a policy without
+fees can go. A transaction that fails is still valid in a block: what it changed is
+undone, any payment with it, while the compute it ran stays charged to the block, so
+one that loops until the block's compute is gone fills a block and costs its sender
+nothing. In the queue it buys its range one template. A sender with N ranges, each
+holding such a transaction, fills about N of every N + 1 templates, and a waiting
+transaction gets into a block after about N + 1 blocks on average: each block of
+delay costs the sender about one more IPv4 address or IPv6 /64. A
+[mining fork](#what-a-mining-fork-replaces) can choose by what transactions pay it
+instead.
 
 Acceptance into the pool means a transaction is well formed, not that it will
 succeed. Authentication, assets and replay protection are decided by programs when

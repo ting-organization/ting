@@ -3745,6 +3745,136 @@ fn an_address_whose_transaction_was_just_tried_lets_the_others_go_first() {
     // the attacker's next loop.
     assert_eq!(templates_until(&mut chain, &hex(&honest.id(chain_id))), 2);
 }
+/// A deployment whose initializer loops until it has used exactly a block's
+/// compute: it fails, so its sender pays nothing, and it fills the block.
+fn filler(chain: &Chain, n: u64) -> ting_core::protocol::Transaction {
+    ting_core::protocol::Transaction {
+        budget: ting_core::meter::Resources([chain.genesis.initial.0[0], 16, 4096, 4096]),
+        payload: ting_core::protocol::Payload::Deploy {
+            code: wat::parse_str("(module (func (export \"invoke\") (loop br 0)))").unwrap(),
+            input: n.to_le_bytes().to_vec(),
+        },
+    }
+}
+#[test]
+fn new_block_fillers_from_two_addresses_do_not_keep_a_waiting_transaction_out() {
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let chain_id = chain.genesis.chain_id();
+    let ip = |s: &str| Some(s.parse::<std::net::IpAddr>().unwrap());
+    let attackers = [ip("203.0.113.7"), ip("203.0.113.8")];
+    chain
+        .submit_from(&filler(&chain, 0).encode(), attackers[0])
+        .unwrap();
+    let honest = support::tx();
+    chain
+        .submit_from(&honest.encode(), ip("198.51.100.4"))
+        .unwrap();
+    let honest = hex(&honest.id(chain_id));
+    // A new filler from the other address before every block: each is one no
+    // template has run, from an address none has taken one of lately.
+    let mut mined = None;
+    for n in 1..=6u64 {
+        let answer = chain.mine(1, 1_000_000).unwrap();
+        let block = chain
+            .request("block", json!({"id":answer["blocks"][0]["id"]}))
+            .unwrap();
+        let transactions = block["transactions"].as_array().unwrap();
+        assert_eq!(transactions.len(), 1, "every block holds one transaction");
+        if transactions[0] == json!(honest) {
+            mined.get_or_insert(n);
+        }
+        chain
+            .submit_from(&filler(&chain, n).encode(), attackers[(n % 2) as usize])
+            .unwrap();
+    }
+    // The first filler arrived first and fills the first block; the honest
+    // transaction has waited longer than the next one and goes in the second.
+    assert_eq!(mined, Some(2));
+}
+#[test]
+fn address_ranges_take_turns_and_a_new_one_joins_at_the_back() {
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let chain_id = chain.genesis.chain_id();
+    let ip = |s: &str| Some(s.parse::<std::net::IpAddr>().unwrap());
+    let id = |tx: &ting_core::protocol::Transaction| json!([hex(&tx.id(chain_id))]);
+    let next =
+        |chain: &mut Chain| chain.request("template", json!({})).unwrap()["transactions"].clone();
+    // Two fillers from addresses in one IPv6 /64, then one from an IPv4
+    // address, then an honest transaction: each fills a template alone.
+    let (a, b, c) = (filler(&chain, 0), filler(&chain, 1), filler(&chain, 2));
+    chain
+        .submit_from(&a.encode(), ip("2001:db8:1:2::1"))
+        .unwrap();
+    chain
+        .submit_from(&b.encode(), ip("2001:db8:1:2::ff"))
+        .unwrap();
+    chain.submit_from(&c.encode(), ip("203.0.113.7")).unwrap();
+    let honest = support::tx();
+    chain
+        .submit_from(&honest.encode(), ip("198.51.100.4"))
+        .unwrap();
+    // The /64 is one range: its second filler waits until the other ranges
+    // have had their turn, and each range goes to the back after its own.
+    assert_eq!(next(&mut chain), id(&a));
+    assert_eq!(next(&mut chain), id(&c));
+    assert_eq!(next(&mut chain), id(&honest));
+    // A new range arrives with a filler no template has run: it joins at the
+    // back, behind the /64, whose turn has come round again.
+    let d = filler(&chain, 3);
+    chain.submit_from(&d.encode(), ip("192.0.2.9")).unwrap();
+    assert_eq!(next(&mut chain), id(&a));
+    assert_eq!(next(&mut chain), id(&c));
+    assert_eq!(next(&mut chain), id(&honest));
+    assert_eq!(next(&mut chain), id(&d));
+}
+#[test]
+fn turns_order_by_rank_then_queue_place_then_arrival() {
+    use std::{collections::BTreeMap, net::IpAddr};
+    use ting_node::mining::{Pending, turns};
+    let tx = support::tx();
+    let ip = |s: &str| Some(s.parse::<IpAddr>().unwrap());
+    // Arrival order; `tried` plays no part, so it is set against the order.
+    let sources = [
+        ip("198.51.100.1"),
+        ip("2001:db8:1:2::1"),
+        ip("198.51.100.1"),
+        ip("2001:db8:1:2:ffff::"),
+        ip("203.0.113.9"),
+        None,
+        ip("203.0.113.9"),
+        ip("192.0.2.50"),
+    ];
+    let pool: Vec<Pending<'_>> = sources
+        .iter()
+        .enumerate()
+        .map(|(at, &source)| Pending {
+            id: [at as u8; 32],
+            tx: &tx,
+            bytes: 1,
+            arrived: at as u64,
+            source,
+            tried: if at == 7 { 0 } else { 100 - at as u64 },
+        })
+        .collect();
+    // Places in the queue by range: an IPv6 address counts as its /64, and
+    // the range of 192.0.2.50 has none.
+    let places = BTreeMap::from([
+        (ip("198.51.100.1"), 5),
+        (ip("2001:db8:1:2::"), 3),
+        (ip("203.0.113.9"), 3),
+        (None, 7),
+    ]);
+    // First of each range: the /64 and 203.0.113.9 (place 3, by arrival),
+    // 198.51.100.1 (5), the node's own (7), then the range with no place.
+    // Then the second of each, in the same order.
+    assert_eq!(turns(&pool, &places), vec![1, 4, 0, 5, 7, 3, 6, 2]);
+    // With no places at all, rank and arrival decide.
+    assert_eq!(turns(&pool, &BTreeMap::new()), vec![0, 1, 4, 5, 7, 2, 3, 6]);
+}
 #[test]
 fn a_transaction_a_fork_takes_back_out_stays_pooled() {
     use ting_core::vm::Candidate;
