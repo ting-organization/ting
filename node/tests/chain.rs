@@ -505,6 +505,118 @@ fn a_relayed_transaction_a_recent_block_included_is_refused() {
         ting_node::chain::INCLUDED
     );
 }
+/// Relays `tx` as a peer would.
+fn relay(
+    chain: &mut Chain,
+    tx: &ting_core::protocol::Transaction,
+) -> Result<serde_json::Value, String> {
+    chain.request(
+        "submit",
+        json!({"hex":hex(&tx.encode()),"relayed":true,"peer":"192.0.2.1:18442"}),
+    )
+}
+#[test]
+fn a_relayed_transaction_that_succeeded_after_failing_in_the_same_block_is_refused() {
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let chain_id = g.chain_id();
+    let deploy = support::tx();
+    let contract = {
+        let mut bytes = chain_id.to_vec();
+        bytes.extend(deploy.id(chain_id));
+        bytes.extend(0u64.to_le_bytes());
+        ting_core::hash::hash("contract", &bytes)
+    };
+    let program = call(&hex(&contract), vec![]);
+    let nothing = call(&hex(&[7; 32]), vec![]);
+    // One block calls the program twice before it exists and once after,
+    // and calls nothing three times.
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = vec![];
+    let block = mine(
+        &runtime,
+        &g,
+        &mut history,
+        vec![
+            program.clone(),
+            nothing.clone(),
+            program.clone(),
+            nothing.clone(),
+            deploy,
+            program.clone(),
+            nothing.clone(),
+        ],
+        "A",
+    );
+    let succeeded: Vec<bool> = block
+        .receipts
+        .iter()
+        .map(|r| r.status == ting_core::protocol::Status::Success)
+        .collect();
+    assert_eq!(succeeded, [false, false, false, false, true, true, false]);
+    chain.import(&block.encode(), true).unwrap();
+    for _ in 0..ting_node::chain::RELAY_ECHO {
+        let empty = mine(&runtime, &g, &mut history, vec![], "A");
+        chain.import(&empty.encode(), true).unwrap();
+    }
+    // Past the block's echo only a success refuses: the program's call
+    // succeeded at its last occurrence, the other call at none.
+    assert_eq!(
+        relay(&mut chain, &program).unwrap_err(),
+        ting_node::chain::INCLUDED
+    );
+    assert_eq!(relay(&mut chain, &nothing).unwrap()["known"], false);
+}
+#[test]
+fn a_relayed_transaction_is_checked_once_per_block_however_often_blocks_include_it() {
+    use std::time::{Duration, Instant};
+    // A pool of one, which the operator's own transaction fills and never
+    // gives up: every relayed submission is checked, then refused.
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut c = config::Config::load(&dir.0).unwrap();
+    c.mempool_transactions = 1;
+    c.save(&dir.0).unwrap();
+    let mut chain = open(&dir);
+    chain.submit(&support::tx().encode()).unwrap();
+    // Ten blocks, each holding a failing call a thousand times and another
+    // once, then enough empty ones for their echo to end, so that only the
+    // check for a success reads them.
+    let g = chain.genesis.clone();
+    let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
+    let mut history = vec![];
+    let many = call(&hex(&[7; 32]), vec![]);
+    let once = call(&hex(&[8; 32]), vec![]);
+    for _ in 0..10 {
+        let mut transactions = vec![many.clone(); 1_000];
+        transactions.push(once.clone());
+        let block = mine(&runtime, &g, &mut history, transactions, "A");
+        chain.import(&block.encode(), true).unwrap();
+    }
+    for _ in 0..ting_node::chain::RELAY_ECHO {
+        let empty = mine(&runtime, &g, &mut history, vec![], "A");
+        chain.import(&empty.encode(), true).unwrap();
+    }
+    let fastest = |chain: &mut Chain, tx: &ting_core::protocol::Transaction| {
+        (0..3)
+            .map(|_| {
+                let started = Instant::now();
+                assert_eq!(relay(chain, tx).unwrap_err(), ting_node::chain::POOL_FULL);
+                started.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let (many, once) = (fastest(&mut chain, &many), fastest(&mut chain, &once));
+    // Both read the same ten blocks, once each: a thousand occurrences in a
+    // block cost about what one does, not a thousand reads of it.
+    assert!(
+        many < once * 10 + Duration::from_millis(50),
+        "{many:?} for a thousand occurrences a block, {once:?} for one"
+    );
+}
 #[test]
 fn a_block_that_fails_names_the_peer_that_sent_it() {
     let dir = Directory::new();
