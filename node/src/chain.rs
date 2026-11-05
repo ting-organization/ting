@@ -1204,10 +1204,22 @@ impl Chain {
     /// whose chain stays below the work threshold is refused here: such a
     /// chain is checked by `headers_from` without being kept.
     fn accept_header(&mut self, header: &Header, recovered: bool) -> Result<()> {
-        let id = header.id();
-        if self.index.contains(&id) {
+        if self.index.contains(&header.id()) {
             return Ok(());
         }
+        let (work, limits) = self.check_new_header(header, recovered)?;
+        self.index_header(header.clone(), work, limits);
+        self.sync_best();
+        Ok(())
+    }
+    /// The checks of `accept_header` on a header not yet indexed, without
+    /// indexing it: its chain's work and its block's limits.
+    fn check_new_header(
+        &mut self,
+        header: &Header,
+        recovered: bool,
+    ) -> Result<(BigUint, Resources)> {
+        let id = header.id();
         if self.marks.contains(&id) {
             return Err(MARKED.into());
         }
@@ -1236,9 +1248,7 @@ impl Chain {
         if !recovered && work < self.threshold() {
             return Err(BEHIND.into());
         }
-        self.index_header(header.clone(), work, limits);
-        self.sync_best();
-        Ok(())
+        Ok((work, limits))
     }
     pub fn import(&mut self, bytes: &[u8], requeue: bool) -> Result<Value> {
         self.import_from(bytes, requeue, None)
@@ -1286,7 +1296,7 @@ impl Chain {
         )
         .map_err(|e| format!("{INVALID}block: {e}"))?;
         let id = header.id();
-        match self.index.get(&id) {
+        let (work, limits, indexed) = match self.index.get(&id) {
             Some(entry) if entry.status == Kept::Invalid => {
                 if self.by_operator(&id) {
                     return Err(MARKED.into());
@@ -1302,17 +1312,22 @@ impl Chain {
                 }
                 return Ok((id, true));
             }
-            Some(_) => {
+            Some(entry) => {
                 // A block durable on disk was admitted once; recovery keeps it
                 // whatever the clock says now.
                 if recovered.is_none() {
                     Self::timely(&header)?;
                 }
+                (entry.work.clone(), entry.limits, true)
             }
-            None => self.accept_header(&header, recovered.is_some())?,
-        }
-        let entry = self.entry(&id);
-        let (limits, work) = (entry.limits, entry.work.clone());
+            // A header not yet indexed is checked here and indexed only once
+            // the body matches it, so that a block that fails leaves no header
+            // behind: the best header is never one whose block nobody has.
+            None => {
+                let (work, limits) = self.check_new_header(&header, recovered.is_some())?;
+                (work, limits, false)
+            }
+        };
         if bytes.len() as u64 > limits.0[2] {
             return Err(format!("{INVALID}block: block byte limit"));
         }
@@ -1327,6 +1342,10 @@ impl Chain {
             || ting_core::protocol::producer_hash(&block.producer) != header.producer_hash
         {
             return Err(format!("{INVALID}block: body commitment mismatch"));
+        }
+        if !indexed {
+            self.index_header(header.clone(), work.clone(), limits);
+            self.sync_best();
         }
         let location = match recovered {
             Some(location) => location,
@@ -1688,7 +1707,9 @@ impl Chain {
             return Ok(self.pruned);
         }
         let floor = height - window;
-        let to = floor.min(self.pruned + STEP as u64);
+        // A tip lower than it was, as in the middle of a reorganization, has
+        // a lower floor, but what is pruned stays pruned.
+        let to = floor.min(self.pruned + STEP as u64).max(self.pruned);
         let id_at = |h: u64| -> Result<Hash> {
             let h = h as usize;
             if h <= common {

@@ -804,6 +804,33 @@ async fn daemon_cli_rest_wiki_sync_and_restart_work_together() {
         assert!((400..500).contains(&status), "{status} {body}");
         assert!(serde_json::from_str::<Value>(&body).unwrap()["error"].is_string());
     }
+    // A whole batch with proofs is read, compact or pretty-printed. A body
+    // larger than any batch needs, 256 bytes a record and 4 KiB, is refused
+    // before it is parsed, whatever it names.
+    let json_body = [("Content-Type", "application/json")];
+    let whole = json!({"reads":vec![read([0; 32]); 1_024],"proof":true});
+    for body in [
+        whole.to_string(),
+        serde_json::to_string_pretty(&whole).unwrap(),
+    ] {
+        let (status, _, answer) = http_full(api, "POST", "/v1/storage", &json_body, &body).await;
+        assert_eq!(status, 200, "{answer}");
+        let answer: Value = serde_json::from_str(&answer).unwrap();
+        assert_eq!(answer["values"].as_array().unwrap().len(), 1_024);
+    }
+    let over = 1_024 * 256 + 4096 + 1;
+    let mut empty = r#"{"reads":["#.to_owned();
+    while empty.len() + 40 < over {
+        empty.push_str(r#"{"contract":"","key":""},"#);
+    }
+    empty.pop();
+    empty.push_str("]}");
+    for body in [whole.to_string(), empty] {
+        let body = " ".repeat(over - body.len()) + &body;
+        let (status, _, answer) = http_full(api, "POST", "/v1/storage", &json_body, &body).await;
+        assert_eq!(status, 413, "{answer}");
+        assert!(!error_of(&answer).is_empty());
+    }
     // The raw block comes whole, or in slices that add up to it.
     let (status, whole) = http(api, "GET", "/v1/blocks/4/raw", None, None).await;
     assert_eq!(status, 200);
@@ -1964,7 +1991,9 @@ async fn the_node_answers_while_ting_mine_searches() {
 async fn the_built_in_miner_waits_while_the_node_is_behind_its_best_header() {
     // A fake peer shows three valid headers and never serves their blocks:
     // the node stays at height 0 behind a best header at 3, and its miner
-    // waits rather than mine a block about to be replaced.
+    // waits rather than mine a block about to be replaced, but only for a
+    // block's transfer time, 70 seconds at this chain's capacity: a tip that
+    // does not move has no download behind it.
     let n = Node::start(false, "behind");
     let g = config::genesis(&n.dir.0).unwrap();
     let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
@@ -2013,7 +2042,8 @@ async fn the_built_in_miner_waits_while_the_node_is_behind_its_best_header() {
     }
     n.call("miner", json!({"action":"start","threads":1,"spacing":0}))
         .await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_secs(30);
     loop {
         let status = n.call("miner", json!({"action":"status"})).await;
         if status["last_error"]
@@ -2027,6 +2057,13 @@ async fn the_built_in_miner_waits_while_the_node_is_behind_its_best_header() {
     }
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(n.height().await, 0);
+    let deadline = started + Duration::from_secs(150);
+    while n.height().await == 0 {
+        let status = n.call("miner", json!({"action":"status"})).await;
+        assert!(tokio::time::Instant::now() < deadline, "{status}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(started.elapsed() >= Duration::from_secs(60));
     n.call("miner", json!({"action":"stop"})).await;
     n.stop().await;
 }
