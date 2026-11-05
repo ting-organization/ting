@@ -15,8 +15,10 @@ In outline:
 - It learns of blocks from their headers, checks each header as it arrives, and
   fetches bodies only along the branch of the best header
   ([headers first](#headers-first), [blocks](#blocks)).
-- It stores a body once it matches its header, and executes it only when its branch
-  is connected ([storage](storage.md#connecting-the-best-branch)).
+- It stores a body it asked for once it matches its header, and executes it only
+  when its branch is connected ([storage](storage.md#connecting-the-best-branch)). A
+  block a peer pushes unasked is stored only when it is executed at once
+  ([pushed blocks](#pushed-blocks)).
 - Over the same connections it pushes its own new blocks, exchanges pending and
   deferred transactions and, with discovery on, peer addresses
   ([finding more peers](#finding-more-peers)).
@@ -112,10 +114,11 @@ doubling with each further failure up to an hour, and is replaced meanwhile.
 **Refusals.** A refusal that is one node's policy is not a failure, and the
 connection stays open past it:
 
-- A block on a branch more than a day's work behind the tip, whose header the node
-  has not indexed, is answered with `branch too far behind the tip` and neither
-  stored nor executed ([headers first](#headers-first)). The pushing node stops
-  pushing.
+- A pushed block the node does not take now is answered with `branch too far behind
+  the tip` and neither stored nor executed: one on a branch more than a day's work
+  behind the tip whose header the node has not indexed, one whose branch the node
+  does not store whole, and one past what a connection holds unstored
+  ([pushed blocks](#pushed-blocks)). The pushing node stops pushing.
 - A block whose timestamp is more than 7,200 seconds ahead of the receiving node's
   clock is answered with `timestamp ahead of the clock` and not stored, as
   [Time and difficulty](../consensus/difficulty.md#timestamps) asks. The pushing
@@ -204,18 +207,60 @@ it may span: for a block, its size once the first slice tells it, and until then
 data capacity at its height. Size alone therefore never makes a download fail; a
 peer that delivers less than a slice every ten seconds or so does.
 
-A body is stored once its transaction and receipt roots, its receipt count and its
-producer data commitment match its header, and before anything is executed. Blocks
-arrive out of order and wait on disk until their parents are there. Executing them
-happens only when their branch is connected, as
-[storage](storage.md#connecting-the-best-branch) describes, so a competing
-branch costs nothing to execute until it is the heaviest.
+A body the node asked for is stored once its transaction and receipt roots, its
+receipt count and its producer data commitment match its header, and before anything
+is executed, as Bitcoin stores the blocks it requests. Blocks arrive out of order and
+wait on disk until their parents are there. Executing them happens only when their
+branch is connected, as [storage](storage.md#connecting-the-best-branch) describes,
+so a competing branch costs nothing to execute until it is the heaviest.
 
-A block pushed by a peer, or offered to the API, is taken on the same terms: its
-header must be within a day's work of the tip, or already indexed. A block from
-further behind is answered with `branch too far behind the tip`. A pushed block's
-header joins the header tree only with its body, once the body matches it, so one
-whose body fails leaves no header behind for the node to download toward.
+### Pushed blocks
+
+A block a peer pushes, unasked, is checked as any block is, its header and its body,
+but stored only when it is executed at once: when the node stores its whole branch
+and, with it, the branch carries more work than the tip by the
+[fork-choice margin](../consensus/proof-of-work.md). It is then connected, or found
+invalid and held against the peer. Every child of one block has one target, so a
+sibling of the tip costs a block's work and no more, whatever its body holds, and
+nothing executes it: stored, such blocks would fill a node's disk at the pace of the
+pusher's hashing.
+
+Any other pushed block whose parent the node stores with its whole branch, a sibling
+of the tip for one, is held in memory instead, and answered as taken. Neither its
+header nor its body is kept. A connection holds one run of such blocks, each the
+child of the one before, the next checked against the ones held; the block that
+makes the run overtake the tip stores the whole run and connects it at once. A block
+that does not follow the run begins a new one in its place. So a natural fork ends as
+soon as it can: a miner that mined B on the tip's parent and then C on B pushes both
+from the block the nodes share, as a pushing node does, and the node moves to C when C
+arrives.
+
+A run holds up to 16 MiB, each block counted with 1 KiB more for what is kept beside
+it: 64 blocks at the production network's data capacity, two pushes of 32, and more
+blocks of today's few hundred bytes than a branch within a day's work of the tip has
+before it overtakes it. All runs together hold 64 MiB at most; past that, the largest
+run of another connection gives way. A run goes when its connection ends. The node's
+status shows what the runs hold, as `held_pushed_blocks` and `held_pushed_bytes`. A
+held block does not count as one the peer delivered, for its place among inbound
+connections ([limits](#limits)). Each of these is answered with `branch too far behind
+the tip`, holds nothing against the peer, and stops the pushing node:
+
+- a block that would take a run past 16 MiB, and the run with it;
+- a block whose parent the node holds only as a header, or without its whole branch,
+  such as one ahead of a download: it comes along the best header's branch;
+- at the first block of a voting epoch, whose capacities the votes of an earlier
+  epoch decide, the child of a held run that does not fork from the canonical branch
+  above that epoch: only then are its limits those of the canonical block at the same
+  height, with no held block counted.
+
+What a node does not keep is not lost: a branch that later carries more work comes
+again, by its headers from the peers the node follows
+([headers first](#headers-first)), or pushed again from the block the two nodes
+share, as after a reconnection. A pushed block whose parent is neither indexed nor the
+last one its connection holds is answered with `unknown parent`, and one from more
+than a day's work behind the tip with `branch too far behind the tip`. A pushed
+block's header joins the header tree only with its body, once the block is stored,
+so one whose body fails leaves no header behind for the node to download toward.
 
 A peer pushes a block larger than one slice in slices, one item at a time on a
 connection. The slice at offset 0 holds the header, which is checked first: a block

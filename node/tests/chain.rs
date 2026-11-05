@@ -4352,3 +4352,360 @@ fn a_pending_answer_carries_one_slice_whole_and_lists_the_rest_by_size() {
     assert_eq!(bytes, large[3].encode());
     assert_eq!(total, bytes.len() as u64);
 }
+/// A block pushed by the peer at `peer`, unasked, as a connection hands it
+/// to the chain.
+fn push(chain: &mut Chain, peer: &str, block: &Block) -> Result<serde_json::Value, String> {
+    chain.request_with(
+        "import",
+        json!({"peer":peer,"pushed":true}),
+        Some(block.encode()),
+    )
+}
+fn status(chain: &mut Chain) -> serde_json::Value {
+    chain.request("status", json!({})).unwrap()
+}
+/// A block on `history` with `producer` data and `votes`, mined and applied.
+fn mine_with(
+    runtime: &Runtime,
+    g: &Genesis,
+    history: &mut Vec<Header>,
+    producer: Vec<u8>,
+    votes: [u8; 4],
+) -> Block {
+    let mut b = runtime
+        .build_candidate(
+            g,
+            history,
+            vec![],
+            g.timestamp + 60 * (history.len() as u64 + 1),
+            votes,
+            producer,
+        )
+        .unwrap();
+    while !consensus::valid_pow(&b.header) {
+        b.header.nonce += 1;
+    }
+    runtime.validate_and_apply_block(g, history, &b).unwrap();
+    history.push(b.header.clone());
+    b
+}
+/// A runtime and history at the tip of `blocks`.
+fn replayed(g: &Genesis, blocks: &[Block]) -> (Runtime, Vec<Header>) {
+    let runtime = Runtime::new(State::default(), Context::from_genesis(g));
+    let mut history = vec![];
+    for block in blocks {
+        runtime
+            .validate_and_apply_block(g, &history, block)
+            .unwrap();
+        history.push(block.header.clone());
+    }
+    (runtime, history)
+}
+/// `block` again with a wrong state root, under `parent`, mined anew.
+fn forge(block: &Block, parent: Option<&Block>) -> Block {
+    let mut forged = block.clone();
+    if let Some(parent) = parent {
+        forged.header.parent = parent.header.id();
+    } else {
+        forged.header.state_root[0] ^= 1;
+    }
+    forged.header.nonce = 0;
+    while !consensus::valid_pow(&forged.header) {
+        forged.header.nonce += 1;
+    }
+    forged
+}
+#[test]
+fn pushed_side_blocks_are_held_within_bounds_and_never_stored() {
+    // Siblings of the tip cost one block of work each and need not be valid
+    // past their headers and commitments, since nothing executes them: here
+    // each carries a whole block of producer data. Pushed unasked, none is
+    // stored or indexed: each connection holds one run in memory, and all of
+    // them together 64 MiB at most.
+    let dir = Directory::new();
+    dir.config(false, "held");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let a = branch(&g, 30, "A");
+    for block in &a {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let before = status(&mut chain);
+    let capacity = before["limits"][2].as_u64().unwrap() as usize;
+    let tip = &a[29];
+    let filler = capacity - (tip.encode().len() - tip.producer.len());
+    let sibling = |i: u64| {
+        let mut b = tip.clone();
+        b.producer = vec![0x5a; filler];
+        b.producer[..8].copy_from_slice(&i.to_le_bytes());
+        b.header.producer_hash = ting_core::protocol::producer_hash(&b.producer);
+        b.header.nonce = 0;
+        while !consensus::valid_pow(&b.header) {
+            b.header.nonce += 1;
+        }
+        assert_eq!(b.encode().len(), capacity);
+        b
+    };
+    let unchanged = |chain: &mut Chain| {
+        let now = status(chain);
+        for field in [
+            "tip",
+            "height",
+            "stored_blocks",
+            "held_headers",
+            "best_height",
+        ] {
+            assert_eq!(now[field], before[field], "{field}");
+        }
+        now
+    };
+    // One connection holds one run: each sibling begins a new one.
+    let answers: Vec<_> = (0..10)
+        .map(|i| push(&mut chain, "192.0.2.1:4000", &sibling(i)).unwrap())
+        .collect();
+    assert_eq!(unchanged(&mut chain)["held_pushed_blocks"], 1);
+    for answer in answers {
+        assert_eq!(
+            (answer["held"].clone(), answer["known"].clone()),
+            (json!(true), json!(false))
+        );
+    }
+    // Sent again, a held block is answered as known, and still not stored.
+    let again = push(&mut chain, "192.0.2.1:4000", &sibling(9)).unwrap();
+    assert_eq!(
+        (again["held"].clone(), again["known"].clone()),
+        (json!(true), json!(true))
+    );
+    // A hundred connections hold 63 blocks of 1 MiB at most, within 64 MiB.
+    for i in 0..100u64 {
+        push(
+            &mut chain,
+            &format!("192.0.2.{}:4000", i + 2),
+            &sibling(100 + i),
+        )
+        .unwrap();
+    }
+    let now = unchanged(&mut chain);
+    let (blocks, bytes) = (
+        now["held_pushed_blocks"].as_u64().unwrap(),
+        now["held_pushed_bytes"].as_u64().unwrap(),
+    );
+    assert_eq!(blocks, 63, "{now}");
+    assert!(
+        bytes <= 64 << 20 && bytes == blocks * (capacity as u64 + 1024),
+        "{now}"
+    );
+    // A run that forks deep enough to go on without overtaking the tip is
+    // held up to 16 MiB: past it, the block is refused for now, and the run
+    // goes.
+    let (runtime, mut history) = replayed(&g, &a[..10]);
+    let deep: Vec<Block> = (0..17)
+        .map(|_| mine_with(&runtime, &g, &mut history, vec![0x5b; filler - 64], [0; 4]))
+        .collect();
+    let peer = "198.51.100.1:4000";
+    for block in &deep[..15] {
+        assert_eq!(push(&mut chain, peer, block).unwrap()["held"], true);
+    }
+    assert_eq!(
+        push(&mut chain, peer, &deep[15]).unwrap_err(),
+        ting_node::chain::BEHIND
+    );
+    assert_eq!(
+        push(&mut chain, peer, &deep[16]).unwrap_err(),
+        "unknown parent"
+    );
+    let now = unchanged(&mut chain);
+    assert!(
+        now["held_pushed_bytes"].as_u64().unwrap() <= 64 << 20,
+        "{now}"
+    );
+    // Nothing was written: the block files hold the 30 blocks alone.
+    let files: u64 = fs::read_dir(dir.0.join("blocks"))
+        .unwrap()
+        .map(|f| f.unwrap().metadata().unwrap().len())
+        .sum();
+    let canonical: u64 = a.iter().map(|b| b.encode().len() as u64 + 40).sum();
+    assert!(files <= canonical + 40, "{files} bytes for {canonical}");
+}
+#[test]
+fn a_pushed_sibling_is_held_until_its_child_overtakes_and_then_connected() {
+    // A natural fork: the node holds A at height 3; a peer that mined B3 on
+    // A2 pushes it, then C4 on it, as a pushing node does, from the block
+    // they share. B3 is held, not stored; C4 makes the branch overtake the
+    // tip, and both are stored and connected at once.
+    let dir = Directory::new();
+    dir.config(false, "fork");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let a = branch(&g, 3, "A");
+    for block in &a {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let (runtime, mut history) = replayed(&g, &a[..2]);
+    let b3 = mine(&runtime, &g, &mut history, vec![], "B");
+    let c4 = mine(&runtime, &g, &mut history, vec![], "B");
+    let (runtime, mut history) = replayed(&g, &[a[0].clone(), a[1].clone(), b3.clone()]);
+    let x4 = mine(&runtime, &g, &mut history, vec![], "X");
+    let x5 = mine(&runtime, &g, &mut history, vec![], "X");
+    let peer = "10.0.0.2:2";
+    let answer = push(&mut chain, peer, &b3).unwrap();
+    assert_eq!(status(&mut chain)["stored_blocks"], 3);
+    assert_eq!(answer["held"], true);
+    assert_eq!(chain.tip(), a[2].header.id());
+    // The connection ends: what it held goes with it, and the child alone
+    // finds no parent; pushed again from the shared block, the branch is
+    // taken.
+    chain
+        .request("release", json!({"peer":peer,"pushed":true}))
+        .unwrap();
+    assert_eq!(status(&mut chain)["held_pushed_blocks"], 0);
+    let peer = "10.0.0.2:3";
+    assert_eq!(push(&mut chain, peer, &c4).unwrap_err(), "unknown parent");
+    assert_eq!(push(&mut chain, peer, &b3).unwrap()["held"], true);
+    let answer = push(&mut chain, peer, &c4).unwrap();
+    assert_eq!(answer["canonical"], true, "{answer}");
+    assert_eq!(chain.tip(), c4.header.id());
+    let now = status(&mut chain);
+    assert_eq!(
+        (
+            now["stored_blocks"].clone(),
+            now["held_pushed_blocks"].clone()
+        ),
+        (json!(5), json!(0))
+    );
+    assert_eq!(now["reorganization"]["replaced"], 1);
+    // A run whose first block fails once connected names the peer that
+    // pushed it, and leaves the tip where it was: X4, a sibling of C4 with a
+    // wrong state root, then X5 on it.
+    let x4 = forge(&x4, None);
+    let x5 = forge(&x5, Some(&x4));
+    let liar = "10.0.0.9:9";
+    assert_eq!(push(&mut chain, liar, &x4).unwrap()["held"], true);
+    push(&mut chain, liar, &x5).unwrap();
+    assert_eq!(chain.tip(), c4.header.id());
+    let offenders = chain.request("offenders", json!({})).unwrap();
+    let named = offenders["peers"].as_array().unwrap();
+    assert!(
+        !named.is_empty() && named.iter().all(|p| p == liar),
+        "{offenders}"
+    );
+}
+#[test]
+fn side_blocks_stored_before_load_unchanged_and_are_followed() {
+    // A side block stored as every pushed block once was: the node opens on
+    // it as before, takes no new sibling onto disk, and follows the stored
+    // block's branch once a child of it overtakes the tip.
+    let dir = Directory::new();
+    dir.config(false, "restart");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let a = branch(&g, 3, "A");
+    for block in &a {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let (runtime, mut history) = replayed(&g, &a[..2]);
+    let s3 = mine(&runtime, &g, &mut history, vec![], "S");
+    let t4 = mine(&runtime, &g, &mut history, vec![], "S");
+    chain.import(&s3.encode(), true).unwrap();
+    let before = status(&mut chain);
+    assert_eq!(before["stored_blocks"], 4);
+    drop(chain);
+    let mut chain = open(&dir);
+    let opened = status(&mut chain);
+    for field in ["tip", "stored_blocks", "held_headers", "best_height"] {
+        assert_eq!(opened[field], before[field], "{field}");
+    }
+    // A new sibling is held, not stored.
+    let (runtime, mut history) = replayed(&g, &a[..2]);
+    let j3 = mine(&runtime, &g, &mut history, vec![], "J");
+    let answer = push(&mut chain, "10.0.0.3:3", &j3).unwrap();
+    assert_eq!(status(&mut chain)["stored_blocks"], 4);
+    assert_eq!(answer["held"], true);
+    // The stored side block's child overtakes the tip: stored and connected.
+    let answer = push(&mut chain, "10.0.0.4:4", &t4).unwrap();
+    assert_eq!(answer["canonical"], true, "{answer}");
+    assert_eq!(chain.tip(), t4.header.id());
+    assert_eq!(status(&mut chain)["stored_blocks"], 5);
+    drop(chain);
+    assert_eq!(open(&dir).tip(), t4.header.id());
+}
+#[test]
+fn a_pushed_run_across_an_epoch_boundary_runs_under_the_limits_its_votes_decide() {
+    // Epochs of four blocks, every block voting every capacity up: from the
+    // third epoch on, each has other limits. A run pushed from A's block 14
+    // crosses the boundary after 16; its block 17's limits, which the votes
+    // of blocks 9 to 12 decide, are those of A's block 17, and the run
+    // connects with the limits a node that imported the branch itself has.
+    // A run from block 6 would need its own blocks' votes counted: it is
+    // refused for now at the boundary.
+    let experimental = |name: &str| {
+        let dir = Directory::new();
+        let path = dir.0.join("genesis.src");
+        fs::write(&path, Genesis::experimental().encode()).unwrap();
+        let c = config::Config {
+            name: name.into(),
+            control: "127.0.0.1:0".parse().unwrap(),
+            p2p: "127.0.0.1:0".parse().unwrap(),
+            api: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        };
+        config::initialize(&dir.0, &c, Some(&path)).unwrap();
+        dir
+    };
+    let (dir, reference) = (experimental("pushed"), experimental("reference"));
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    assert_eq!(g.vote_epoch, 4);
+    let up = [1; 4];
+    let (runtime, mut history) = replayed(&g, &[]);
+    let a: Vec<Block> = (0..18)
+        .map(|_| mine_with(&runtime, &g, &mut history, b"A".to_vec(), up))
+        .collect();
+    for block in &a {
+        chain.import(&block.encode(), true).unwrap();
+    }
+    let (runtime, mut history) = replayed(&g, &a[..14]);
+    let b: Vec<Block> = (0..5)
+        .map(|_| mine_with(&runtime, &g, &mut history, b"B".to_vec(), up))
+        .collect();
+    assert_ne!(
+        consensus::active_limits(&g, &history[..16]),
+        consensus::active_limits(&g, &history[..13]),
+        "the limits move at the boundary"
+    );
+    let peer = "10.0.0.5:5";
+    let stored = status(&mut chain)["stored_blocks"].clone();
+    for block in &b[..4] {
+        push(&mut chain, peer, block).unwrap();
+    }
+    assert_eq!(status(&mut chain)["stored_blocks"], stored);
+    assert_eq!(status(&mut chain)["held_pushed_blocks"], 4);
+    assert_eq!(push(&mut chain, peer, &b[4]).unwrap()["canonical"], true);
+    assert_eq!(chain.tip(), b[4].header.id());
+    let mut other = open(&reference);
+    for block in a[..14].iter().chain(&b) {
+        other.import(&block.encode(), true).unwrap();
+    }
+    let (ours, theirs) = (status(&mut chain), status(&mut other));
+    for field in ["tip", "limits", "state_root", "work"] {
+        assert_eq!(ours[field], theirs[field], "{field}");
+    }
+    assert_eq!(
+        ours["limits"],
+        json!(consensus::active_limits(&g, &history).0)
+    );
+    // From block 6, the run's block 17 would count blocks 9 to 12 of its own.
+    let (runtime, mut history) = replayed(&g, &a[..6]);
+    let deep: Vec<Block> = (0..11)
+        .map(|_| mine_with(&runtime, &g, &mut history, b"D".to_vec(), up))
+        .collect();
+    let peer = "10.0.0.6:6";
+    for block in &deep[..10] {
+        assert_eq!(push(&mut chain, peer, block).unwrap()["held"], true);
+    }
+    assert_eq!(
+        push(&mut chain, peer, &deep[10]).unwrap_err(),
+        ting_node::chain::BEHIND
+    );
+    assert_eq!(chain.tip(), b[4].header.id());
+}

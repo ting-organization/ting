@@ -110,6 +110,13 @@ listed on [Explore the chain](../start/explore.md#the-rest-api).
   Markdown and no filesystem path is ever rendered.
 - Peer traffic is unencrypted and unauthenticated, but it carries only public chain
   data, and no peer message reaches administration.
+- A peer cannot make a node store what the node does not execute. Proof of work bounds
+  what blocks cost, not how many alternatives to one block there are: every child of a
+  block has the same target, so each sibling of the tip costs one block of work. A
+  block pushed unasked is stored only when its branch overtakes the tip and it is
+  executed at once; one that does not is held in memory, 64 MiB at most for all
+  connections ([pushed blocks](sync.md#pushed-blocks)). What a node asks for along the
+  best header's branch it stores, as Bitcoin does.
 - With discovery on, a node tells its peers the addresses of nodes it has recently
   synchronized with, and announces its own listening port. With
   `"discovery": false` it does neither. Its address can still spread: a node that

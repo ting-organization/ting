@@ -3136,3 +3136,150 @@ async fn an_inventory_whose_pages_do_not_move_on_ends_the_connection() {
     }
     n.stop().await;
 }
+
+/// `n` blocks on the branch of `below`, a second apart from `start`, with
+/// producer data of their own.
+fn fork_on(
+    g: &ting_core::protocol::Genesis,
+    below: &[ting_core::protocol::Block],
+    n: u64,
+    start: u64,
+    producer: &[u8],
+) -> Vec<ting_core::protocol::Block> {
+    let runtime = Runtime::new(State::default(), Context::from_genesis(g));
+    let mut history = Vec::new();
+    for block in below {
+        runtime
+            .validate_and_apply_block(g, &history, block)
+            .unwrap();
+        history.push(block.header.clone());
+    }
+    (0..n)
+        .map(|i| {
+            let mut block = runtime
+                .build_candidate(g, &history, vec![], start + i, [0; 4], producer.to_vec())
+                .unwrap();
+            while !consensus::valid_pow(&block.header) {
+                block.header.nonce += 1;
+            }
+            runtime
+                .validate_and_apply_block(g, &history, &block)
+                .unwrap();
+            history.push(block.header.clone());
+            block
+        })
+        .collect()
+}
+/// Pushes `block` whole over `stream`, as a pushing node does.
+async fn push_block(
+    stream: &mut TcpStream,
+    block: &ting_core::protocol::Block,
+) -> Result<wire::Answer, String> {
+    transport::ask(stream, wire::Request::Import(whole(&block.encode()))).await
+}
+/// Waits until a node's status satisfies `done`.
+async fn wait_status(n: &Node, done: impl Fn(&Value) -> bool) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = n.call("status", json!({})).await;
+        if done(&status) {
+            return status;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{status}{}",
+            node_log(&n.dir.0)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sibling_pushed_by_a_second_peer_waits_unstored_until_its_child_moves_the_node() {
+    // The node follows one peer to A5. A second peer, which reaches the node
+    // only by connecting to it, as a miner behind a NAT does, mined B5 on A4
+    // and then C6 on B5, and pushes both from the block they share. B5 is
+    // answered as taken but neither stored nor indexed; C6 makes its branch
+    // overtake the tip, and the node moves to it at once.
+    let g = support::test_genesis();
+    let a = std::sync::Arc::new(blocks_on(&g, 5));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let first = listener.local_addr().unwrap();
+    ChainPeer::new(g.chain_id(), 0xa1, a.clone()).spawn(listener);
+    let n = Node::start(false, "natural fork");
+    command(&n.dir.0, &["add", "node", &first.to_string()]);
+    n.wait_height(5).await;
+    let before = n.call("status", json!({})).await;
+    assert_eq!(before["tip"], hex(&a[4].header.id()));
+    let b = fork_on(&g, &a[..4], 2, ting_node::now() + 10, b"B");
+    let (mut stream, _) = greet(n.info.p2p, hello(g.chain_id())).await;
+    assert_eq!(
+        push_block(&mut stream, &b[0]).await.unwrap(),
+        wire::Answer::Taken {
+            id: b[0].header.id(),
+            known: false
+        }
+    );
+    let held = n.call("status", json!({})).await;
+    for field in ["tip", "stored_blocks", "held_headers", "best_height"] {
+        assert_eq!(held[field], before[field], "{field}");
+    }
+    assert_eq!(held["held_pushed_blocks"], 1);
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        push_block(&mut stream, &b[1]).await.unwrap(),
+        wire::Answer::Taken {
+            id: b[1].header.id(),
+            known: false
+        }
+    );
+    let moved = wait_status(&n, |s| s["tip"] == hex(&b[1].header.id())).await;
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(moved["height"], 6);
+    assert_eq!(moved["stored_blocks"], 7);
+    assert_eq!(moved["held_pushed_blocks"], 0);
+    assert_eq!(moved["reorganization"]["replaced"], 1);
+    n.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_branch_six_deep_pushed_by_a_peer_with_more_work_replaces_the_tip() {
+    // The node follows one peer to A10. Another peer, connecting to the node,
+    // pushes a branch from A4 with seven blocks: the first six do not
+    // overtake the tip and are held unstored; its connection ends, and what
+    // it held goes. Connected again, it pushes them once more, and the
+    // seventh, past the tip, moves the node six blocks deep.
+    let g = support::test_genesis();
+    let a = std::sync::Arc::new(blocks_on(&g, 10));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let first = listener.local_addr().unwrap();
+    ChainPeer::new(g.chain_id(), 0xa2, a.clone()).spawn(listener);
+    let n = Node::start(false, "six deep");
+    command(&n.dir.0, &["add", "node", &first.to_string()]);
+    n.wait_height(10).await;
+    let before = n.call("status", json!({})).await;
+    let b = fork_on(&g, &a[..4], 7, ting_node::now() + 20, b"B");
+    let (mut stream, _) = greet(n.info.p2p, hello(g.chain_id())).await;
+    for block in &b[..6] {
+        push_block(&mut stream, block).await.unwrap();
+    }
+    let held = n.call("status", json!({})).await;
+    for field in ["tip", "stored_blocks", "held_headers", "best_height"] {
+        assert_eq!(held[field], before[field], "{field}");
+    }
+    assert_eq!(held["held_pushed_blocks"], 6);
+    drop(stream);
+    wait_status(&n, |s| s["held_pushed_blocks"] == 0).await;
+    let (mut stream, _) = greet(n.info.p2p, hello(g.chain_id())).await;
+    assert_eq!(
+        push_block(&mut stream, &b[6]).await.unwrap_err(),
+        "unknown parent"
+    );
+    for block in &b {
+        push_block(&mut stream, block).await.unwrap();
+    }
+    let moved = wait_status(&n, |s| s["tip"] == hex(&b[6].header.id())).await;
+    assert_eq!(moved["height"], 11);
+    assert_eq!(moved["reorganization"]["replaced"], 6);
+    assert_eq!(moved["reorganization"]["deep"], true);
+    assert_eq!(moved["stored_blocks"], 17);
+    n.stop().await;
+}
