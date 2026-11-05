@@ -3744,6 +3744,18 @@ struct Request {
     /// queue, until it is answered or dropped.
     _place: Option<Place>,
 }
+impl Request {
+    /// A block a peer pushed whose connection no longer waits for the
+    /// answer, as after the wait timed out while the chain was busy: it is
+    /// not imported. The connection may have ended since, and its `release`,
+    /// on the queue the chain serves first, let its held blocks go already;
+    /// a run held now would outlive it. A block it would have connected is
+    /// fetched once a peer shows its header, as any on the best header's
+    /// branch.
+    fn abandoned_push(&self) -> bool {
+        self.reply.is_closed() && self.method == "import" && self.params["pushed"] == true
+    }
+}
 /// The chain thread's answer: JSON, or a peer request's answer as it goes on
 /// the wire.
 enum Reply {
@@ -3864,7 +3876,7 @@ impl Handle {
                     }
                     Err(mpsc::TryRecvError::Empty) => shared_requests.recv_timeout(POLL).ok(),
                 };
-                if let Some(r) = request {
+                if let Some(r) = request.filter(|r| !r.abandoned_push()) {
                     let result = match &r.wire {
                         Some(request) => chain.answer_wire(request).map(Reply::Wire),
                         None => chain
@@ -4193,15 +4205,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A held run whose work or limits the node's own check of each block
-    /// from its parent does not confirm is refused whole, for now: nothing is
-    /// stored or indexed, nothing is marked invalid, and no peer is blamed.
-    /// Pushed again, unchanged, the same run is taken.
-    #[test]
-    fn a_held_run_the_check_from_its_parents_does_not_confirm_is_refused() {
+    /// A new node's directory, and blocks on its genesis: a branch `a` of
+    /// three, and `b3` on its second block with its child `c4`, a branch that
+    /// overtakes `a` only with both.
+    fn side_branch(name: &str) -> (PathBuf, Vec<Block>, Block, Block) {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(".node-tests")
-            .join(format!("held-unit-{}-{}", std::process::id(), crate::now()));
+            .join(format!("{name}-{}-{}", std::process::id(), crate::now()));
         let g = Genesis::experimental();
         let c = Config {
             control: "127.0.0.1:0".parse().unwrap(),
@@ -4210,7 +4220,6 @@ mod tests {
             ..Default::default()
         };
         config::initialize_empty(&dir, &c, g.clone()).unwrap();
-        let mut chain = Chain::open(&dir, Arc::new(AtomicBool::new(false))).unwrap();
         let mine = |runtime: &Runtime, history: &mut Vec<Header>, producer: &[u8]| {
             let mut block = runtime
                 .build_candidate(
@@ -4234,9 +4243,6 @@ mod tests {
         let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
         let mut history = Vec::new();
         let a: Vec<Block> = (0..3).map(|_| mine(&runtime, &mut history, b"A")).collect();
-        for block in &a {
-            chain.import(&block.encode(), true).unwrap();
-        }
         let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
         let mut history = Vec::new();
         for block in &a[..2] {
@@ -4247,6 +4253,20 @@ mod tests {
         }
         let b3 = mine(&runtime, &mut history, b"B");
         let c4 = mine(&runtime, &mut history, b"B");
+        (dir, a, b3, c4)
+    }
+
+    /// A held run whose work or limits the node's own check of each block
+    /// from its parent does not confirm is refused whole, for now: nothing is
+    /// stored or indexed, nothing is marked invalid, and no peer is blamed.
+    /// Pushed again, unchanged, the same run is taken.
+    #[test]
+    fn a_held_run_the_check_from_its_parents_does_not_confirm_is_refused() {
+        let (dir, a, b3, c4) = side_branch("held-unit");
+        let mut chain = Chain::open(&dir, Arc::new(AtomicBool::new(false))).unwrap();
+        for block in &a {
+            chain.import(&block.encode(), true).unwrap();
+        }
         let (stored, held_headers) = (chain.index.stored(), chain.index.held());
         let corruptions: [fn(&mut HeldBlock); 2] =
             [|block| block.limits.0[2] -= 1, |block| block.work += 1u32];
@@ -4276,6 +4296,63 @@ mod tests {
         assert_eq!(chain.tip(), c4.header.id());
         assert_eq!(chain.index.stored(), stored + 2);
         drop(chain);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A block a peer pushed whose connection stopped waiting for the answer
+    /// before the chain thread came to it is not held, so no run outlives a
+    /// connection whose `release` came first.
+    #[tokio::test]
+    async fn a_pushed_block_whose_connection_stopped_waiting_is_not_held() {
+        let (dir, a, b3, c4) = side_branch("abandoned-push");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (handle, worker) = Handle::spawn(dir.clone(), shutdown.clone()).unwrap();
+        for block in &a {
+            handle
+                .call_bytes("import", json!({}), Some(block.encode()))
+                .await
+                .unwrap();
+        }
+        let push = json!({"peer":"10.0.0.1:1","pushed":true});
+        // b3, whose wait timed out while it was queued.
+        let (reply, waiting) = oneshot::channel();
+        drop(waiting);
+        handle
+            .shared
+            .try_send(Request {
+                method: "import".into(),
+                params: push.clone(),
+                bytes: Some(b3.encode()),
+                wire: None,
+                reply,
+                _place: None,
+            })
+            .unwrap();
+        // Nothing holds it: its child, queued after it, finds no parent, and
+        // pushed again it is new to the node.
+        let child = handle
+            .call_external_bytes("import", push.clone(), Some(c4.encode()))
+            .await;
+        assert_eq!(child.unwrap_err(), "unknown parent");
+        let again = handle
+            .call_external_bytes("import", push.clone(), Some(b3.encode()))
+            .await
+            .unwrap();
+        assert_eq!(
+            (&again["held"], &again["known"]),
+            (&json!(true), &json!(false))
+        );
+        // A push still waited for is held, and its child connects the run.
+        let child = handle
+            .call_external_bytes("import", push, Some(c4.encode()))
+            .await
+            .unwrap();
+        assert_eq!(
+            (&child["canonical"], &child["height"]),
+            (&json!(true), &json!(4))
+        );
+        shutdown.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

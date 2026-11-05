@@ -277,8 +277,9 @@ the two share, which is how a peer that only connects to this node gets its bloc
 here. A sender that keeps adding runs from fresh connections can make that happen
 again after every reconnection, a block of work each time, so pushing alone does not
 promise that an honest branch arrives: headers sync from any followed peer that has
-the branch still brings it in. A run goes when its connection ends.
-The node's
+the branch still brings it in. A run goes when its connection ends, and a pushed
+block is not taken once its connection has stopped waiting for the answer, as after
+the node took too long to give one, so that no run outlives its connection. The node's
 status shows what the runs hold, as `held_pushed_blocks` and `held_pushed_bytes`. A
 held block does not count as one the peer delivered, for its place among inbound
 connections ([limits](#limits)). Each of these is answered with `branch too far behind
