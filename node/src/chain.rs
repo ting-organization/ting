@@ -328,17 +328,12 @@ fn replay(
         }
         let changes = validator.state_changes()?;
         drop(validator);
-        let tx = Rc::new(store.begin()?);
-        Store::apply(&tx, &changes)?;
+        let tx = store.begin()?;
         if height > down_to {
-            let undo: Vec<(Hash, Option<Vec<u8>>)> = changes
-                .records
-                .iter()
-                .map(|c| (c.key, c.before.clone()))
-                .collect();
-            Store::put_undo(&tx, *id, &undo)?;
+            Store::apply_block(&tx, *id, &changes)?;
+        } else {
+            Store::apply(&tx, &changes)?;
         }
-        let tx = Rc::try_unwrap(tx).map_err(|_| "replay transaction still borrowed")?;
         store.commit_state(tx)?;
         let mut recent = vec![block.header.timestamp];
         recent.extend(ancestry.recent.iter().take(10));
@@ -2147,7 +2142,6 @@ impl Chain {
             }
             let changes = validator.state_changes()?;
             drop(validator);
-            Store::apply(&tx, &changes)?;
             self.store
                 .save_valid(&tx, &block, &work, &changes, limits)?;
             connected.push(*id);
@@ -2360,7 +2354,7 @@ impl Chain {
                 .canonical
                 .get(height as usize - 1, &self.index)
                 .ok_or("missing canonical block")?;
-            Store::put_undo(&tx, id, &replayed.undo_of(id)?)?;
+            Store::copy_undo(&tx, replayed, id)?;
         }
         let done = end == recovery.upto;
         if done {

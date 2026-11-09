@@ -64,9 +64,15 @@ could be capped follows from the budgets instead:
 | Module size | 2^30 bytes, and the [code price](prices.md#code), about 60 C per byte, paid to validate it |
 | Pending output and state journals | D, S and G: every byte and record they hold was charged |
 
-A node therefore knows, from the active capacities alone, how much memory a block
-can need. It may store journals however it likes, but local memory pressure can
-never turn into a different consensus result.
+A node therefore knows, from the active capacities alone, how much memory executing
+a block can need. The counters do not bound the records a block deletes or
+overwrites: a delete or an overwrite costs two state accesses whatever the size of
+the old value, and reads only its length. Executing the block never holds those
+values, but a node that keeps them, to undo the block, must move them without holding
+them in memory together, as the reference node does
+([per-block changes](../node/storage.md#per-block-changes)); one that gathers them
+needs memory no capacity bounds. A node may store journals however it likes, but
+local memory pressure can never turn into a different consensus result.
 
 ## Fixed bounds
 
