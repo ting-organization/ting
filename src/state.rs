@@ -149,20 +149,41 @@ pub struct Proof {
     pub end: End,
     pub siblings: Vec<Hash>,
 }
+/// Where the path of a key ends in a stored tree, as [`End`] without the
+/// value of another record it ends at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathEnd {
+    Present,
+    Empty,
+    Other(Hash),
+}
 /// The proof of the record at `key` in a stored tree.
 pub fn prove(reader: &dyn StateReader, key: &Hash) -> Result<Proof, String> {
+    let (end, siblings) = path(reader, key)?;
+    let end = match end {
+        PathEnd::Present => End::Present,
+        PathEnd::Empty => End::Empty,
+        PathEnd::Other(other) => End::Other(
+            other,
+            reader
+                .record(&other)?
+                .ok_or("state tree leaf without its record")?,
+        ),
+    };
+    Ok(Proof { end, siblings })
+}
+/// A proof's path without any record's value: where the path of `key` ends,
+/// and the hash of the other child at each level above that, from the end up
+/// to the root. Whoever gives many proofs at once reads the record that
+/// several of them end at once, not once for each.
+pub fn path(reader: &dyn StateReader, key: &Hash) -> Result<(PathEnd, Vec<Hash>), String> {
     let mut siblings = Vec::new();
     let mut depth = 0u16;
     let end = loop {
         match reader.node(&position(key, depth))? {
-            None => break End::Empty,
-            Some(Entry::Leaf(other, _)) if other == *key => break End::Present,
-            Some(Entry::Leaf(other, _)) => {
-                let value = reader
-                    .record(&other)?
-                    .ok_or("state tree leaf without its record")?;
-                break End::Other(other, value);
-            }
+            None => break PathEnd::Empty,
+            Some(Entry::Leaf(other, _)) if other == *key => break PathEnd::Present,
+            Some(Entry::Leaf(other, _)) => break PathEnd::Other(other),
             Some(Entry::Node(_)) if depth == 256 => {
                 return Err("state tree node below the deepest level".into());
             }
@@ -174,7 +195,7 @@ pub fn prove(reader: &dyn StateReader, key: &Hash) -> Result<Proof, String> {
         }
     };
     siblings.reverse();
-    Ok(Proof { end, siblings })
+    Ok((end, siblings))
 }
 /// Whether `proof` shows the record at `key` to hold `value`, or with `None`
 /// to be absent, in the state whose root is `root`.

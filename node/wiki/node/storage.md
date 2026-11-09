@@ -332,7 +332,8 @@ Before it serves anything it checks that:
 
 A stored block whose parent was only a header when the node stopped, as blocks
 arrive out of order, waits outside the index until that header comes again, and is
-then indexed with it.
+then indexed with it. One at or below the settled height, with no block above that
+height waiting on it, is forgotten like a side branch that far behind.
 
 Frames appended after the file cursor, left by a crash before their commits reached
 the disk, are stored again in the order they were written, without appending another
@@ -341,7 +342,10 @@ tried again once the others are in, for as long as that stores more; one still l
 over, such as one whose parent was only a header, is passed over, and its block is
 fetched again. Nothing refers to a frame after the cursor, so a damaged one
 (incomplete, zero-filled as a power loss may leave it, or with a wrong checksum) is
-truncated with everything after it in its file, and its block is fetched again.
+truncated with everything after it in its file, and its block is fetched again. A
+block file that nothing indexed lies in yet may have lost its header the same way,
+cut short or zero-filled: the node writes it again. A header that is neither this
+chain's nor empty is refused, as below.
 
 Then the operator's marks are applied, and the node connects the heaviest stored
 branch, as in [connecting the best branch](#connecting-the-best-branch): after a
@@ -351,7 +355,8 @@ every block.
 
 Indexed frames are checksum-verified when they are read, rather than scanned at every
 restart; a stored block whose frame no longer reads back is forgotten, its header
-kept, and fetched again. The database's own checksums are responsible for physical
+kept, with its limits and any undo and redo data, and fetched again. A block is
+read before it is connected, so one that cannot be read is never connected. The database's own checksums are responsible for physical
 integrity.
 
 A database or block file made for a different storage format or a different genesis

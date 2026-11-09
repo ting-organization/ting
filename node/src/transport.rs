@@ -877,6 +877,7 @@ async fn serve(
             filled = Instant::now();
         }
         tokens -= cost;
+        let transaction = matches!(request, wire::Request::TransactionRaw { .. });
         // Whether a pushed block this node lacked was stored.
         let mut delivered = false;
         let result = match request {
@@ -927,8 +928,30 @@ async fn serve(
         // full pool, a transaction not taken) and the connection stays open,
         // unless the peer sent a second hello or invalid data, which also
         // bans it.
-        if let Ok(wire::Answer::Slice { bytes, .. }) = &result {
-            tokens -= carried(bytes.len());
+        // The bytes an answer carries count as a block's slices do, the
+        // transactions a `pending` or `deferred` answer holds whole among
+        // them. A slice of a transaction counts as a whole slice however few
+        // bytes were asked for: the chain thread may have had to encode the
+        // transaction to cut it.
+        match &result {
+            Ok(wire::Answer::Slice { bytes, total, .. }) => {
+                let whole = usize::try_from(*total)
+                    .unwrap_or(usize::MAX)
+                    .min(crate::chain::SLICE_MAX);
+                let counted = if transaction { whole } else { 0 };
+                tokens -= carried(bytes.len().max(counted));
+            }
+            Ok(wire::Answer::Items(items)) => {
+                let bytes: usize = items
+                    .iter()
+                    .map(|item| match &item.body {
+                        wire::Body::Whole(bytes) => bytes.len(),
+                        wire::Body::Total(_) => 0,
+                    })
+                    .sum();
+                tokens -= carried(bytes);
+            }
+            _ => {}
         }
         // A peer that brings a block this node lacks, and stores, keeps its
         // slot when every slot is taken.

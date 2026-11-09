@@ -617,3 +617,37 @@ fn values_larger_than_a_part_are_kept_in_parts_and_leave_with_their_rows() {
     set(&tx, None);
     assert_eq!(parts(&tx), 0);
 }
+
+#[test]
+fn a_zero_filled_header_of_a_new_block_file_is_written_again_and_another_chains_is_refused() {
+    let dir = Directory::new();
+    dir.config(false, "zeroed header");
+    drop(open(&dir));
+    fs::create_dir_all(dir.0.join("blocks")).unwrap();
+    // A power loss between creating a block file and its first bytes reaching
+    // the disk can leave it at its length, zero-filled: nothing indexed lies
+    // in it, so the node writes its header again and starts.
+    fs::write(dir.0.join("blocks/00000000.dat"), [0u8; 4096]).unwrap();
+    let mut chain = open(&dir);
+    assert_eq!(
+        fs::metadata(dir.0.join("blocks/00000000.dat"))
+            .unwrap()
+            .len(),
+        40
+    );
+    chain.mine(1, 10000).unwrap();
+    drop(chain);
+    assert_eq!(open(&dir).height(), 1);
+    // A header that is neither this chain's nor empty is never taken over.
+    let other = Directory::new();
+    other.config(false, "foreign header");
+    drop(open(&other));
+    fs::create_dir_all(other.0.join("blocks")).unwrap();
+    fs::write(other.0.join("blocks/00000000.dat"), [0x55u8; 40]).unwrap();
+    assert!(
+        Chain::open(&other.0, Arc::new(AtomicBool::new(false)))
+            .err()
+            .unwrap()
+            .contains("format mismatch")
+    );
+}

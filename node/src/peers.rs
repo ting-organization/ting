@@ -307,6 +307,7 @@ struct Download {
 }
 /// Why a download stopped asking for more before the chain had nothing left:
 /// the peer lacks a block, or the chain refused one for now.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Stop {
     Missing,
     Policy,
@@ -471,26 +472,36 @@ impl Link {
     /// never waiting for the next.
     async fn blocks(&mut self) -> Result<()> {
         let handle = self.node.handle.clone();
-        match self.download(&handle).await {
-            // This peer does not have one of them: the others are asked, and
-            // this one again once it announces a new tip.
-            Ok(Some(Stop::Missing)) => {
-                self.fetch = false;
-                // The blocks asked for lead to the best header: a peer whose
-                // tip is as high claimed more than it holds.
-                let best = handle.events().borrow().best;
-                self.lacking |= self.checked.is_some_and(|(_, height)| height >= best);
-                handle.call("release", json!({"peer":self.peer})).await?;
-                Ok(())
-            }
-            Ok(_) => Ok(()),
+        let (stop, missing) = match self.download(&handle).await {
+            Ok(stopped) => stopped,
             // Answers may still be on their way, and nothing can tell them
             // from the answers to later requests.
             Err(error) => {
                 self.conn.broken.get_or_insert_with(|| error.clone());
-                Err(error)
+                return Err(error);
             }
+        };
+        let Some(stop) = stop else {
+            return Ok(());
+        };
+        // This peer does not have one of them: this one is asked again once
+        // it announces a new tip.
+        if stop == Stop::Missing {
+            self.fetch = false;
+            // The blocks asked for lead to the best header: a peer whose
+            // tip is as high claimed more than it holds.
+            let best = handle.events().borrow().best;
+            self.lacking |= self.checked.is_some_and(|(_, height)| height >= best);
         }
+        // What it was asked for and did not give goes back to the others at
+        // once, also when the chain refused a block for now, and the blocks
+        // it lacks are not asked of it again for a while, whatever tip it
+        // announces.
+        let missing: Vec<String> = missing.iter().map(|id| hex(id)).collect();
+        handle
+            .call("release", json!({"peer":self.peer,"missing":missing}))
+            .await?;
+        Ok(())
     }
     /// The blocks the chain wants of this peer, each with its most bytes,
     /// its data capacity.
@@ -515,8 +526,9 @@ impl Link {
     /// before any further block. Each block has its `transfer_time` from when
     /// it was asked. A peer that sends another
     /// block, or claims one larger than its capacity, sent invalid data.
-    /// Returns why it stopped early, once every answer on its way has come.
-    async fn download(&mut self, handle: &Handle) -> Result<Option<Stop>> {
+    /// Returns why it stopped early, and the blocks the peer said it does not
+    /// have, once every answer on its way has come.
+    async fn download(&mut self, handle: &Handle) -> Result<(Option<Stop>, Vec<Hash>)> {
         // The blocks under way, the slices to ask for, and the slices asked
         // for, in the order their answers come.
         let mut parts: HashMap<Hash, Download> = HashMap::new();
@@ -524,6 +536,7 @@ impl Link {
         let mut asked: VecDeque<(Hash, u64)> = VecDeque::new();
         let mut more = true;
         let mut stop = None;
+        let mut missing = Vec::new();
         loop {
             if more && stop.is_none() && queue.is_empty() && asked.len() <= PIPELINE / 2 {
                 let mut new = false;
@@ -582,7 +595,7 @@ impl Link {
                 asked.push_back((id, offset));
             }
             let Some((id, offset)) = asked.pop_front() else {
-                return Ok(stop);
+                return Ok((stop, missing));
             };
             let answer = self.conn.next_answer().await;
             // A block given up on has its last answers read and dropped.
@@ -605,6 +618,7 @@ impl Link {
                     parts.remove(&id);
                     queue.retain(|(q, _)| *q != id);
                     stop.get_or_insert(Stop::Missing);
+                    missing.push(id);
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -649,7 +663,7 @@ impl Link {
                 continue;
             }
             let block = parts.remove(&id).map(|part| part.bytes).unwrap_or_default();
-            if matches!(stop, Some(Stop::Policy)) {
+            if stop == Some(Stop::Policy) {
                 continue;
             }
             match handle
@@ -1238,7 +1252,7 @@ async fn ended(node: &Node, address: SocketAddr, source: &str, result: Result<()
     }
     let _ = node
         .handle
-        .call("release", json!({"peer":address.to_string()}))
+        .call("release", json!({"peer":address.to_string(),"ended":true}))
         .await;
 }
 
@@ -1506,7 +1520,7 @@ pub async fn run(node: Node) {
                 node.peers.lock().unwrap().remove(&address.to_string());
                 let _ = node
                     .handle
-                    .call("release", json!({"peer":address.to_string()}))
+                    .call("release", json!({"peer":address.to_string(),"ended":true}))
                     .await;
             }
         }

@@ -472,6 +472,8 @@ async function blockView(id, status) {
   const confirmations = block.canonical ? status.height - block.height + 1 : 0;
   const badges = [block.canonical ? pill('Canonical', 'success') : pill('Side branch', 'warn')];
   if (block.canonical) badges.push(pill(count(confirmations) + (confirmations === 1 ? ' confirmation' : ' confirmations'), 'plain'));
+  if (block.status === 'stored') badges.push(pill('Not executed', 'warn'));
+  if (block.status === 'invalid') badges.push(pill('Failed validation', 'warn'));
   setHead({kicker: 'Block', title: count(block.height), badges, sub: [timestamp(block.timestamp) + ' UTC · ', age(block.timestamp)], actions: [
     button('← Previous', block.height > 1 ? '/blocks/' + (block.canonical ? block.height - 1 : block.parent) : undefined),
     button('Next →', block.canonical && block.height < status.height ? '/blocks/' + (block.height + 1) : undefined)]});

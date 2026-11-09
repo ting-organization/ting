@@ -999,6 +999,10 @@ impl Store {
         )?;
         put(&tx, REDO_BLOCKS, &id, &height.to_le_bytes())
     }
+    /// Whether a disconnected block's redo data is kept.
+    pub fn has_redo(tx: &WriteTransaction, id: &Hash) -> Result<bool> {
+        Ok(get(tx, REDO_BLOCKS, id)?.is_some())
+    }
     /// Connects a block again by its redo data, if it has any; returns
     /// whether it did. The root reached must be `root`, the block's own.
     pub fn redo_block(tx: Rc<WriteTransaction>, id: Hash, root: Hash) -> Result<bool> {
@@ -1092,9 +1096,9 @@ impl Store {
             None => 0,
         })
     }
-    /// Deletes what is stored of a block whose body cannot be read, so that it
-    /// is fetched again; its frame stays in its file, unreferenced.
-    pub fn forget_block(&self, tx: &WriteTransaction, id: &Hash) -> Result<()> {
+    /// Deletes a block's location and header, and it from the side blocks and
+    /// the recent ones; its frame stays in its file, unreferenced.
+    fn forget_block(&self, tx: &WriteTransaction, id: &Hash) -> Result<()> {
         self.reader
             .recent
             .lock()
@@ -1115,9 +1119,12 @@ impl Store {
         Ok(())
     }
     /// Deletes everything stored of a side-branch block the node no longer
-    /// keeps (wiki: node/storage): its location, header and limits, the
-    /// occurrences of its transactions and its events, and any undo and redo
-    /// data. Its frame stays in its file, unreferenced.
+    /// keeps (wiki: node/storage), or of one whose body cannot be read and is
+    /// fetched again: its location, header and limits, the occurrences of its
+    /// transactions and its events, and any undo and redo data. Its frame
+    /// stays in its file, unreferenced. The occurrences and events are found
+    /// from the body, so those of an unreadable one stay: executed again, the
+    /// block writes the same rows.
     pub fn forget_side(&self, tx: &WriteTransaction, id: &Hash) -> Result<()> {
         if let Ok(block) = self.block(id) {
             let mut table = tx.open_table(OCCURRENCES).map_err(err)?;
@@ -1319,8 +1326,27 @@ impl Store {
         }
         Ok(cursor)
     }
+    /// Writes the header of a block file that nothing indexed lies in yet,
+    /// when a power loss left it short or, with the file's length on disk
+    /// before its bytes, zero-filled. Any other header is left for
+    /// `check_magic` to refuse: another chain's file is never taken over.
     fn repair_new_header(&self, file: &mut std::fs::File, cursor: Location) -> Result<()> {
-        if cursor.offset == 40 && file.metadata().map_err(err)?.len() < 40 {
+        if cursor.offset != 40 {
+            return Ok(());
+        }
+        let torn = if file.metadata().map_err(err)?.len() < 40 {
+            true
+        } else {
+            let mut header = [0; 40];
+            file.seek(SeekFrom::Start(0)).map_err(err)?;
+            file.read_exact(&mut header).map_err(err)?;
+            let zeroed = header == [0; 40];
+            if zeroed {
+                crate::log!("block file: a zero-filled header is written again");
+            }
+            zeroed
+        };
+        if torn {
             file.seek(SeekFrom::Start(0)).map_err(err)?;
             let mut magic = MAGIC.to_vec();
             magic.extend(self.chain);
