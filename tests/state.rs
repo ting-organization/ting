@@ -157,9 +157,9 @@ fn backed_state_preserves_roots_and_exports_only_net_changes() {
     assert_eq!(backed.len(), 1);
     let changes = backed.changes().unwrap();
     assert_eq!(changes.records.len(), 2);
-    assert_eq!(changes.records[0].before, Some(vec![5]));
+    assert!(changes.records[0].existed);
     assert_eq!(changes.records[0].after, Some(vec![7]));
-    assert_eq!(changes.records[1].before, Some(vec![]));
+    assert!(changes.records[1].existed);
     assert_eq!(changes.records[1].after, None);
     backed.rollback(0);
     assert_eq!(backed.len(), 2);
@@ -580,4 +580,43 @@ fn a_call_that_cannot_pay_the_code_price_reads_none_of_the_code() {
     let receipt = cold.execute(&call).unwrap();
     assert_eq!(receipt.status, Status::Compute);
     assert_eq!(cold.storage_error(), None);
+}
+
+#[test]
+fn a_tree_given_leaves_hashed_in_pieces_reaches_the_roots_of_a_state() {
+    use ting_core::state::{Leaf, Tree};
+    let base = [
+        ([1; 32], vec![5]),
+        ([2; 32], vec![6; 100]),
+        ([0x81; 32], vec![]),
+    ];
+    let value: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+    // A state that deletes one record, overwrites one and creates one.
+    let (root, reader) = stored(&base);
+    let mut state = State::backed(Rc::new(reader), base.len(), root);
+    state.set([1; 32], None);
+    state.set([2; 32], Some(value.clone()));
+    state.set([3; 32], Some(vec![]));
+    let expected = state.changes().unwrap();
+    // The tree alone, given each leaf from a value that comes in pieces:
+    // the same root, count and entries, and no record.
+    let (root, reader) = stored(&base);
+    let mut tree = Tree::backed(Rc::new(reader), base.len(), root);
+    tree.set([1; 32], None);
+    let mut leaf = Leaf::new(&[2; 32], value.len() as u32);
+    for piece in value.chunks(7) {
+        leaf.update(piece).unwrap();
+    }
+    tree.set([2; 32], Some(leaf.finish().unwrap()));
+    tree.set([3; 32], Some(Leaf::new(&[3; 32], 0).finish().unwrap()));
+    let changes = tree.changes().unwrap();
+    assert_eq!(changes.root, expected.root);
+    assert_eq!(changes.count, expected.count);
+    assert_eq!(changes.nodes, expected.nodes);
+    assert!(changes.records.is_empty());
+    // A leaf is of exactly the bytes its length says.
+    let mut short = Leaf::new(&[2; 32], 3);
+    short.update(&[1, 2]).unwrap();
+    assert!(short.finish().is_err());
+    assert!(Leaf::new(&[2; 32], 3).update(&[1, 2, 3, 4]).is_err());
 }
