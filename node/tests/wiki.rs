@@ -144,6 +144,33 @@ fn every_reference_program_is_served_byte_for_byte() {
     assert!(wiki::file("programs/../Cargo.toml").is_none());
 }
 #[test]
+fn every_standard_has_its_page_and_its_vectors_served_byte_for_byte() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../standards");
+    let mut served = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        let standard = name
+            .strip_suffix("-vectors.json")
+            .unwrap_or_else(|| panic!("{name} is not a standard's vectors"));
+        let (mime, body) = wiki::file(&format!("standards/{name}"))
+            .unwrap_or_else(|| panic!("{name} is not served"));
+        assert_eq!(body, std::fs::read(dir.join(&name)).unwrap(), "{name}");
+        assert_eq!(mime, "application/json; charset=utf-8", "{name}");
+        serde_json::from_slice::<serde_json::Value>(body)
+            .unwrap_or_else(|e| panic!("{name} is not JSON: {e}"));
+        // The standard's page links the file it is checked by.
+        let page = wiki::page(&format!("standards/{standard}"))
+            .unwrap_or_else(|| panic!("{standard} has no page"));
+        assert!(
+            page.contains(&format!("href=\"/wiki/standards/{name}\"")),
+            "{standard} does not link {name}"
+        );
+        served += 1;
+    }
+    assert_eq!(served, 2, "TCR-1 and TOCS-1");
+    assert!(wiki::file("standards/../Cargo.toml").is_none());
+}
+#[test]
 fn diagrams_are_drawn_into_their_pages() {
     let mut drawn = 0;
     for page in wiki::all() {

@@ -5,3 +5,5 @@
 # The published chains are checked byte for byte; the node carries the seed.
 /conformance/seed/*.blocks binary
 /conformance/chains/*.blocks binary
+# The standards' test vectors are shared byte for byte with other implementations.
+/standards/*.json -text

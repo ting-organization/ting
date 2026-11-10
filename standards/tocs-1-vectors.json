@@ -1,0 +1,539 @@
+{
+  "about": "Test vectors for TOCS-1, Ting Off-Chain Signing version 1 (TOCS-1.md). Bytes are lowercase hex; times are Unix seconds.",
+  "chain_id": "15d6549cfacd816f835c632b4c67308d1c63e642f4cbf4049368430670705107",
+  "canonical": {
+    "id_registry": "1185ab4a07f12fd03e130acfd51211cd9360ec94b89e5f742bbd8f52767714bd",
+    "policy_secp256k1": "9558a75642eb797de5ec1be056f01c62d99c492c8f7ec6efed460767588987c9",
+    "policy_p256": "35d2b107de4b2a738a8190be18ccfd35d9bac45da094cfa4281a3a4b178852b3"
+  },
+  "tags": {
+    "H(\"app/offchain-v1/document\", \"\")": "59b6eb97acc5bda7c8f7ed2cbed222ffb2e66511eaf6f67fbb0345ef76cacfcd",
+    "H(\"app/sign-v1\", \"\")": "cc686e2d6d364e6d22ed5f6b6199e3531a0cee095560c55329c13a17bc00be25"
+  },
+  "documents": [
+    {
+      "name": "sign-in with a browser key",
+      "document": {
+        "request": {
+          "kind": "sign_in",
+          "session_until": 1800000000,
+          "key": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+        },
+        "title": "Sign in to the Ting forum",
+        "body": "Welcome back.\n\n- read\n- **post**",
+        "fields": [
+          [
+            "Browser",
+            "Firefox on Windows"
+          ],
+          [
+            "Tip jar",
+            "100 DLR"
+          ]
+        ]
+      },
+      "hex": "010100d2496b000000000141000000046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5190000005369676e20696e20746f207468652054696e6720666f72756d2000000057656c636f6d65206261636b2e0a0a2d20726561640a2d202a2a706f73742a2a020000000700000042726f777365721200000046697265666f78206f6e2057696e646f777307000000546970206a61720700000031303020444c52",
+      "hash": "6c2432d54d12804022f371cbedad514012ec4d3eec808cbd90cd787f338ecd18"
+    },
+    {
+      "name": "sign-in without a key",
+      "document": {
+        "request": {
+          "kind": "sign_in",
+          "session_until": 1800003600,
+          "key": null
+        },
+        "title": "Sign in",
+        "body": "",
+        "fields": []
+      },
+      "hex": "010110e0496b0000000000070000005369676e20696e0000000000000000",
+      "hash": "2d135ce47ce71b3dd0756e63e19bdfc06e38e6b480b4dbe1e3e8775f14ce06a6"
+    },
+    {
+      "name": "grant of two scopes",
+      "document": {
+        "request": {
+          "kind": "grant",
+          "until": 1900000000,
+          "scopes": [
+            "post",
+            "react:thread/1"
+          ],
+          "key": null
+        },
+        "title": "Let the forum post for you",
+        "body": "The forum may *post* and **react** as you.",
+        "fields": [
+          [
+            "Starts",
+            "1 Sep 2026"
+          ]
+        ]
+      },
+      "hex": "010200b33f71000000000200000004000000706f73740e00000072656163743a7468726561642f31001a0000004c65742074686520666f72756d20706f737420666f7220796f752a00000054686520666f72756d206d6179202a706f73742a20616e64202a2a72656163742a2a20617320796f752e01000000060000005374617274730a00000031205365702032303236",
+      "hash": "21e28fccedb4803d417d7e1e4e2cdbb0c991c6e60cd38e87935ea9ba5baaa1ae"
+    },
+    {
+      "name": "statement covering a file",
+      "document": {
+        "request": {
+          "kind": "statement",
+          "attachment": {
+            "hash": "ec87204c5be7d6a6c0c8d60d18db70101d82f5eba067687c92092ba01d28cf1e",
+            "media_type": "application/pdf",
+            "name": "Agreement.pdf"
+          }
+        },
+        "title": "I agree to the terms",
+        "body": "Æ ø å, 日本語 and 👍 are fine.\n\n1. First\n2. Second",
+        "fields": []
+      },
+      "hex": "010301ec87204c5be7d6a6c0c8d60d18db70101d82f5eba067687c92092ba01d28cf1e0f0000006170706c69636174696f6e2f7064660d00000041677265656d656e742e706466140000004920616772656520746f20746865207465726d733a000000c38620c3b820c3a52c20e697a5e69cace8aa9e20616e6420f09f918d206172652066696e652e0a0a312e2046697273740a322e205365636f6e6400000000",
+      "hash": "796557bb4a6f989daec131a24dca965e14d7c1dbf7b05ffa4b376dd0e9b6b1e6"
+    },
+    {
+      "name": "statement without a file",
+      "document": {
+        "request": {
+          "kind": "statement",
+          "attachment": null
+        },
+        "title": "I was here",
+        "body": "Line one\nline two",
+        "fields": [
+          [
+            "Place",
+            "Oslo"
+          ]
+        ]
+      },
+      "hex": "0103000a00000049207761732068657265110000004c696e65206f6e650a6c696e652074776f0100000005000000506c616365040000004f736c6f",
+      "hash": "8912114f5c5ff3f3011d04c43c8f141d38fad2d50451fee5ca58f143c3d5769a"
+    }
+  ],
+  "refused_documents": [
+    {
+      "name": "a trailing byte",
+      "hex": "010100d2496b000000000141000000046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5190000005369676e20696e20746f207468652054696e6720666f72756d2000000057656c636f6d65206261636b2e0a0a2d20726561640a2d202a2a706f73742a2a020000000700000042726f777365721200000046697265666f78206f6e2057696e646f777307000000546970206a61720700000031303020444c5200"
+    },
+    {
+      "name": "version 2",
+      "hex": "020100d2496b000000000141000000046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5190000005369676e20696e20746f207468652054696e6720666f72756d2000000057656c636f6d65206261636b2e0a0a2d20726561640a2d202a2a706f73742a2a020000000700000042726f777365721200000046697265666f78206f6e2057696e646f777307000000546970206a61720700000031303020444c52"
+    },
+    {
+      "name": "unknown kind 9",
+      "hex": "010900d2496b000000000141000000046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5190000005369676e20696e20746f207468652054696e6720666f72756d2000000057656c636f6d65206261636b2e0a0a2d20726561640a2d202a2a706f73742a2a020000000700000042726f777365721200000046697265666f78206f6e2057696e646f777307000000546970206a61720700000031303020444c52"
+    },
+    {
+      "name": "cut short",
+      "hex": "010100d2496b000000000141000000046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5190000005369676e20696e20746f207468652054696e6720666f72756d2000000057656c636f6d65206261636b2e0a0a2d20726561640a2d202a2a706f73742a2a020000000700000042726f777365721200000046697265666f78206f6e2057696e646f777307000000546970206a61720700000031303020"
+    },
+    {
+      "name": "a direction override in the title (U+202E)",
+      "hex": "0103000b00000050617920e280ae6576696c0000000000000000"
+    },
+    {
+      "name": "a zero-width space in the title (U+200B)",
+      "hex": "0103000c000000696ee2808b76697369626c650000000000000000"
+    },
+    {
+      "name": "a title of two lines",
+      "hex": "0103000900000074776f0a6c696e65730000000000000000"
+    },
+    {
+      "name": "a title with a leading space",
+      "hex": "01030007000000207061646465640000000000000000"
+    },
+    {
+      "name": "an empty title",
+      "hex": "010300000000000000000000000000"
+    },
+    {
+      "name": "a title not in NFC (e + U+0301)",
+      "hex": "0103000300000065cc810000000000000000"
+    },
+    {
+      "name": "invalid UTF-8 (a lone C3)",
+      "hex": "01030001000000c30000000000000000"
+    },
+    {
+      "name": "an overlong encoding (C0 80)",
+      "hex": "01030002000000c0800000000000000000"
+    },
+    {
+      "name": "an encoded surrogate (ED A0 80)",
+      "hex": "0103000400000041eda0800000000000000000"
+    },
+    {
+      "name": "a tab in the body",
+      "hex": "01030001000000540300000061096200000000"
+    },
+    {
+      "name": "a noncharacter in the body (U+FFFE)",
+      "hex": "01030001000000540500000061efbfbe6200000000"
+    },
+    {
+      "name": "a tag character in the body (U+E0041)",
+      "hex": "01030001000000540600000061f3a081816200000000"
+    },
+    {
+      "name": "unknown key scheme 2",
+      "hex": "010101000000000000000241000000046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f501000000540000000000000000"
+    },
+    {
+      "name": "a compressed key",
+      "hex": "01010100000000000000012100000002010101010101010101010101010101010101010101010101010101010101010101000000540000000000000000"
+    },
+    {
+      "name": "a scope in capitals",
+      "hex": "010201000000000000000100000004000000506f73740001000000540000000000000000"
+    },
+    {
+      "name": "an attachment marker of 2",
+      "hex": "01030201000000540000000000000000"
+    },
+    {
+      "name": "a media type with a capital",
+      "hex": "01030105050505050505050505050505050505050505050505050505050505050505050f0000004170706c69636174696f6e2f70646605000000612e70646601000000540000000000000000"
+    },
+    {
+      "name": "an empty field value",
+      "hex": "01030001000000540000000001000000010000004c00000000"
+    }
+  ],
+  "origins": [
+    {
+      "address": "https://forum.example/api/ting/requests/abc",
+      "origin": "https://forum.example"
+    },
+    {
+      "address": "https://Forum.Example:8443/x?y",
+      "origin": "https://forum.example:8443"
+    },
+    {
+      "address": "https://forum.example:443/x",
+      "origin": "https://forum.example"
+    },
+    {
+      "address": "http://localhost:3000/a",
+      "origin": "http://localhost:3000"
+    },
+    {
+      "address": "http://127.0.0.1/a",
+      "origin": "http://127.0.0.1"
+    },
+    {
+      "address": "http://[::1]:8080/a",
+      "origin": "http://[::1]:8080"
+    },
+    {
+      "address": "http://forum.example/a",
+      "origin": null
+    },
+    {
+      "address": "https://user:pw@forum.example/",
+      "origin": null
+    },
+    {
+      "address": "https://%D0%B0pple.com/",
+      "origin": null
+    },
+    {
+      "address": "https://xn--pple-43d.com/",
+      "origin": "https://xn--pple-43d.com"
+    },
+    {
+      "address": "https://bаnk.example/req",
+      "origin": null
+    },
+    {
+      "address": "https://bank.example/réq",
+      "origin": null
+    },
+    {
+      "address": "javascript:alert(1)",
+      "origin": null
+    },
+    {
+      "address": "ftp://forum.example/",
+      "origin": null
+    }
+  ],
+  "sign_codes": [
+    {
+      "code": "ting:sign?url=https%3A%2F%2Fforum.example%2Fapi%2Fting%2Frequests%2Fabc",
+      "url": "https://forum.example/api/ting/requests/abc"
+    },
+    {
+      "code": "TING://sign?url=https%3A%2F%2Fforum.example%2Fr",
+      "url": "https://forum.example/r"
+    },
+    {
+      "code": "ting:sign?url=http%3A%2F%2Fevil.example%2F",
+      "url": null
+    },
+    {
+      "code": "ting:sign?url=%E0%A4%A",
+      "url": null
+    }
+  ],
+  "match_codes": [
+    {
+      "nonce": "0303030303030303030303030303030303030303030303030303030303030303",
+      "code": "33"
+    },
+    {
+      "nonce": "00000000000000000000000000000000",
+      "code": "49"
+    },
+    {
+      "nonce": "00112233445566778899aabbccddeeff",
+      "code": "34"
+    }
+  ],
+  "request": {
+    "fetched_from": "https://forum.example/api/ting/requests/abc",
+    "now": 1792000100,
+    "json": {
+      "type": "ting-sign-request",
+      "version": 1,
+      "chain": "15d6549cfacd816f835c632b4c67308d1c63e642f4cbf4049368430670705107",
+      "nonce": "0303030303030303030303030303030303030303030303030303030303030303",
+      "issued_at": 1792000000,
+      "expires_at": 1792000300,
+      "document": "010100d2496b000000000141000000046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5190000005369676e20696e20746f207468652054696e6720666f72756d2000000057656c636f6d65206261636b2e0a0a2d20726561640a2d202a2a706f73742a2a020000000700000042726f777365721200000046697265666f78206f6e2057696e646f777307000000546970206a61720700000031303020444c52",
+      "callback": "https://forum.example/api/ting/requests/abc/answer",
+      "return": "https://forum.example/sign-in"
+    },
+    "origin": "https://forum.example"
+  },
+  "identity_answer": {
+    "identity": "7185932296cf9d0ef6e00291ba09f8a052c850d2ebe7f9275608e10d87d2b3cf",
+    "slot": 0,
+    "key_id": 1,
+    "secret_key": "1111111111111111111111111111111111111111111111111111111111111111",
+    "public_key": "044f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa385b6b1b8ead809ca67454d9683fcf2ba03456d6fe2c4abe2b07f0fbdbb2f1c1",
+    "core_record_key": "2c80cb40936883cad33049249c772b50754adac2167c83ef224ff3bf60fd4822",
+    "core_record": "01040000000000000001000000000000000000000000000000020000000000000003000000000000000200000000000000010000000000000002000000000000000000000000000000803a09000000000000a30200000000000100000000000000",
+    "key_record_key": "c4ce78c1425861767afebecd929d889eb529b2987138bd4e6963bbca7e8ed2da",
+    "key_record": "9558a75642eb797de5ec1be056f01c62d99c492c8f7ec6efed460767588987c9044f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa385b6b1b8ead809ca67454d9683fcf2ba03456d6fe2c4abe2b07f0fbdbb2f1c1",
+    "params": "7185932296cf9d0ef6e00291ba09f8a052c850d2ebe7f9275608e10d87d2b3cf0000000000000000",
+    "account": "67e0c9768bee03738c687ba518b7496c67a9d730109d457bb11305500f62610e",
+    "message": "0f0000006170702f6f6666636861696e2d763115d6549cfacd816f835c632b4c67308d1c63e642f4cbf404936843067070510767e0c9768bee03738c687ba518b7496c67a9d730109d457bb11305500f62610e1500000068747470733a2f2f666f72756d2e6578616d706c6520000000030303030303030303030303030303030303030303030303030303030303030300c0cf6a000000002cc1cf6a000000006c2432d54d12804022f371cbedad514012ec4d3eec808cbd90cd787f338ecd18",
+    "digest": "1adc217aebffe4573a6969913d97c47efdecc9d52d2bd89c7c2418be32bde68c",
+    "signature": "1fa5e432ba663795c014ce861e5f2ddd11b57770b183c2947fbd21c1dcb1f5015a3fe4658ea868ea7b46951bfd073b5ca5988b0c63b6e1e18cbeb2ceba484dbe",
+    "witness": "0100000000000000400000001fa5e432ba663795c014ce861e5f2ddd11b57770b183c2947fbd21c1dcb1f5015a3fe4658ea868ea7b46951bfd073b5ca5988b0c63b6e1e18cbeb2ceba484dbe",
+    "answer": {
+      "type": "ting-sign-answer",
+      "version": 1,
+      "nonce": "0303030303030303030303030303030303030303030303030303030303030303",
+      "account": "67e0c9768bee03738c687ba518b7496c67a9d730109d457bb11305500f62610e",
+      "policy": "1185ab4a07f12fd03e130acfd51211cd9360ec94b89e5f742bbd8f52767714bd",
+      "params": "7185932296cf9d0ef6e00291ba09f8a052c850d2ebe7f9275608e10d87d2b3cf0000000000000000",
+      "witness": "0100000000000000400000001fa5e432ba663795c014ce861e5f2ddd11b57770b183c2947fbd21c1dcb1f5015a3fe4658ea868ea7b46951bfd073b5ca5988b0c63b6e1e18cbeb2ceba484dbe"
+    }
+  },
+  "plain_answers": [
+    {
+      "policy": "policy_secp256k1",
+      "secret_key": "2222222222222222222222222222222222222222222222222222222222222222",
+      "public_key": "04466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f276728176c3c6431f8eeda4538dc37c865e2784f3a9e77d044f33e407797e1278a",
+      "account": "7b6f152eaa9ace849d14c7a0ad055a48d553219385023c32a4bf2648c3fc24e5",
+      "message": "0f0000006170702f6f6666636861696e2d763115d6549cfacd816f835c632b4c67308d1c63e642f4cbf40493684306707051077b6f152eaa9ace849d14c7a0ad055a48d553219385023c32a4bf2648c3fc24e51500000068747470733a2f2f666f72756d2e6578616d706c6520000000030303030303030303030303030303030303030303030303030303030303030300c0cf6a000000002cc1cf6a000000006c2432d54d12804022f371cbedad514012ec4d3eec808cbd90cd787f338ecd18",
+      "digest": "0af901094d0f431f364d84e53710d1fadace10b9df6b980781e12a6d62a31ade",
+      "signature": "4488642cbdd0de1c322c0dd8b235c590ddc7f77507a7babef794db8dc103a6d1563f34f3d8046b05d15de4c88c1cfcf13ebed77f8a83116ac8792fd2cbf7d3f6"
+    },
+    {
+      "policy": "policy_p256",
+      "secret_key": "3333333333333333333333333333333333333333333333333333333333333333",
+      "public_key": "0451a7580833898ea1b183cbd7350a4099078c6ef1c1e18e970cd7683035f25e7d0110522712b0b5a7cff081685486984a94e6831edac46e7360fa9d834a7a81a1",
+      "account": "a34f9c1c693f2ec787554c88e915c2035ec885e9641f1ab736a833688ad493a5",
+      "message": "0f0000006170702f6f6666636861696e2d763115d6549cfacd816f835c632b4c67308d1c63e642f4cbf4049368430670705107a34f9c1c693f2ec787554c88e915c2035ec885e9641f1ab736a833688ad493a51500000068747470733a2f2f666f72756d2e6578616d706c6520000000030303030303030303030303030303030303030303030303030303030303030300c0cf6a000000002cc1cf6a000000006c2432d54d12804022f371cbedad514012ec4d3eec808cbd90cd787f338ecd18",
+      "digest": "932f9a2e2c7e9da5399cd1cc43b84c9c426cc6604abdb07c9a30754c361cf8b5",
+      "signature": "f417b961272372ac70d5d3986d715e59ca709314169330e754e3830899a715ad4f0a00602a9d306ad11f7a5d4e9d05e352e674ec87a332e41839398da37820d1"
+    }
+  ],
+  "decline": {
+    "type": "ting-sign-answer",
+    "version": 1,
+    "nonce": "0303030303030303030303030303030303030303030303030303030303030303",
+    "declined": true
+  },
+  "bodies": [
+    {
+      "body": "Hello **you**,\nsecond line\n\n- one\n- *two*\n\n3. three\n4. four\n\nA * lone star and **open",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "lines": [
+            [
+              {
+                "text": "Hello ",
+                "bold": false,
+                "italic": false
+              },
+              {
+                "text": "you",
+                "bold": true,
+                "italic": false
+              },
+              {
+                "text": ",",
+                "bold": false,
+                "italic": false
+              }
+            ],
+            [
+              {
+                "text": "second line",
+                "bold": false,
+                "italic": false
+              }
+            ]
+          ]
+        },
+        {
+          "type": "list",
+          "items": [
+            {
+              "marker": "•",
+              "spans": [
+                {
+                  "text": "one",
+                  "bold": false,
+                  "italic": false
+                }
+              ]
+            },
+            {
+              "marker": "•",
+              "spans": [
+                {
+                  "text": "two",
+                  "bold": false,
+                  "italic": true
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "list",
+          "items": [
+            {
+              "marker": "3.",
+              "spans": [
+                {
+                  "text": "three",
+                  "bold": false,
+                  "italic": false
+                }
+              ]
+            },
+            {
+              "marker": "4.",
+              "spans": [
+                {
+                  "text": "four",
+                  "bold": false,
+                  "italic": false
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "lines": [
+            [
+              {
+                "text": "A * lone star and **open",
+                "bold": false,
+                "italic": false
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "body": "Welcome back.\n\n- read\n- **post**",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "lines": [
+            [
+              {
+                "text": "Welcome back.",
+                "bold": false,
+                "italic": false
+              }
+            ]
+          ]
+        },
+        {
+          "type": "list",
+          "items": [
+            {
+              "marker": "•",
+              "spans": [
+                {
+                  "text": "read",
+                  "bold": false,
+                  "italic": false
+                }
+              ]
+            },
+            {
+              "marker": "•",
+              "spans": [
+                {
+                  "text": "post",
+                  "bold": true,
+                  "italic": false
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "body": "** not bold **, *not italic *, **bold**",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "lines": [
+            [
+              {
+                "text": "* not bold *",
+                "bold": false,
+                "italic": true
+              },
+              {
+                "text": ", ",
+                "bold": false,
+                "italic": false
+              },
+              {
+                "text": "not italic *, *",
+                "bold": false,
+                "italic": true
+              },
+              {
+                "text": "bold**",
+                "bold": false,
+                "italic": false
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "body": "",
+      "blocks": []
+    }
+  ]
+}

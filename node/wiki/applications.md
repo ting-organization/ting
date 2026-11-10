@@ -26,4 +26,6 @@ key mined the block.
 
 This section covers the patterns every application needs and the assumptions it must
 not make. The most common applications (coins, identities and signature checks) exist
-as frozen [reference programs](programs.md) that any application can build on.
+as frozen [reference programs](programs.md) that any application can build on, and
+how a wallet is asked to act in a program, or to sign for a site, is settled by the
+[application standards](standards.md).

@@ -328,6 +328,29 @@ pub static GROUPS: &[Group] = &[
         ],
     },
     Group {
+        label: "Application standards",
+        pages: &[
+            page!(
+                "standards",
+                "Application standards",
+                "wiki/standards.md",
+                "Formats that programs, wallets and sites share, published with Ting but not part of its protocol."
+            ),
+            page!(
+                "standards/tcr-1",
+                "TCR-1: Ting Call Requests",
+                "wiki/standards/tcr-1.md",
+                "How a page asks a user to do an operation in a program, and how the program knows the user agreed."
+            ),
+            page!(
+                "standards/tocs-1",
+                "TOCS-1: Ting Off-Chain Signing",
+                "wiki/standards/tocs-1.md",
+                "How a site asks a user to sign in, grant a permission or sign a statement, and checks the answer."
+            ),
+        ],
+    },
+    Group {
         label: "Running a node",
         pages: &[
             page!(
@@ -533,7 +556,8 @@ pub fn redirect(path: &str) -> Option<String> {
     Some(find(path.strip_suffix('/')?)?.url())
 }
 /// Non-page files linked from bundled documents: the reference programs with
-/// their manifest, from the repository's `programs/` folder.
+/// their manifest, from the repository's `programs/` folder, and the test
+/// vectors of the application standards, from its `standards/` folder.
 pub fn file(path: &str) -> Option<(&'static str, &'static [u8])> {
     const JSON: &str = "application/json; charset=utf-8";
     const WASM: &str = "application/wasm";
@@ -556,6 +580,14 @@ pub fn file(path: &str) -> Option<(&'static str, &'static [u8])> {
         "programs/coin.wasm" => (WASM, &include_bytes!("../../programs/coin.wasm")[..]),
         "programs/sha256.wasm" => (WASM, &include_bytes!("../../programs/sha256.wasm")[..]),
         "programs/batch.wasm" => (WASM, &include_bytes!("../../programs/batch.wasm")[..]),
+        "standards/tcr-1-vectors.json" => (
+            JSON,
+            &include_bytes!("../../standards/tcr-1-vectors.json")[..],
+        ),
+        "standards/tocs-1-vectors.json" => (
+            JSON,
+            &include_bytes!("../../standards/tocs-1-vectors.json")[..],
+        ),
         _ => return None,
     })
 }

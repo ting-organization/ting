@@ -14,6 +14,8 @@ registry, a coin anyone can issue, a hash function, and a batch of calls that le
 one account pay for another's operation. They share a small set of
 [conventions](programs/conventions.md), so one account works with every coin, one
 wallet can sign for every application, and a miner can rank fees from any of them.
+The [application standards](standards.md) build on those conventions: how a page
+asks a user to act in any program, and how a site asks a user to sign off chain.
 
 ## The programs
 
