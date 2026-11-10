@@ -665,6 +665,11 @@ A verifier:
 
 Wallets display what they sign and warn on unknown application tags.
 
+[TOCS-1](../standards/tocs-1.md) is the standard for sign-ins, permissions and
+statements a site asks for. Its messages, under the tag `app/offchain-v1`, name the
+ChainId and the ID's account, which commits to the registry, the ID and the slot,
+and the site they are for.
+
 ## Costs
 
 Typical costs per transaction, rounded. Signature verification dominates every signed

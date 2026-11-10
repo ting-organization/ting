@@ -38,6 +38,7 @@
       "state_root":{"$ref":"#/components/schemas/Hash"},"transactions_root":{"$ref":"#/components/schemas/Hash"},"receipts_root":{"$ref":"#/components/schemas/Hash"},
       "used":{"$ref":"#/components/schemas/Resources"},"votes":{"type":"array","minItems":4,"maxItems":4,"items":{"type":"integer","enum":[0,1,2]},"description":"C/S/D/G: 0 hold, 1 increase, 2 decrease"},
       "producer_hex":{"type":"string","pattern":"^([0-9a-f]{2})*$","description":"Miner-selected producer data carried in the body"},"producer_hash":{"$ref":"#/components/schemas/Hash"},"bytes":{"type":"integer","minimum":302},"canonical":{"type":"boolean"},
+      "status":{"type":"string","enum":["valid","stored","invalid"],"description":"What this node knows of the block: valid, executed here and found valid; stored, its body matches its header but it has not been executed; invalid, its execution failed. The receipts of a block that is not valid are its producer's claim"},
       "transactions":{"type":"array","items":{"$ref":"#/components/schemas/Hash"}},"receipts":{"type":"array","items":{"$ref":"#/components/schemas/Receipt"}}
     }
   },

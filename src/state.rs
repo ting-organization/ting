@@ -1,5 +1,5 @@
 //! Journaled state and its incremental compact sparse Merkle tree.
-use crate::hash::{Hash, hash, hash_parts};
+use crate::hash::{Hash, Hasher, hash, hash_parts};
 use std::{cell::RefCell, collections::BTreeMap, fmt, rc::Rc, sync::OnceLock};
 
 /// A subtree's place in the tree: its depth and the key bits that lead to it,
@@ -67,10 +67,15 @@ impl StateReader for Empty {
     }
 }
 
+/// One record's net change: whether the reader holds the record, and the
+/// value it has now. The value it had is not here. Nothing a block pays
+/// bounds the values it deletes or overwrites, so whoever needs them, as a
+/// node does for its undo data, takes each from where the reader keeps it
+/// instead of holding them all at once.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordChange {
     pub key: Hash,
-    pub before: Option<Vec<u8>>,
+    pub existed: bool,
     pub after: Option<Vec<u8>>,
 }
 #[derive(Clone, Debug)]
@@ -94,6 +99,41 @@ fn leaf(key: &Hash, value: &[u8]) -> Hash {
         "state-leaf",
         &[key, &(value.len() as u32).to_le_bytes(), value],
     )
+}
+/// A record's leaf hash (rules §6), from a value that comes in pieces: the
+/// same hash as the one of the whole value, for whoever moves a value without
+/// holding all of it.
+pub struct Leaf {
+    hasher: Hasher,
+    left: u32,
+}
+impl Leaf {
+    /// The leaf of the record at `key` whose value is `length` bytes.
+    pub fn new(key: &Hash, length: u32) -> Self {
+        let mut hasher = Hasher::new("state-leaf");
+        hasher.update(key);
+        hasher.update(&length.to_le_bytes());
+        Self {
+            hasher,
+            left: length,
+        }
+    }
+    /// The next bytes of the value.
+    pub fn update(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.left = u32::try_from(bytes.len())
+            .ok()
+            .and_then(|n| self.left.checked_sub(n))
+            .ok_or("a record value longer than its length")?;
+        self.hasher.update(bytes);
+        Ok(())
+    }
+    /// The hash, once every byte of the value has come.
+    pub fn finish(self) -> Result<Hash, String> {
+        if self.left != 0 {
+            return Err("a record value shorter than its length".into());
+        }
+        Ok(self.hasher.finish())
+    }
 }
 /// Bit `depth` of a key, counted from the most significant bit of its first byte.
 fn bit(key: &Hash, depth: u16) -> bool {
@@ -149,20 +189,41 @@ pub struct Proof {
     pub end: End,
     pub siblings: Vec<Hash>,
 }
+/// Where the path of a key ends in a stored tree, as [`End`] without the
+/// value of another record it ends at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathEnd {
+    Present,
+    Empty,
+    Other(Hash),
+}
 /// The proof of the record at `key` in a stored tree.
 pub fn prove(reader: &dyn StateReader, key: &Hash) -> Result<Proof, String> {
+    let (end, siblings) = path(reader, key)?;
+    let end = match end {
+        PathEnd::Present => End::Present,
+        PathEnd::Empty => End::Empty,
+        PathEnd::Other(other) => End::Other(
+            other,
+            reader
+                .record(&other)?
+                .ok_or("state tree leaf without its record")?,
+        ),
+    };
+    Ok(Proof { end, siblings })
+}
+/// A proof's path without any record's value: where the path of `key` ends,
+/// and the hash of the other child at each level above that, from the end up
+/// to the root. Whoever gives many proofs at once reads the record that
+/// several of them end at once, not once for each.
+pub fn path(reader: &dyn StateReader, key: &Hash) -> Result<(PathEnd, Vec<Hash>), String> {
     let mut siblings = Vec::new();
     let mut depth = 0u16;
     let end = loop {
         match reader.node(&position(key, depth))? {
-            None => break End::Empty,
-            Some(Entry::Leaf(other, _)) if other == *key => break End::Present,
-            Some(Entry::Leaf(other, _)) => {
-                let value = reader
-                    .record(&other)?
-                    .ok_or("state tree leaf without its record")?;
-                break End::Other(other, value);
-            }
+            None => break PathEnd::Empty,
+            Some(Entry::Leaf(other, _)) if other == *key => break PathEnd::Present,
+            Some(Entry::Leaf(other, _)) => break PathEnd::Other(other),
             Some(Entry::Node(_)) if depth == 256 => {
                 return Err("state tree node below the deepest level".into());
             }
@@ -174,7 +235,7 @@ pub fn prove(reader: &dyn StateReader, key: &Hash) -> Result<Proof, String> {
         }
     };
     siblings.reverse();
-    Ok(Proof { end, siblings })
+    Ok((end, siblings))
 }
 /// Whether `proof` shows the record at `key` to hold `value`, or with `None`
 /// to be absent, in the state whose root is `root`.
@@ -320,7 +381,8 @@ impl State {
         self.root
     }
     /// The net changes against the reader. A record whose leaf is unchanged is
-    /// unchanged, so no value is read or compared for it.
+    /// unchanged, so no value is read or compared for it, and no changed
+    /// record's previous value is read either.
     pub fn changes(&self) -> Result<Changes, String> {
         let mut records = Vec::new();
         for (key, dirty) in &self.records {
@@ -329,7 +391,7 @@ impl State {
             }
             records.push(RecordChange {
                 key: *key,
-                before: dirty.stored.and_then(|_| self.base_record(key)),
+                existed: dirty.stored.is_some(),
                 after: dirty.value.as_deref().cloned(),
             });
         }
@@ -486,5 +548,25 @@ impl State {
     }
     fn put(&mut self, position: Position, entry: Option<Entry>) {
         self.nodes.insert(position, entry);
+    }
+}
+
+/// The state tree alone, over a reader, for whoever moves the records
+/// themselves: a node that undoes a block restores each record from its undo
+/// data without holding the value, and gives the tree the leaf it hashed on
+/// the way. The tree, the count and the root follow exactly as they do in a
+/// [`State`]; the changes name the tree's entries and no record.
+pub struct Tree(State);
+impl Tree {
+    pub fn backed(reader: Rc<dyn StateReader>, count: usize, root: Hash) -> Self {
+        Self(State::backed(reader, count, root))
+    }
+    /// Sets the leaf of the record at `key`, `None` when the record is gone.
+    pub fn set(&mut self, key: Hash, leaf: Option<Hash>) {
+        self.0.update(key, leaf);
+    }
+    /// The tree's net changes against the reader, the root and the count.
+    pub fn changes(&self) -> Result<Changes, String> {
+        self.0.changes()
     }
 }

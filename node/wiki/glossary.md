@@ -37,6 +37,7 @@ that explains a term in full.
 | Record | One entry in the state: a 32-byte key and a value of any length. Empty and absent differ. |
 | Reference program | A program published with Ting for a common need, such as a coin, an identity or a signature check. It is an ordinary deployment, not part of the protocol. [More](programs.md) |
 | Reorganization | A switch of the canonical branch to a competing branch with more work. |
+| Standard | A format that programs, wallets and sites agree on, such as TCR-1 for asking a user to act in a program and TOCS-1 for signing off chain. Not part of the protocol. [More](standards.md) |
 | State root | The root of the sparse Merkle tree over all records. [More](data/state-tree.md) |
 | Status | The outcome code in a receipt, from 0 (success) to 11. [More](data/blocks.md) |
 | Target | The largest allowed BlockId value. A smaller target means harder mining. |

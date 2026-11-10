@@ -12,14 +12,17 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use ting_core::{
     hash::{Hash, hash},
     meter::Resources,
     protocol::{BLOCK_BASE, Block, Encode, Genesis, HEADER_LEN, Header},
-    state::{Changes, Entry, Position, State, StateReader},
+    state::{Changes, Entry, Leaf, Position, State, StateReader, Tree},
 };
 
 type Blob = TableDefinition<'static, &'static [u8], &'static [u8]>;
@@ -324,10 +327,7 @@ fn put_row(
             v.len().div_ceil(PART_BYTES),
         ),
     };
-    let old = match rows.insert(key, row.as_slice()).map_err(err)? {
-        Some(old) => parted_length(old.value())?.map_or(0, |n| n.div_ceil(PART_BYTES)),
-        None => 0,
-    };
+    set_row(rows, parts, tag, key, &row, count)?;
     if count > 0
         && let Some(value) = value
     {
@@ -337,12 +337,33 @@ fn put_row(
                 .map_err(err)?;
         }
     }
+    Ok(())
+}
+/// Writes row `key` as `row`, whose value lies in `count` parts that the
+/// caller writes, and removes the parts the row's previous value had beyond
+/// them.
+fn set_row(
+    rows: &mut Table<&'static [u8], &'static [u8]>,
+    parts: &mut Table<&'static [u8], &'static [u8]>,
+    tag: u8,
+    key: &[u8],
+    row: &[u8],
+    count: usize,
+) -> Result<()> {
+    let old = match rows.insert(key, row).map_err(err)? {
+        Some(old) => parted_length(old.value())?.map_or(0, |n| n.div_ceil(PART_BYTES)),
+        None => 0,
+    };
     for i in count..old {
         parts
             .remove(part_key(tag, key, i).as_slice())
             .map_err(err)?;
     }
     Ok(())
+}
+/// The size of part `part` of a value of `length` bytes.
+fn part_size(length: usize, part: usize) -> usize {
+    (length - part * PART_BYTES).min(PART_BYTES)
 }
 /// Removes row `key` and its parts.
 fn remove_row(
@@ -383,7 +404,161 @@ fn row_value(
     if value.len() != length {
         return Err("stored value length mismatch".into());
     }
+    GATHERED.fetch_add(length as u64, Ordering::Relaxed);
     Ok(Some(value))
+}
+/// The bytes of values in parts that reads have gathered whole, in every
+/// store of this process.
+static GATHERED: AtomicU64 = AtomicU64::new(0);
+/// The bytes of values larger than one part that have been read whole since
+/// the process began. Reading a record's value for a program or a client
+/// gathers it; keeping, undoing and redoing a block's changes moves values a
+/// part at a time and gathers none, which is what a test holds them to.
+pub fn gathered() -> u64 {
+    GATHERED.load(Ordering::Relaxed)
+}
+/// The record key in the key of a block's row of undo or redo data.
+fn change_key(row: &[u8]) -> Result<Hash> {
+    if row.len() != 64 {
+        return Err("invalid change key".into());
+    }
+    hash_bytes(&row[32..])
+}
+/// The records and one block's rows of undo or redo data, open together to
+/// move values between them. A value in parts moves a part at a time, so the
+/// memory a move takes is one part, whatever the size of the value: nothing a
+/// block pays bounds the values it deletes or overwrites (wiki: node/storage).
+struct Moves<'tx> {
+    records: Table<'tx, &'static [u8], &'static [u8]>,
+    lengths: Table<'tx, &'static [u8], u64>,
+    kept: Table<'tx, &'static [u8], &'static [u8]>,
+    parts: Table<'tx, &'static [u8], &'static [u8]>,
+    rows: Rows,
+    id: Hash,
+    /// The row or the part on its way.
+    buffer: Vec<u8>,
+}
+impl<'tx> Moves<'tx> {
+    fn open(tx: &'tx WriteTransaction, rows: Rows, id: Hash) -> Result<Self> {
+        Ok(Self {
+            records: tx.open_table(RECORDS).map_err(err)?,
+            lengths: tx.open_table(LENGTHS).map_err(err)?,
+            kept: tx.open_table(rows.table).map_err(err)?,
+            parts: tx.open_table(PARTS).map_err(err)?,
+            rows,
+            id,
+            buffer: Vec::new(),
+        })
+    }
+    /// Reads part `part` of the value of `length` bytes at `key` into the
+    /// buffer.
+    fn read_part(&mut self, tag: u8, key: &[u8], length: usize, part: usize) -> Result<()> {
+        let stored = self
+            .parts
+            .get(part_key(tag, key, part).as_slice())
+            .map_err(err)?
+            .ok_or("missing value part")?;
+        if stored.value().len() != part_size(length, part) {
+            return Err("stored value length mismatch".into());
+        }
+        self.buffer.clear();
+        self.buffer.extend_from_slice(stored.value());
+        Ok(())
+    }
+    /// Copies the value the record at `key` holds to the block's row for it,
+    /// or notes there that the record is absent; returns whether it is there.
+    fn keep(&mut self, key: &Hash) -> Result<bool> {
+        let kept = [&self.id[..], &key[..]].concat();
+        self.buffer.clear();
+        match self.records.get(key.as_slice()).map_err(err)? {
+            Some(row) => self.buffer.extend_from_slice(row.value()),
+            None => {
+                put_row(&mut self.kept, &mut self.parts, self.rows.tag, &kept, None)?;
+                return Ok(false);
+            }
+        }
+        if self.buffer.first() == Some(&0) {
+            return Err("invalid stored value".into());
+        }
+        let length = parted_length(&self.buffer)?;
+        let count = length.map_or(0, |n| n.div_ceil(PART_BYTES));
+        set_row(
+            &mut self.kept,
+            &mut self.parts,
+            self.rows.tag,
+            &kept,
+            &self.buffer,
+            count,
+        )?;
+        for part in 0..count {
+            self.read_part(RECORD_ROWS.tag, key, length.unwrap_or(0), part)?;
+            self.parts
+                .insert(
+                    part_key(self.rows.tag, &kept, part).as_slice(),
+                    self.buffer.as_slice(),
+                )
+                .map_err(err)?;
+        }
+        Ok(true)
+    }
+    /// Gives the record at `key` the value the block's row for it holds, or
+    /// removes the record where the row holds none, and returns the leaf of
+    /// the value, hashed as it moves.
+    fn restore(&mut self, key: &Hash) -> Result<Option<Hash>> {
+        let kept = [&self.id[..], &key[..]].concat();
+        self.buffer.clear();
+        self.buffer.extend_from_slice(
+            self.kept
+                .get(kept.as_slice())
+                .map_err(err)?
+                .ok_or("missing change row")?
+                .value(),
+        );
+        let tag = RECORD_ROWS.tag;
+        let Some(length) = parted_length(&self.buffer)? else {
+            if self.buffer[0] == 0 {
+                remove_row(&mut self.records, &mut self.parts, tag, key)?;
+                self.lengths.remove(key.as_slice()).map_err(err)?;
+                return Ok(None);
+            }
+            let value = &self.buffer[1..];
+            let mut leaf = Leaf::new(key, u32::try_from(value.len()).map_err(err)?);
+            leaf.update(value)?;
+            set_row(
+                &mut self.records,
+                &mut self.parts,
+                tag,
+                key,
+                &self.buffer,
+                0,
+            )?;
+            self.lengths
+                .insert(key.as_slice(), self.buffer.len() as u64 - 1)
+                .map_err(err)?;
+            return Ok(Some(leaf.finish()?));
+        };
+        let mut leaf = Leaf::new(key, u32::try_from(length).map_err(err)?);
+        let count = length.div_ceil(PART_BYTES);
+        set_row(
+            &mut self.records,
+            &mut self.parts,
+            tag,
+            key,
+            &self.buffer,
+            count,
+        )?;
+        for part in 0..count {
+            self.read_part(self.rows.tag, &kept, length, part)?;
+            leaf.update(&self.buffer)?;
+            self.parts
+                .insert(part_key(tag, key, part).as_slice(), self.buffer.as_slice())
+                .map_err(err)?;
+        }
+        self.lengths
+            .insert(key.as_slice(), length as u64)
+            .map_err(err)?;
+        Ok(Some(leaf.finish()?))
+    }
 }
 fn frame_length_ok(length: u64) -> bool {
     length >= BLOCK_BASE
@@ -879,19 +1054,27 @@ impl Store {
             root,
         ))
     }
-    pub fn state(tx: Rc<WriteTransaction>) -> Result<State> {
-        let root = hash_bytes(&required(&tx, b"root")?)?;
+    /// The state root and the record count as the transaction has them.
+    fn root_and_count(tx: &WriteTransaction) -> Result<(Hash, usize)> {
+        let root = hash_bytes(&required(tx, b"root")?)?;
         let count = u64::from_le_bytes(
-            required(&tx, b"count")?
+            required(tx, b"count")?
                 .try_into()
                 .map_err(|_| "invalid count")?,
         );
-        Ok(State::backed(
-            Rc::new(WriteView(tx)),
-            usize::try_from(count).map_err(err)?,
-            root,
-        ))
+        Ok((root, usize::try_from(count).map_err(err)?))
     }
+    pub fn state(tx: Rc<WriteTransaction>) -> Result<State> {
+        let (root, count) = Self::root_and_count(&tx)?;
+        Ok(State::backed(Rc::new(WriteView(tx)), count, root))
+    }
+    /// The state tree as the transaction has it, without its records.
+    fn tree(tx: Rc<WriteTransaction>) -> Result<Tree> {
+        let (root, count) = Self::root_and_count(&tx)?;
+        Ok(Tree::backed(Rc::new(WriteView(tx)), count, root))
+    }
+    /// Writes changes to the records and the tree, with the root and the
+    /// count they reach.
     pub fn apply(tx: &WriteTransaction, changes: &Changes) -> Result<()> {
         {
             let mut table = tx.open_table(RECORDS).map_err(err)?;
@@ -925,96 +1108,122 @@ impl Store {
         put(tx, META, b"root", &changes.root)?;
         put(tx, META, b"count", &(changes.count as u64).to_le_bytes())
     }
-    /// A block's undo data, by record key.
-    fn undo_rows(tx: &WriteTransaction, id: Hash) -> Result<Vec<(Hash, Option<Vec<u8>>)>> {
-        let table = tx.open_table(DELTAS).map_err(err)?;
-        let parts = tx.open_table(PARTS).map_err(err)?;
-        rows(&table, &parts, UNDO_ROWS.tag, id)
+    /// Writes an executed block's changes, keeping first, as the block's undo
+    /// data, the value each changed record had. Each is copied from the
+    /// record's own rows a part at a time, before the change overwrites them,
+    /// so the previous values are never in memory together.
+    pub fn apply_block(tx: &WriteTransaction, id: Hash, changes: &Changes) -> Result<()> {
+        {
+            let mut moves = Moves::open(tx, UNDO_ROWS, id)?;
+            for change in &changes.records {
+                if moves.keep(&change.key)? != change.existed {
+                    return Err("a record and its state-tree leaf disagree".into());
+                }
+            }
+        }
+        Self::apply(tx, changes)
     }
-    /// The undo data of a block, from a store opened for reading only, such as
-    /// the replay's.
-    pub fn undo_of(&self, id: Hash) -> Result<Vec<(Hash, Option<Vec<u8>>)>> {
-        let tx = self.db.begin_read().map_err(err)?;
-        let table = tx.open_table(DELTAS).map_err(err)?;
-        let parts = tx.open_table(PARTS).map_err(err)?;
-        rows(&table, &parts, UNDO_ROWS.tag, id)
+    /// The record keys of a block's rows of undo or redo data.
+    fn row_keys(tx: &WriteTransaction, rows: Rows, id: Hash) -> Result<Vec<Hash>> {
+        let table = tx.open_table(rows.table).map_err(err)?;
+        let low = [&id[..], &[0; 32]].concat();
+        let high = [&id[..], &[255; 32]].concat();
+        let mut keys = Vec::new();
+        for row in table.range(low.as_slice()..=high.as_slice()).map_err(err)? {
+            keys.push(change_key(row.map_err(err)?.0.value())?);
+        }
+        Ok(keys)
     }
-    /// Keeps a block's undo data.
-    pub fn put_undo(
-        tx: &WriteTransaction,
-        id: Hash,
-        undo: &[(Hash, Option<Vec<u8>>)],
-    ) -> Result<()> {
-        Self::put_rows(
-            tx,
-            UNDO_ROWS,
-            id,
-            undo.iter().map(|(key, value)| (key, value.as_deref())),
-        )
-    }
-    /// Keeps a block's undo or redo data, a row per record key.
-    fn put_rows<'a>(
-        tx: &WriteTransaction,
-        rows: Rows,
-        id: Hash,
-        values: impl IntoIterator<Item = (&'a Hash, Option<&'a [u8]>)>,
-    ) -> Result<()> {
-        let mut table = tx.open_table(rows.table).map_err(err)?;
+    /// Copies a block's undo data from another store, as the replay's, a row
+    /// and a part at a time.
+    pub fn copy_undo(tx: &WriteTransaction, from: &Store, id: Hash) -> Result<()> {
+        let source = from.db.begin_read().map_err(err)?;
+        let from_rows = source.open_table(DELTAS).map_err(err)?;
+        let from_parts = source.open_table(PARTS).map_err(err)?;
+        let mut rows = tx.open_table(DELTAS).map_err(err)?;
         let mut parts = tx.open_table(PARTS).map_err(err)?;
-        for (key, value) in values {
-            let k = [&id[..], &key[..]].concat();
-            put_row(&mut table, &mut parts, rows.tag, &k, value)?;
+        let tag = UNDO_ROWS.tag;
+        let low = [&id[..], &[0; 32]].concat();
+        let high = [&id[..], &[255; 32]].concat();
+        for row in from_rows
+            .range(low.as_slice()..=high.as_slice())
+            .map_err(err)?
+        {
+            let (key, value) = row.map_err(err)?;
+            let (key, value) = (key.value(), value.value());
+            change_key(key)?;
+            let length = parted_length(value)?;
+            let count = length.map_or(0, |n| n.div_ceil(PART_BYTES));
+            set_row(&mut rows, &mut parts, tag, key, value, count)?;
+            for part in 0..count {
+                let at = part_key(tag, key, part);
+                let stored = from_parts
+                    .get(at.as_slice())
+                    .map_err(err)?
+                    .ok_or("missing value part")?;
+                if stored.value().len() != part_size(length.unwrap_or(0), part) {
+                    return Err("stored value length mismatch".into());
+                }
+                parts.insert(at.as_slice(), stored.value()).map_err(err)?;
+            }
         }
         Ok(())
     }
     /// Disconnects a block by its undo data, keeping first, as its redo data,
-    /// the values it left. The root reached must be `parent_root`.
+    /// the values it left. The root reached must be `parent_root`. Values
+    /// move between the records and the block's rows a part at a time, and
+    /// each restored value's leaf is hashed as it moves. The root is known
+    /// only once every record is back, so a transaction in which this fails
+    /// has rows half moved, and must not be committed.
     pub fn undo_block(
         tx: Rc<WriteTransaction>,
         id: Hash,
         height: u64,
         parent_root: Hash,
     ) -> Result<()> {
-        let undo = Self::undo_rows(&tx, id)?;
-        let mut state = Self::state(tx.clone())?;
-        let mut redo = Vec::with_capacity(undo.len());
-        for (key, before) in undo {
-            let after = state.get(&key);
-            if let Some(error) = state.storage_error() {
-                return Err(error);
+        let keys = Self::row_keys(&tx, UNDO_ROWS, id)?;
+        {
+            let mut moves = Moves::open(&tx, REDO_ROWS, id)?;
+            for key in &keys {
+                moves.keep(key)?;
             }
-            redo.push((key, after));
-            state.set(key, before);
         }
-        let changes = state.changes()?;
+        let mut tree = Self::tree(tx.clone())?;
+        {
+            let mut moves = Moves::open(&tx, UNDO_ROWS, id)?;
+            for key in &keys {
+                tree.set(*key, moves.restore(key)?);
+            }
+        }
+        let changes = tree.changes()?;
         if changes.root != parent_root {
             return Err("restored state root mismatch".into());
         }
         Self::apply(&tx, &changes)?;
-        Self::put_rows(
-            &tx,
-            REDO_ROWS,
-            id,
-            redo.iter().map(|(key, value)| (key, value.as_deref())),
-        )?;
         put(&tx, REDO_BLOCKS, &id, &height.to_le_bytes())
     }
+    /// Whether a disconnected block's redo data is kept.
+    pub fn has_redo(tx: &WriteTransaction, id: &Hash) -> Result<bool> {
+        Ok(get(tx, REDO_BLOCKS, id)?.is_some())
+    }
     /// Connects a block again by its redo data, if it has any; returns
-    /// whether it did. The root reached must be `root`, the block's own.
+    /// whether it did. The root reached must be `root`, the block's own. The
+    /// values move as in `undo_block`, and the same holds for a transaction
+    /// in which this fails. The block's undo data is still there from when it
+    /// was executed, so the values it replaces are not read.
     pub fn redo_block(tx: Rc<WriteTransaction>, id: Hash, root: Hash) -> Result<bool> {
         if get(&tx, REDO_BLOCKS, &id)?.is_none() {
             return Ok(false);
         }
-        let redo = {
-            let table = tx.open_table(REDO).map_err(err)?;
-            let parts = tx.open_table(PARTS).map_err(err)?;
-            rows(&table, &parts, REDO_ROWS.tag, id)?
-        };
-        let mut state = Self::state(tx.clone())?;
-        for (key, after) in &redo {
-            state.set(*key, after.clone());
+        let keys = Self::row_keys(&tx, REDO_ROWS, id)?;
+        let mut tree = Self::tree(tx.clone())?;
+        {
+            let mut moves = Moves::open(&tx, REDO_ROWS, id)?;
+            for key in &keys {
+                tree.set(*key, moves.restore(key)?);
+            }
         }
-        let changes = state.changes()?;
+        let changes = tree.changes()?;
         if changes.root != root {
             return Err("redone state root mismatch".into());
         }
@@ -1092,9 +1301,9 @@ impl Store {
             None => 0,
         })
     }
-    /// Deletes what is stored of a block whose body cannot be read, so that it
-    /// is fetched again; its frame stays in its file, unreferenced.
-    pub fn forget_block(&self, tx: &WriteTransaction, id: &Hash) -> Result<()> {
+    /// Deletes a block's location and header, and it from the side blocks and
+    /// the recent ones; its frame stays in its file, unreferenced.
+    fn forget_block(&self, tx: &WriteTransaction, id: &Hash) -> Result<()> {
         self.reader
             .recent
             .lock()
@@ -1115,9 +1324,12 @@ impl Store {
         Ok(())
     }
     /// Deletes everything stored of a side-branch block the node no longer
-    /// keeps (wiki: node/storage): its location, header and limits, the
-    /// occurrences of its transactions and its events, and any undo and redo
-    /// data. Its frame stays in its file, unreferenced.
+    /// keeps (wiki: node/storage), or of one whose body cannot be read and is
+    /// fetched again: its location, header and limits, the occurrences of its
+    /// transactions and its events, and any undo and redo data. Its frame
+    /// stays in its file, unreferenced. The occurrences and events are found
+    /// from the body, so those of an unreadable one stay: executed again, the
+    /// block writes the same rows.
     pub fn forget_side(&self, tx: &WriteTransaction, id: &Hash) -> Result<()> {
         if let Ok(block) = self.block(id) {
             let mut table = tx.open_table(OCCURRENCES).map_err(err)?;
@@ -1198,8 +1410,9 @@ impl Store {
             .bytes(),
         )
     }
-    /// A stored block executed and valid: its record changes, its active
-    /// limits, and the occurrences of its transactions and its events.
+    /// A stored block executed and valid: its changes written to the state,
+    /// with its undo data, its active limits, and the occurrences of its
+    /// transactions and its events.
     pub fn save_valid(
         &self,
         tx: &WriteTransaction,
@@ -1209,20 +1422,10 @@ impl Store {
         limits: Resources,
     ) -> Result<()> {
         let id = block.header.id();
+        Self::apply_block(tx, id, changes)?;
         Self::put_header(tx, &block.header, work, Kept::Valid)?;
         Self::put_limits(tx, &[(id, limits)])?;
         Self::put_events(tx, block)?;
-        // The undo rows are written from the changes as they are, without a
-        // second copy of the values they replace.
-        Self::put_rows(
-            tx,
-            UNDO_ROWS,
-            id,
-            changes
-                .records
-                .iter()
-                .map(|c| (&c.key, c.before.as_deref())),
-        )?;
         for (index, transaction) in block.transactions.iter().enumerate() {
             let mut key = transaction.id(self.chain).to_vec();
             key.extend(block.header.height.to_be_bytes());
@@ -1319,8 +1522,27 @@ impl Store {
         }
         Ok(cursor)
     }
+    /// Writes the header of a block file that nothing indexed lies in yet,
+    /// when a power loss left it short or, with the file's length on disk
+    /// before its bytes, zero-filled. Any other header is left for
+    /// `check_magic` to refuse: another chain's file is never taken over.
     fn repair_new_header(&self, file: &mut std::fs::File, cursor: Location) -> Result<()> {
-        if cursor.offset == 40 && file.metadata().map_err(err)?.len() < 40 {
+        if cursor.offset != 40 {
+            return Ok(());
+        }
+        let torn = if file.metadata().map_err(err)?.len() < 40 {
+            true
+        } else {
+            let mut header = [0; 40];
+            file.seek(SeekFrom::Start(0)).map_err(err)?;
+            file.read_exact(&mut header).map_err(err)?;
+            let zeroed = header == [0; 40];
+            if zeroed {
+                crate::log!("block file: a zero-filled header is written again");
+            }
+            zeroed
+        };
+        if torn {
             file.seek(SeekFrom::Start(0)).map_err(err)?;
             let mut magic = MAGIC.to_vec();
             magic.extend(self.chain);
@@ -2025,26 +2247,6 @@ fn event_rows(block: &Block) -> Result<Vec<EventRow>> {
         }
     }
     Ok(rows)
-}
-/// The rows of one block in an undo or redo table, by record key.
-fn rows(
-    table: &impl ReadableTable<&'static [u8], &'static [u8]>,
-    parts: &impl ReadableTable<&'static [u8], &'static [u8]>,
-    tag: u8,
-    id: Hash,
-) -> Result<Vec<(Hash, Option<Vec<u8>>)>> {
-    let low = [&id[..], &[0; 32]].concat();
-    let high = [&id[..], &[255; 32]].concat();
-    let mut result = Vec::new();
-    for row in table.range(low.as_slice()..=high.as_slice()).map_err(err)? {
-        let (key, value) = row.map_err(err)?;
-        if key.value().len() != 64 {
-            return Err("invalid change key".into());
-        }
-        let record = row_value(parts, tag, key.value(), value.value())?;
-        result.push((hash_bytes(&key.value()[32..])?, record));
-    }
-    Ok(result)
 }
 /// A block's frame at `location` among the block files of the data
 /// directory `dir`, checked against its checksum, read without the database.

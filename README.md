@@ -76,6 +76,7 @@ block's reward and takes first the transactions that pay it most.
 | `vm-model/` | The VM tests' charging model, independent of the VM |
 | `conformance/` | The consensus vectors, one JSON file each, the production and development seeds and a mined voting chain, described in [Conformance and testing](node/wiki/reference/conformance.md) |
 | `programs/` | The reference programs: frozen, deployable modules for coins, identities and signature checks, described in the wiki's [Reference programs](node/wiki/programs.md) section; not part of the protocol |
+| `standards/` | The test vectors of the application standards, TCR-1 (Ting Call Requests) and TOCS-1 (Ting Off-Chain Signing), which the wiki's [Application standards](node/wiki/standards.md) section states in full; not part of the protocol |
 
 ## Tests
 

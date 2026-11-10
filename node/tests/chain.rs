@@ -3539,8 +3539,10 @@ fn a_page_begins_at_most_one_presync_however_often_a_header_repeats() {
     let runtime = Runtime::new(State::default(), Context::from_genesis(&g));
     let mut history = vec![];
     let mut side = None;
+    let mut other = None;
+    let mut third = None;
     for i in 0..2_000 {
-        if i == 500 {
+        if i == 300 || i == 400 || i == 500 {
             let mut x = runtime
                 .build_candidate(
                     &g,
@@ -3554,7 +3556,11 @@ fn a_page_begins_at_most_one_presync_however_often_a_header_repeats() {
             while !consensus::valid_pow(&x.header) {
                 x.header.nonce += 1;
             }
-            side = Some(x.header);
+            match i {
+                300 => third = Some(x.header),
+                400 => other = Some(x.header),
+                _ => side = Some(x.header),
+            }
         }
         let block = mine(&runtime, &g, &mut history, vec![], "A");
         chain.import(&block.encode(), true).unwrap();
@@ -3583,6 +3589,18 @@ fn a_page_begins_at_most_one_presync_however_often_a_header_repeats() {
     let (again, _) = timed(&mut chain, std::slice::from_ref(&side));
     assert_eq!(again["next"], hex(&side.id()));
     assert_eq!(chain.height(), 2_000);
+    // Page after page of such headers, each from another block, costs no
+    // walk after walk either. A second block is walked from at once, as a
+    // peer whose branch changes twice running needs; a third so soon is not,
+    // its page ending like the repeated one, while the block the peer last
+    // began at begins at once, by the walk already made.
+    let (other, third) = (other.unwrap(), third.unwrap());
+    let (second, _) = timed(&mut chain, std::slice::from_ref(&other));
+    assert_eq!(second["next"], hex(&other.id()));
+    let (refused, _) = timed(&mut chain, std::slice::from_ref(&third));
+    assert_eq!(refused["next"], serde_json::Value::Null);
+    let (back, _) = timed(&mut chain, std::slice::from_ref(&other));
+    assert_eq!(back["next"], hex(&other.id()));
 }
 #[test]
 fn a_damaged_deferred_set_is_set_aside_and_the_node_starts() {
@@ -5079,4 +5097,54 @@ fn a_run_let_go_to_make_room_has_its_pusher_push_it_again() {
     assert_eq!(push(&mut chain, again, &b).unwrap()["held"], true);
     assert_eq!(push(&mut chain, again, &c).unwrap()["canonical"], true);
     assert_eq!(chain.tip(), c.header.id());
+}
+
+#[test]
+fn a_block_a_peer_does_not_have_is_not_asked_of_it_again_and_the_others_are_told() {
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    let g = chain.genesis.clone();
+    let blocks = branch(&g, 2, "A");
+    headers_from(&mut chain, &headers_of(&blocks)).unwrap();
+    let ids: Vec<serde_json::Value> = blocks.iter().map(|b| json!(hex(&b.header.id()))).collect();
+    let wanted = |chain: &mut Chain, peer: &str| {
+        chain
+            .request("blocks_wanted", json!({"peer":peer}))
+            .unwrap()["ids"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(wanted(&mut chain, "q"), ids);
+    // Asked of one peer, they are not asked of another meanwhile.
+    assert!(wanted(&mut chain, "r").is_empty());
+    let released = chain.event().released;
+    chain
+        .request("release", json!({"peer":"q","missing":ids}))
+        .unwrap();
+    // The other connections are told at once, and get them; the peer that
+    // said it lacks them is not asked again, whatever tip it announces next.
+    assert_eq!(chain.event().released, released + 1);
+    assert!(wanted(&mut chain, "q").is_empty());
+    assert_eq!(wanted(&mut chain, "r"), ids);
+    // A release that gives nothing back tells nobody.
+    chain.request("release", json!({"peer":"q"})).unwrap();
+    assert_eq!(chain.event().released, released + 1);
+}
+#[test]
+fn a_page_from_the_last_height_there_is_is_empty_and_a_block_says_what_the_node_knows_of_it() {
+    let dir = Directory::new();
+    dir.config(false, "test");
+    let mut chain = open(&dir);
+    chain.mine(1, 100_000).unwrap();
+    for method in ["blocks", "events"] {
+        let page = chain.request(method, json!({"from":u64::MAX})).unwrap();
+        assert_eq!(page["items"], json!([]));
+        assert_eq!(page["next"], u64::MAX);
+    }
+    assert_eq!(
+        chain.request("block", json!({"id":"1"})).unwrap()["status"],
+        "valid"
+    );
 }

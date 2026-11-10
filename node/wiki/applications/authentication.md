@@ -22,6 +22,20 @@ A signed intent should bind:
 The signature does not need to cover the transaction itself. Who relays a transaction
 is a separate question from who authorized the action inside it.
 
+A program need not invent this format. [TCR-1](../standards/tcr-1.md) is a standard
+form of the signed intent: the program publishes each operation as a sentence with
+its fields, a wallet shows that sentence and signs a message that binds all of the
+above, and the program checks it. A wallet that follows TCR-1 can then act in the
+program without knowing it.
+
+## Signing for a site
+
+The same keys can sign what never reaches the chain: a sign-in, a permission, a
+statement. Such a message must not be one any program accepts, and it must name the
+site it is for, or one site could use a signature made for another.
+[TOCS-1](../standards/tocs-1.md) is the standard for it, and says how the site checks
+the answer against the account's keys on chain.
+
 ## Replay protection
 
 The same transaction bytes can be included again, and every occurrence runs. If an

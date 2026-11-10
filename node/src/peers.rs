@@ -11,8 +11,8 @@ use crate::{
     FRAME_MAX, Result,
     chain::{
         DEFERRED_FULL, DEFERRED_MAX, Event, HEADERS_PAGE, Handle, INVALID, INVENTORY_PAGE,
-        LOCATOR_MAX, NOT_ASKED, POOL_FULL, RELAY_PAGE, SLICE_MAX, TOO_LARGE, is_invalid, is_policy,
-        transfer_time,
+        LOCATOR_MAX, MISSING_WAIT, NOT_ASKED, POOL_FULL, RELAY_PAGE, SLICE_MAX, TOO_LARGE,
+        is_invalid, is_policy, transfer_time,
     },
     config,
     daemon::Node,
@@ -269,6 +269,11 @@ struct Link {
     next: Option<Hash>,
     pull: bool,
     fetch: bool,
+    /// When the blocks the peer said it does not have may be asked of it
+    /// again (`MISSING_WAIT`): the connection wakes then, so that a peer that
+    /// announced a new tip meanwhile, and may be the only one that has them,
+    /// is asked without waiting for its next announcement or the keepalive.
+    barred: Option<Instant>,
     push: bool,
     /// The last block the peer took from a push: where the next push starts,
     /// while it is on this node's branch.
@@ -307,6 +312,7 @@ struct Download {
 }
 /// Why a download stopped asking for more before the chain had nothing left:
 /// the peer lacks a block, or the chain refused one for now.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Stop {
     Missing,
     Policy,
@@ -362,6 +368,9 @@ impl Link {
             self.addresses().await;
         }
         let mut more = false;
+        if self.barred.is_some_and(|until| Instant::now() >= until) {
+            self.barred = None;
+        }
         if self.pull {
             self.pull = false;
             more |= self.headers().await?;
@@ -471,26 +480,38 @@ impl Link {
     /// never waiting for the next.
     async fn blocks(&mut self) -> Result<()> {
         let handle = self.node.handle.clone();
-        match self.download(&handle).await {
-            // This peer does not have one of them: the others are asked, and
-            // this one again once it announces a new tip.
-            Ok(Some(Stop::Missing)) => {
-                self.fetch = false;
-                // The blocks asked for lead to the best header: a peer whose
-                // tip is as high claimed more than it holds.
-                let best = handle.events().borrow().best;
-                self.lacking |= self.checked.is_some_and(|(_, height)| height >= best);
-                handle.call("release", json!({"peer":self.peer})).await?;
-                Ok(())
-            }
-            Ok(_) => Ok(()),
+        let (stop, missing) = match self.download(&handle).await {
+            Ok(stopped) => stopped,
             // Answers may still be on their way, and nothing can tell them
             // from the answers to later requests.
             Err(error) => {
                 self.conn.broken.get_or_insert_with(|| error.clone());
-                Err(error)
+                return Err(error);
             }
+        };
+        // A block the chain refused for now leaves the rest as they are:
+        // given back, they would be asked for and refused again at once.
+        if stop != Some(Stop::Missing) {
+            return Ok(());
         }
+        // This peer does not have one of them: this one is asked again once
+        // it announces a new tip.
+        self.fetch = false;
+        // The blocks asked for lead to the best header: a peer whose
+        // tip is as high claimed more than it holds.
+        let best = handle.events().borrow().best;
+        self.lacking |= self.checked.is_some_and(|(_, height)| height >= best);
+        // What it was asked for and did not give goes back to the others at
+        // once, and the blocks it lacks are not asked of it again for a
+        // moment, whatever tip it announces.
+        let missing: Vec<String> = missing.iter().map(|id| hex(id)).collect();
+        handle
+            .call("release", json!({"peer":self.peer,"missing":missing}))
+            .await?;
+        // A second more than the chain keeps them from it, whose clock counts
+        // whole seconds.
+        self.barred = Some(Instant::now() + Duration::from_secs(MISSING_WAIT + 1));
+        Ok(())
     }
     /// The blocks the chain wants of this peer, each with its most bytes,
     /// its data capacity.
@@ -515,8 +536,9 @@ impl Link {
     /// before any further block. Each block has its `transfer_time` from when
     /// it was asked. A peer that sends another
     /// block, or claims one larger than its capacity, sent invalid data.
-    /// Returns why it stopped early, once every answer on its way has come.
-    async fn download(&mut self, handle: &Handle) -> Result<Option<Stop>> {
+    /// Returns why it stopped early, and the blocks the peer said it does not
+    /// have, once every answer on its way has come.
+    async fn download(&mut self, handle: &Handle) -> Result<(Option<Stop>, Vec<Hash>)> {
         // The blocks under way, the slices to ask for, and the slices asked
         // for, in the order their answers come.
         let mut parts: HashMap<Hash, Download> = HashMap::new();
@@ -524,6 +546,7 @@ impl Link {
         let mut asked: VecDeque<(Hash, u64)> = VecDeque::new();
         let mut more = true;
         let mut stop = None;
+        let mut missing = Vec::new();
         loop {
             if more && stop.is_none() && queue.is_empty() && asked.len() <= PIPELINE / 2 {
                 let mut new = false;
@@ -582,7 +605,7 @@ impl Link {
                 asked.push_back((id, offset));
             }
             let Some((id, offset)) = asked.pop_front() else {
-                return Ok(stop);
+                return Ok((stop, missing));
             };
             let answer = self.conn.next_answer().await;
             // A block given up on has its last answers read and dropped.
@@ -605,6 +628,7 @@ impl Link {
                     parts.remove(&id);
                     queue.retain(|(q, _)| *q != id);
                     stop.get_or_insert(Stop::Missing);
+                    missing.push(id);
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -649,7 +673,7 @@ impl Link {
                 continue;
             }
             let block = parts.remove(&id).map(|part| part.bytes).unwrap_or_default();
-            if matches!(stop, Some(Stop::Policy)) {
+            if stop == Some(Stop::Policy) {
                 continue;
             }
             match handle
@@ -1126,6 +1150,7 @@ async fn follow(
         next: None,
         pull: true,
         fetch: true,
+        barred: None,
         push: true,
         pushed: None,
         swap: true,
@@ -1159,6 +1184,9 @@ async fn follow(
             };
             // An exchange that waits for its time wakes the connection then.
             let (swapping, swap_due) = (link.swap, link.swap_due);
+            // So does the end of the wait for blocks the peer lacked: the
+            // round after it asks for them if the peer announced a new tip.
+            let barred = link.barred;
             tokio::select! {
                 changed = events.changed() => {
                     if changed.is_err() {
@@ -1172,6 +1200,7 @@ async fn follow(
                     link.swap = true;
                 }
                 _ = tokio::time::sleep_until(swap_due), if swapping => {}
+                _ = tokio::time::sleep_until(barred.unwrap_or(last)), if barred.is_some() => {}
                 _ = node.stopped() => return Ok(()),
             }
         }
@@ -1238,7 +1267,7 @@ async fn ended(node: &Node, address: SocketAddr, source: &str, result: Result<()
     }
     let _ = node
         .handle
-        .call("release", json!({"peer":address.to_string()}))
+        .call("release", json!({"peer":address.to_string(),"ended":true}))
         .await;
 }
 
@@ -1506,7 +1535,7 @@ pub async fn run(node: Node) {
                 node.peers.lock().unwrap().remove(&address.to_string());
                 let _ = node
                     .handle
-                    .call("release", json!({"peer":address.to_string()}))
+                    .call("release", json!({"peer":address.to_string(),"ended":true}))
                     .await;
             }
         }

@@ -97,6 +97,9 @@ pub struct Event {
     pub data: u64,
     /// The height of the best header, which the node is downloading toward.
     pub best: u64,
+    /// Counts the times a peer gave back blocks it was asked for, so that
+    /// the node's other connections ask for them at once.
+    pub released: u64,
 }
 pub fn is_policy(error: &str) -> bool {
     matches!(
@@ -127,6 +130,16 @@ pub const HEADERS_PAGE: usize = 2_000;
 const WINDOW: usize = 1_024;
 const PER_PEER: usize = 64;
 const LAPSED_WAIT: u64 = 120;
+/// A block a peer said it does not have is not asked of it again for this
+/// many seconds: long enough that the others, told at once, take it first,
+/// and no longer, since a peer that lacked a block a moment ago may have it
+/// now, and may be the only one that does.
+pub const MISSING_WAIT: u64 = 10;
+/// A peer's header chain too far behind to be indexed is checked from a walk
+/// over the epochs before its fork point, made on the chain thread. One peer
+/// gets two walks from new fork points within this many seconds at most: a
+/// peer that changes branch twice running is still followed at once.
+const WALK_GAP: u64 = 30;
 /// The time a peer has to deliver a block or transaction of up to `bytes`, in
 /// slices (wiki: node/sync): a minute, and ten seconds more for every slice,
 /// so that size alone never makes an item fail, only a lack of progress.
@@ -321,17 +334,12 @@ fn replay(
         }
         let changes = validator.state_changes()?;
         drop(validator);
-        let tx = Rc::new(store.begin()?);
-        Store::apply(&tx, &changes)?;
+        let tx = store.begin()?;
         if height > down_to {
-            let undo: Vec<(Hash, Option<Vec<u8>>)> = changes
-                .records
-                .iter()
-                .map(|c| (c.key, c.before.clone()))
-                .collect();
-            Store::put_undo(&tx, *id, &undo)?;
+            Store::apply_block(&tx, *id, &changes)?;
+        } else {
+            Store::apply(&tx, &changes)?;
         }
-        let tx = Rc::try_unwrap(tx).map_err(|_| "replay transaction still borrowed")?;
         store.commit_state(tx)?;
         let mut recent = vec![block.header.timestamp];
         recent.extend(ancestry.recent.iter().take(10));
@@ -442,7 +450,15 @@ pub struct Chain {
     /// Blocks asked of a peer, and when; and blocks a peer let expire, which
     /// are not given back to that peer for a while.
     in_flight: BTreeMap<Hash, (String, u64)>,
-    expired: BTreeMap<Hash, (String, u64)>,
+    /// The blocks a peer was asked for and did not give, each with the time
+    /// until which it is not asked of that peer again: `LAPSED_WAIT` after
+    /// one it let lapse, `MISSING_WAIT` after one it said it does not have.
+    expired: BTreeMap<(Hash, String), u64>,
+    /// How many times a peer gave back blocks it was asked for (`Event`).
+    released: u64,
+    /// The walk each peer's presync last began from, with its fork point,
+    /// and when the peer's last two walks were made (`presync_walk`).
+    walks: BTreeMap<String, (Hash, Walk, [u64; 2])>,
     /// Header chains under check, by peer.
     presync: BTreeMap<String, Presync>,
     /// The peer each stored, not yet connected block came from, and the peers
@@ -536,6 +552,8 @@ impl Chain {
             served_transaction: None,
             in_flight: BTreeMap::new(),
             expired: BTreeMap::new(),
+            released: 0,
+            walks: BTreeMap::new(),
             presync: BTreeMap::new(),
             sources: BTreeMap::new(),
             offenders: Vec::new(),
@@ -759,6 +777,7 @@ impl Chain {
             stored: self.index.stored(),
             data: self.tip_limits().map_or(u64::MAX, |limits| limits.0[2]),
             best: self.best.len() as u64,
+            released: self.released,
         }
     }
     /// Which network the node is on, by its genesis: the production network,
@@ -1181,6 +1200,7 @@ impl Chain {
     /// Should one ever be extended past the tip, it is fetched again like any
     /// other branch.
     fn forget_old_branches(&mut self) -> Result<()> {
+        self.forget_old_orphans()?;
         let floor = self.index.floor();
         let mut old: Vec<(u64, Hash)> = self
             .index
@@ -1219,6 +1239,51 @@ impl Chain {
         self.index.forget(&gone);
         self.sources.retain(|id, _| !gone.contains(id));
         self.presync.retain(|_, p| !gone.contains(&p.start));
+        Ok(())
+    }
+    /// Forgets the stored blocks that wait for a parent header (`orphans`)
+    /// once they lie at or below the settled height with none above it
+    /// waiting on them. A branch that far behind the tip is forgotten when it
+    /// is indexed; these never were, so nothing else would ever delete their
+    /// rows, read again at every start.
+    fn forget_old_orphans(&mut self) -> Result<()> {
+        let floor = self.index.floor();
+        let mut old: Vec<(u64, Hash)> = self
+            .orphans
+            .values()
+            .flatten()
+            .filter(|stored| stored.header.height <= floor)
+            .map(|stored| (stored.header.height, stored.header.id()))
+            .collect();
+        if old.is_empty() {
+            return Ok(());
+        }
+        // Highest first: a block goes only with every block waiting on it.
+        old.sort_unstable_by(|a, b| b.cmp(a));
+        let mut gone = std::collections::HashSet::new();
+        for (_, id) in &old {
+            if self.orphans.get(id).is_none_or(|waiting| {
+                waiting
+                    .iter()
+                    .all(|stored| gone.contains(&stored.header.id()))
+            }) {
+                gone.insert(*id);
+            }
+        }
+        if gone.is_empty() {
+            return Ok(());
+        }
+        let tx = self.store.begin()?;
+        for id in &gone {
+            self.store.forget_side(&tx, id)?;
+        }
+        if let Err(error) = self.store.commit_state(tx) {
+            return Err(self.fail(format!("database commit failed; restart required: {error}")));
+        }
+        self.orphans.retain(|_, waiting| {
+            waiting.retain(|stored| !gone.contains(&stored.header.id()));
+            !waiting.is_empty()
+        });
         Ok(())
     }
     /// Holds a settled block in memory again, with its parent, before the
@@ -2015,25 +2080,34 @@ impl Chain {
         let common = self.canonical.len();
         let tx = Rc::new(self.store.begin()?);
         let mut connected = Vec::new();
+        // The bodies of the blocks connected, each read before anything of it
+        // is written: once the step is committed nothing can fail between the
+        // commit and `published`, which needs them, and a block that cannot
+        // be read is never connected.
+        let mut blocks = Vec::new();
         for id in branch.iter().take(STEP) {
             let entry = self.entry(id);
-            if entry.status == Kept::Valid
-                && Store::redo_block(tx.clone(), *id, entry.header.state_root)?
-            {
-                connected.push(*id);
-                continue;
-            }
+            let redo = entry.status == Kept::Valid && Store::has_redo(&tx, id)?;
             // A block to execute is a step of its own.
-            if !connected.is_empty() {
+            if !redo && !connected.is_empty() {
                 break;
             }
             let block = match self.store.block(id) {
                 Ok(block) => block,
+                // The blocks before it are connected first; it is met again
+                // as the first of the next step.
+                Err(_) if !connected.is_empty() => break,
                 Err(error) => {
                     drop(tx);
                     return self.forget_body(*id, &error);
                 }
             };
+            if redo {
+                Store::redo_block(tx.clone(), *id, entry.header.state_root)?;
+                connected.push(*id);
+                blocks.push(block);
+                continue;
+            }
             let (limits, work, parent) = (entry.limits, entry.work.clone(), entry.header.parent);
             let ancestry = self.ancestry(parent)?;
             // Nothing is written in this transaction before a block executes,
@@ -2075,10 +2149,10 @@ impl Chain {
             }
             let changes = validator.state_changes()?;
             drop(validator);
-            Store::apply(&tx, &changes)?;
             self.store
                 .save_valid(&tx, &block, &work, &changes, limits)?;
             connected.push(*id);
+            blocks.push(block);
             break;
         }
         let tip = *connected.last().ok_or("nothing to connect")?;
@@ -2094,10 +2168,6 @@ impl Chain {
             self.sources.remove(id);
         }
         self.canonical.extend(connected.iter().copied());
-        let blocks = connected
-            .iter()
-            .map(|id| self.store.block(id))
-            .collect::<Result<Vec<_>>>()?;
         self.published(&blocks, &[], requeue)
     }
     /// What to report when this node's execution rejects a seed block: the
@@ -2183,13 +2253,17 @@ impl Chain {
     }
     /// A stored block whose body cannot be read is forgotten, its header kept,
     /// so that it is fetched again; the best branch that is left is connected.
+    /// Its limits and any undo and redo data go with it, as a forgotten side
+    /// block's do: fetched again it is executed again, and redo data left
+    /// behind would otherwise outlive that and be pruned as a disconnected
+    /// block's, with the undo data of the block then connected.
     fn forget_body(&mut self, id: Hash, error: &str) -> Result<()> {
         crate::log!(
             "block {} cannot be read and is fetched again: {error}",
             hex(&id)
         );
         let tx = self.store.begin()?;
-        self.store.forget_block(&tx, &id)?;
+        self.store.forget_side(&tx, &id)?;
         if let Err(error) = self.store.commit_state(tx) {
             return Err(self.fail(format!("database commit failed; restart required: {error}")));
         }
@@ -2287,7 +2361,7 @@ impl Chain {
                 .canonical
                 .get(height as usize - 1, &self.index)
                 .ok_or("missing canonical block")?;
-            Store::put_undo(&tx, id, &replayed.undo_of(id)?)?;
+            Store::copy_undo(&tx, replayed, id)?;
         }
         let done = end == recovery.upto;
         if done {
@@ -2331,6 +2405,14 @@ impl Chain {
         self.sync_best();
         Ok(())
     }
+    /// Commits an operator's mark or reconsideration, forced to disk: unlike
+    /// what blocks change, nothing stored could bring it back. A commit that
+    /// fails stops the node, as any other does.
+    fn commit_override(&mut self, tx: redb::WriteTransaction) -> Result<()> {
+        tx.commit().map_err(|error| {
+            self.fail(format!("database commit failed; restart required: {error}"))
+        })
+    }
     /// The block a request names: a canonical height, or an id, seen or not.
     fn named(&self, text: &str) -> Result<Hash> {
         if text.len() != 64 && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
@@ -2349,7 +2431,7 @@ impl Chain {
         }
         let tx = self.store.begin()?;
         Store::mark(&tx, &id, true)?;
-        tx.commit().map_err(|e| e.to_string())?;
+        self.commit_override(tx)?;
         self.marks.insert(id);
         let known = self.index.contains(&id);
         self.hold(&id)?;
@@ -2401,7 +2483,9 @@ impl Chain {
                 Store::save_kept(&tx, &entry.header, &entry.work, kept)?;
             }
         }
-        tx.commit().map_err(|e| e.to_string())?;
+        // The index is cleared already: a commit that fails must stop the
+        // node, not leave it running on statuses the database does not have.
+        self.commit_override(tx)?;
         for mark in &unmarked {
             self.marks.remove(mark);
         }
@@ -2485,7 +2569,19 @@ impl Chain {
             }
             if requeue {
                 for old in disconnected {
-                    for tx in self.store.block(old)?.transactions {
+                    // The tip has moved already: a body that cannot be read
+                    // costs the pool its transactions, not the node its run.
+                    let block = match self.store.block(old) {
+                        Ok(block) => block,
+                        Err(error) => {
+                            crate::log!(
+                                "disconnected block {} cannot be read; its transactions are not pooled again: {error}",
+                                hex(old)
+                            );
+                            continue;
+                        }
+                    };
+                    for tx in block.transactions {
                         let id = tx.id(chain_id);
                         if !included.contains_key(&id) && !restored.contains(&id) {
                             let _ = self.submit(&tx.encode());
@@ -2577,7 +2673,13 @@ impl Chain {
                             .header
                             .timestamp
                     };
-                    let mut state = Presync::new(start, self.walk_from(start)?, start_time, now());
+                    // A walk from another block so soon after the peer's
+                    // last ends the page as well.
+                    let Some(walk) = self.presync_walk(peer, start)? else {
+                        next = None;
+                        break;
+                    };
+                    let mut state = Presync::new(start, walk, start_time, now());
                     let outcome = state.add(&self.genesis, header, &self.best_work())?;
                     next = Some(state.next());
                     let refetch = matches!(outcome, Outcome::Refetch);
@@ -2592,10 +2694,49 @@ impl Chain {
         }
         Ok(json!({"next":next.map(|id| hex(&id)),"refetch":false,"indexed":indexed}))
     }
+    /// The walk a presync of `peer`'s chain begins from when it forks at
+    /// `start`. A page begins at most one presync, so a page costs at most
+    /// one walk; but a peer can send page after page, each a single cheap
+    /// header from far back. So the walk last made for the peer is kept: its
+    /// chain beginning again at the same block costs nothing, and at other
+    /// blocks it gets two new walks within `WALK_GAP` seconds and none
+    /// beyond them, its page ending there. Two, so that a peer whose branch
+    /// changes twice running, as in a run of competing blocks, is followed
+    /// without waiting for its next announcement.
+    fn presync_walk(&mut self, peer: &str, start: Hash) -> Result<Option<Walk>> {
+        let current = now();
+        let mut made = [0; 2];
+        if let Some((at, walk, earlier)) = self.walks.get(peer) {
+            if *at == start {
+                return Ok(Some(walk.clone()));
+            }
+            // The one before the last was made within the gap: this would
+            // be the third.
+            if earlier[0].saturating_add(WALK_GAP) > current {
+                return Ok(None);
+            }
+            made = *earlier;
+        }
+        let walk = self.walk_from(start)?;
+        if self.walks.len() >= 64
+            && !self.walks.contains_key(peer)
+            && let Some(oldest) = self
+                .walks
+                .iter()
+                .min_by_key(|(_, (_, _, made))| made[1])
+                .map(|(peer, _)| peer.clone())
+        {
+            self.walks.remove(&oldest);
+        }
+        self.walks
+            .insert(peer.into(), (start, walk.clone(), [made[1], current]));
+        Ok(Some(walk))
+    }
     /// Blocks for a peer to fetch, along the best header's branch (wiki:
     /// node/sync): from the lowest one not yet stored, within `WINDOW` of it,
     /// at most `PER_PEER` asked of this peer at once, none of two peers at once
-    /// until its transfer time, by its data capacity, passes.
+    /// until its transfer time, by its data capacity, passes, and none of a
+    /// peer that just did not give it (`expired`).
     fn blocks_wanted(&mut self, peer: &str) -> Vec<Hash> {
         let current = now();
         let mut lapsed = Vec::new();
@@ -2608,12 +2749,18 @@ impl Chain {
             }
             keep
         });
-        for (id, holder) in lapsed {
-            self.expired.insert(id, (holder, current));
+        for lapsed in lapsed {
+            self.expired
+                .insert(lapsed, current.saturating_add(LAPSED_WAIT));
         }
-        self.expired
-            .retain(|_, (_, at)| at.saturating_add(LAPSED_WAIT) > current);
+        self.expired.retain(|_, until| *until > current);
         self.advance_frontier();
+        let lacking: BTreeSet<Hash> = self
+            .expired
+            .keys()
+            .filter(|(_, holder)| holder == peer)
+            .map(|(id, _)| *id)
+            .collect();
         let mut wanted = Vec::new();
         let mut asked = 0;
         let along: Vec<Hash> = (self.frontier..self.best.len())
@@ -2624,14 +2771,7 @@ impl Chain {
             if asked >= PER_PEER {
                 break;
             }
-            if self.entry(id).has_data() {
-                continue;
-            }
-            if self
-                .expired
-                .get(id)
-                .is_some_and(|(holder, _)| holder == peer)
-            {
+            if self.entry(id).has_data() || lacking.contains(id) {
                 continue;
             }
             match self.in_flight.get(id) {
@@ -3277,18 +3417,21 @@ impl Chain {
     pub fn request(&mut self, method: &str, p: Value) -> Result<Value> {
         self.request_with(method, p, None)
     }
-    /// A chain that failed, or whose storage did, answers nothing more.
-    fn healthy(&self) -> Result<()> {
+    /// A chain that failed, or whose storage did, answers nothing more, and
+    /// the node stops: a failed read stays failed, so a node left running
+    /// would keep its listeners and its peers and refuse every request.
+    fn healthy(&mut self) -> Result<()> {
         if let Some(error) = &self.failed {
             return Err(error.clone());
         }
-        if let Some(error) = self.runtime.storage_error() {
-            return Err(error);
+        let error = self
+            .runtime
+            .storage_error()
+            .or_else(|| self.index.storage_error());
+        match error {
+            Some(error) => Err(self.fail(format!("storage failed; restart required: {error}"))),
+            None => Ok(()),
         }
-        if let Some(error) = self.index.storage_error() {
-            return Err(error);
-        }
-        Ok(())
     }
     /// A peer's request that the chain answers itself (wiki:
     /// reference/peer-protocol): its state, the ids of its pooled and deferred
@@ -3365,24 +3508,32 @@ impl Chain {
     fn relayed(&self, ids: &[Hash], deferred: bool) -> Vec<wire::Item> {
         let mut inline = 0usize;
         let mut items = Vec::new();
+        // One named twice is listed once, and one listed by its size alone is
+        // not encoded to tell it: what a peer asks for costs the chain thread
+        // no more than the bytes the answer carries.
+        let mut listed = BTreeSet::new();
         for id in ids {
-            let (tx, not_before) = if deferred {
+            if !listed.insert(*id) {
+                continue;
+            }
+            let (tx, size, not_before) = if deferred {
                 match self.deferred.get(id) {
-                    Some(d) => (&d.tx, Some(d.not_before)),
+                    Some(d) => (&d.tx, d.bytes, Some(d.not_before)),
                     None => continue,
                 }
             } else {
-                match self.pool.get(id) {
-                    Some(tx) if !self.deferred.contains_key(id) => (tx, None),
+                match self.pool.pooled(id) {
+                    Some(pooled) if !self.deferred.contains_key(id) => {
+                        (&pooled.tx, pooled.bytes, None)
+                    }
                     _ => continue,
                 }
             };
-            let bytes = tx.encode();
-            let body = if inline.saturating_add(bytes.len()) <= RELAY_INLINE {
-                inline += bytes.len();
-                wire::Body::Whole(bytes)
+            let body = if inline.saturating_add(size) <= RELAY_INLINE {
+                inline += size;
+                wire::Body::Whole(tx.encode())
             } else {
-                wire::Body::Total(bytes.len() as u64)
+                wire::Body::Total(size as u64)
             };
             items.push(wire::Item {
                 id: *id,
@@ -3559,6 +3710,8 @@ impl Chain {
                     self.let_go.remove(&peer);
                     return Ok(json!({}));
                 }
+                let current = now();
+                let asked = self.in_flight.len();
                 match p["id"].as_str() {
                     Some(id) => {
                         let id = hash_arg(id)?;
@@ -3570,10 +3723,30 @@ impl Chain {
                             self.in_flight.remove(&id);
                         }
                     }
-                    None => {
-                        self.in_flight.retain(|_, (holder, _)| *holder != peer);
-                        self.presync.remove(&peer);
+                    None => self.in_flight.retain(|_, (holder, _)| *holder != peer),
+                }
+                // The blocks it names as `missing` it does not have: they are
+                // not asked of it again for a moment, whatever tip it
+                // announces next, so that the others, told below, take them
+                // first. Without that, a peer could take the lowest missing
+                // blocks, hand them back, and take them again ahead of the
+                // others for as long as it liked.
+                if let Some(missing) = p["missing"].as_array() {
+                    for id in missing.iter().take(WINDOW) {
+                        let id = hash_arg(id.as_str().ok_or("expected a block id")?)?;
+                        let until = self.expired.entry((id, peer.clone())).or_default();
+                        *until = (*until).max(current.saturating_add(MISSING_WAIT));
                     }
+                }
+                // Only a connection that ended gives up its presync as well,
+                // and the walk kept for it: its address is not used again.
+                if p["ended"] == true {
+                    self.presync.remove(&peer);
+                    self.walks.remove(&peer);
+                }
+                // The other connections are told, and ask for them now.
+                if self.in_flight.len() != asked {
+                    self.released += 1;
                 }
                 Ok(json!({}))
             }
@@ -3852,6 +4025,19 @@ impl Handle {
             status: Arc::new(Err("the node is starting".into())),
         });
         let worker = std::thread::spawn(move || {
+            // A chain thread that panics takes the node down with it: left
+            // running, the process would keep its listeners and its peers
+            // and make no progress.
+            struct StopOnPanic(Arc<AtomicBool>);
+            impl Drop for StopOnPanic {
+                fn drop(&mut self) {
+                    if std::thread::panicking() {
+                        crate::log!("chain stopped: the chain thread panicked; restart required");
+                        self.0.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+            let _stop = StopOnPanic(shutdown.clone());
             let mut chain = match Chain::open_with(&dir, shutdown.clone(), selector) {
                 Ok(mut c) => {
                     events_tx.send_replace(c.event());

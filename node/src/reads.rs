@@ -15,7 +15,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use ting_core::{
     hash::{Hash, hex},
     protocol::{Encode, Event, HEADER_LEN, Receipt, Transaction},
-    state::{End, manifest_key, prove, record_key},
+    state::{PathEnd, manifest_key, path, record_key},
 };
 use tokio::sync::Semaphore;
 
@@ -140,8 +140,15 @@ fn block_json(view: &View, id: Hash) -> Result<Value> {
     let b = view.block(&id)?;
     let stored = view.stored(&id)?.ok_or("block not found")?;
     let canonical = view.canonical(b.header.height)? == Some(id);
+    // What this node knows of it (wiki: node/storage): the receipts of a
+    // block it only stores, or of one that failed, are its producer's claim.
+    let status = match stored.kept {
+        Kept::Valid => "valid",
+        Kept::Data => "stored",
+        Kept::Invalid => "invalid",
+    };
     Ok(
-        json!({"id":hex(&id),"height":b.header.height,"parent":hex(&b.header.parent),
+        json!({"id":hex(&id),"height":b.header.height,"status":status,"parent":hex(&b.header.parent),
         "timestamp":b.header.timestamp,"target":hex(&ting_core::protocol::target_bytes(&b.header.target)),
         "work":stored.work.to_string(),"canonical":canonical,"state_root":hex(&b.header.state_root),
         "transactions_root":hex(&b.header.transactions_root),"receipts_root":hex(&b.header.receipts_root),
@@ -163,7 +170,9 @@ fn page(view: &View, method: &str, p: &Value) -> Result<Value> {
     }
     let mut items = Vec::new();
     let mut size = 0;
-    for height in (from..).take(limit as usize) {
+    // To the last height there is, not past it: an open range would add one
+    // to it and stop the thread on the overflow.
+    for height in (from..=u64::MAX).take(limit as usize) {
         let Some(id) = view.canonical(height)? else {
             break;
         };
@@ -383,15 +392,26 @@ fn record_json(
 /// level above that, from the end up to the root. A path that ends at another
 /// record names its key and adds its value to `others`.
 fn proof_json(view: &View, record: &Hash, others: &mut Others) -> Result<Value> {
-    let proof = prove(view, record)?;
+    let (end, siblings) = path(view, record)?;
     let mut answer = json!({"record_key":hex(record),
-        "siblings":proof.siblings.iter().map(|s| hex(s)).collect::<Vec<_>>()});
-    match proof.end {
-        End::Present => answer["end"] = json!("present"),
-        End::Empty => answer["end"] = json!("empty"),
-        End::Other(key, value) => {
-            let key = hex(&key);
+        "siblings":siblings.iter().map(|s| hex(s)).collect::<Vec<_>>()});
+    match end {
+        PathEnd::Present => answer["end"] = json!("present"),
+        PathEnd::Empty => answer["end"] = json!("empty"),
+        PathEnd::Other(other) => {
+            let key = hex(&other);
+            // Read once however many proofs of the answer end at it, and
+            // not at all when its value alone is more than an answer holds.
             if !others.contains_key(&key) {
+                let length = view
+                    .record_len(&other)?
+                    .ok_or("state tree leaf without its record")?;
+                if length > (ANSWER_MAX / 2) as u64 {
+                    return Err(TOO_LARGE.into());
+                }
+                let value = view
+                    .record(&other)?
+                    .ok_or("state tree leaf without its record")?;
                 others.insert(key.clone(), json!(hex(&value)));
             }
             answer["end"] = json!("other");

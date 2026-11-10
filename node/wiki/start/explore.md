@@ -56,8 +56,13 @@ D, G order.
 | POST | `/v1/storage` | Many records from one state: `{"reads": [{"contract": "…", "key": "…"}, …]}`, 1 to 1,024 of them, answered in that order with the state root and canonical tip they were all read at; with `"proof": true` each with its Merkle proof |
 | GET | `/v1/metrics` | The status document: height, pool and state record counts, uptime |
 
-A height selects a canonical block; a hash selects any block the node has validated,
-on a side branch too.
+A height selects a canonical block; a hash selects any block the node stores, on a
+side branch too. A block's `status` says what the node knows of it
+([what a node holds of a block](../node/storage.md#what-a-node-holds-of-a-block)):
+`valid` when the node executed it and found it valid, as every canonical block is;
+`stored` when its body matches its header but the node has not executed it; `invalid`
+when its execution failed. The receipts and events of a block that is not `valid` are
+what its producer claims, checked by no one.
 
 Manifests and storage records come with the state root they were read from. Records
 that belong together, such as the parts of one identity, are best read with one

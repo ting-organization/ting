@@ -258,6 +258,11 @@ its account could be presented for the instant spending slot when it was signed 
 the time-locked savings slot. The policy never sees which account it authorizes,
 only the message.
 
+Two [application standards](../standards.md) define messages of this kind for any
+program and any site: [TCR-1](../standards/tcr-1.md), under the tag `app/call-v1`,
+for an operation in a program, and [TOCS-1](../standards/tocs-1.md), under
+`app/offchain-v1`, for what is signed off chain.
+
 ## Producer data
 
 Producer data is chosen by the miner, carried in the block body without a size limit
@@ -387,7 +392,9 @@ after exactly those calls. Any program can answer the same query. A program that
 settles trades, for example, can vouch for the trade it is executing, so that each
 party's transfer, bound to that program and that trade, is valid only while the whole
 trade runs and takes effect within it. The [coin](coin.md#actions)
-supports bound actions.
+supports bound actions. [TCR-1](../standards/tcr-1.md#payments) uses them for every
+program: a payment is bound to the program and to the signing digest of the one
+operation it pays for.
 
 A binding to the batch commits only to the calls before the bound action, in the
 same run of the batch:

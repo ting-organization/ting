@@ -278,7 +278,6 @@ fn crash_writer() {
     let staged = Runtime::new(Store::state(tx.clone()).unwrap(), Context::from_genesis(&g));
     staged.validate_and_apply_block(&g, &[], &block).unwrap();
     let changes = staged.state_changes().unwrap();
-    Store::apply(&tx, &changes).unwrap();
     let location = store.append(&block.encode()).unwrap();
     let work = consensus::work(&block.header.target);
     Store::save_data(&tx, &block.header, &work, location).unwrap();
@@ -568,20 +567,24 @@ fn values_larger_than_a_part_are_kept_in_parts_and_leave_with_their_rows() {
     let parts = |tx: &redb::WriteTransaction| tx.open_table(PARTS).unwrap().len().unwrap();
     let (key, block, other) = ([7; 32], [9; 32], [8; 32]);
     let big: Vec<u8> = (0..2 * PART_BYTES + 5).map(|i| (i % 251) as u8).collect();
-    let set = |tx: &Rc<redb::WriteTransaction>, value: Option<Vec<u8>>| {
+    // Sets the record, as block `id` when it is given one, which keeps the
+    // value the record had as that block's undo data.
+    let set = |tx: &Rc<redb::WriteTransaction>, value: Option<Vec<u8>>, id: Option<[u8; 32]>| {
         let mut state = Store::state(tx.clone()).unwrap();
         state.set(key, value);
         let changes = state.changes().unwrap();
         drop(state);
-        Store::apply(tx, &changes).unwrap();
+        match id {
+            Some(id) => Store::apply_block(tx, id, &changes).unwrap(),
+            None => Store::apply(tx, &changes).unwrap(),
+        }
         changes.root
     };
     let get = |tx: &Rc<redb::WriteTransaction>| Store::state(tx.clone()).unwrap().get(&key);
     let tx = Rc::new(store.begin().unwrap());
     let empty = Store::state(tx.clone()).unwrap().root();
-    // A record of three parts, and a block whose undo data deletes it.
-    let root = set(&tx, Some(big.clone()));
-    Store::put_undo(&tx, block, &[(key, None)]).unwrap();
+    // A record of three parts, written by a block whose undo data deletes it.
+    let root = set(&tx, Some(big.clone()), Some(block));
     assert_eq!(parts(&tx), 3);
     assert_eq!(get(&tx).as_ref(), Some(&big));
     // Undone, the value moves to the block's redo data, still in parts; done
@@ -592,28 +595,89 @@ fn values_larger_than_a_part_are_kept_in_parts_and_leave_with_their_rows() {
     assert!(Store::redo_block(tx.clone(), block, root).unwrap());
     assert_eq!(get(&tx).as_ref(), Some(&big));
     assert_eq!(parts(&tx), 3);
-    // A large previous value in undo data is kept in parts too.
-    Store::put_undo(&tx, other, &[(key, Some(big.clone()))]).unwrap();
-    assert_eq!(parts(&tx), 6);
-    // A smaller value leaves fewer parts, one that fits a row none.
-    set(&tx, Some(big[..PART_BYTES + 1].to_vec()));
+    // A large previous value in undo data is kept in parts too: a smaller
+    // value leaves the record fewer parts, one that fits a row none.
+    let shorter = set(&tx, Some(big[..PART_BYTES + 1].to_vec()), Some(other));
     assert_eq!(parts(&tx), 5);
-    set(&tx, Some(big[..10].to_vec()));
+    set(&tx, Some(big[..10].to_vec()), None);
     assert_eq!(parts(&tx), 3);
-    set(&tx, Some(big.clone()));
+    // Undoing a block needs the state it left, and gives the record its
+    // three parts back; redone, the block leaves it two again.
+    set(&tx, Some(big[..PART_BYTES + 1].to_vec()), None);
+    Store::undo_block(tx.clone(), other, 2, root).unwrap();
+    assert_eq!(get(&tx).as_ref(), Some(&big));
+    assert_eq!(parts(&tx), 3 + 3 + 2);
+    assert!(Store::redo_block(tx.clone(), other, shorter).unwrap());
+    assert_eq!(get(&tx).as_deref(), Some(&big[..PART_BYTES + 1]));
+    assert_eq!(parts(&tx), 2 + 3);
+    // An undo or a redo whose root is not the one expected fails, and its
+    // transaction is not to be committed.
+    assert!(Store::undo_block(tx.clone(), other, 2, empty).is_err());
+    drop(tx);
+    let tx = Rc::new(store.begin().unwrap());
+    assert_eq!(get(&tx), None);
+    let root = set(&tx, Some(big.clone()), Some(block));
+    set(&tx, Some(big[..10].to_vec()), Some(other));
     store
         .commit_state(Rc::try_unwrap(tx).ok().unwrap())
         .unwrap();
-    // Read back through a committed view, and from undo data.
-    assert_eq!(store.snapshot().unwrap().get(&key).as_ref(), Some(&big));
+    // Read back through a committed view, and undo data copied from one
+    // store to another, as a replay's is, a part at a time.
     assert_eq!(
-        store.undo_of(other).unwrap(),
-        vec![(key, Some(big.clone()))]
+        store.snapshot().unwrap().get(&key).as_deref(),
+        Some(&big[..10])
     );
+    let copy = Directory::new();
+    copy.config(false, "parts copy");
+    let second = Store::open(&copy.0, &g, ting_node::store::CACHE_BYTES).unwrap();
+    let tx = Rc::new(second.begin().unwrap());
+    set(&tx, Some(big[..10].to_vec()), None);
+    Store::copy_undo(&tx, &store, other).unwrap();
+    assert_eq!(parts(&tx), 3);
+    Store::undo_block(tx.clone(), other, 2, root).unwrap();
+    assert_eq!(get(&tx).as_ref(), Some(&big));
+    drop(tx);
     // Pruned undo data and a deleted record take their parts with them.
     let tx = Rc::new(store.begin().unwrap());
-    Store::prune_undo(&tx, &[other, block], 0).unwrap();
     assert_eq!(parts(&tx), 3);
-    set(&tx, None);
+    Store::prune_undo(&tx, &[other, block], 0).unwrap();
     assert_eq!(parts(&tx), 0);
+    set(&tx, Some(big.clone()), None);
+    assert_eq!(parts(&tx), 3);
+    set(&tx, None, None);
+    assert_eq!(parts(&tx), 0);
+}
+
+#[test]
+fn a_zero_filled_header_of_a_new_block_file_is_written_again_and_another_chains_is_refused() {
+    let dir = Directory::new();
+    dir.config(false, "zeroed header");
+    drop(open(&dir));
+    fs::create_dir_all(dir.0.join("blocks")).unwrap();
+    // A power loss between creating a block file and its first bytes reaching
+    // the disk can leave it at its length, zero-filled: nothing indexed lies
+    // in it, so the node writes its header again and starts.
+    fs::write(dir.0.join("blocks/00000000.dat"), [0u8; 4096]).unwrap();
+    let mut chain = open(&dir);
+    assert_eq!(
+        fs::metadata(dir.0.join("blocks/00000000.dat"))
+            .unwrap()
+            .len(),
+        40
+    );
+    chain.mine(1, 10000).unwrap();
+    drop(chain);
+    assert_eq!(open(&dir).height(), 1);
+    // A header that is neither this chain's nor empty is never taken over.
+    let other = Directory::new();
+    other.config(false, "foreign header");
+    drop(open(&other));
+    fs::create_dir_all(other.0.join("blocks")).unwrap();
+    fs::write(other.0.join("blocks/00000000.dat"), [0x55u8; 40]).unwrap();
+    assert!(
+        Chain::open(&other.0, Arc::new(AtomicBool::new(false)))
+            .err()
+            .unwrap()
+            .contains("format mismatch")
+    );
 }

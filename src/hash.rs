@@ -9,15 +9,31 @@ pub fn hash(tag: &str, bytes: &[u8]) -> Hash {
 
 /// `hash(tag, concatenation of parts)`, without building the concatenation.
 pub fn hash_parts(tag: &str, parts: &[&[u8]]) -> Hash {
-    assert!(tag.is_ascii() && tag.len() <= u16::MAX as usize);
-    let mut digest = Sha256::new();
-    digest.update(b"Ting/");
-    digest.update((tag.len() as u16).to_le_bytes());
-    digest.update(tag.as_bytes());
+    let mut hasher = Hasher::new(tag);
     for part in parts {
-        digest.update(part);
+        hasher.update(part);
     }
-    digest.finalize().into()
+    hasher.finish()
+}
+
+/// `hash(tag, bytes)` of bytes that come in pieces, for whoever does not hold
+/// them all at once.
+pub struct Hasher(Sha256);
+impl Hasher {
+    pub fn new(tag: &str) -> Self {
+        assert!(tag.is_ascii() && tag.len() <= u16::MAX as usize);
+        let mut digest = Sha256::new();
+        digest.update(b"Ting/");
+        digest.update((tag.len() as u16).to_le_bytes());
+        digest.update(tag.as_bytes());
+        Self(digest)
+    }
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+    pub fn finish(self) -> Hash {
+        self.0.finalize().into()
+    }
 }
 
 pub fn vector_root(tag: &str, items: &[Vec<u8>]) -> Hash {

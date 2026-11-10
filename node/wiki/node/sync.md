@@ -54,8 +54,11 @@ tip changes, and the node follows:
      being kept ([headers first](#headers-first)).
    - **Blocks**: it asks the chain which blocks to fetch from this peer, up to 64 at
      a time along the best header's branch, fetches each with `raw`, slice by slice,
-     and stores it ([blocks](#blocks)). A peer that does not have one is passed over
-     until it announces a new tip, and the others are asked.
+     and stores it ([blocks](#blocks)). A peer that does not have one gives back
+     what it was asked for: the others are asked at once, and the blocks it lacks
+     are not asked of it again for ten seconds, whatever tip it announces, so
+     that the others take them first. When the ten seconds end the connection
+     wakes, and asks for them if the peer announced a new tip meanwhile.
    - **Push**, when this node's tip has changed and has more work than the peer's:
      the node asks the peer for its `state` and finds their best common block from
      the peer's locator, with the last block the peer took from this connection's
@@ -207,8 +210,8 @@ node downloads the blocks of its branch that it does not store:
 - from several peers at once, each connection asking for its own blocks, up to 64
   per peer at a time and never the same block of two peers at once. A block asked of
   a peer and not delivered within its transfer time, or one the peer does not have,
-  goes back to the others, and a peer that let it lapse is not asked for it again
-  for two minutes;
+  goes back to the others, and that peer is not asked for it again for two minutes
+  if it let it lapse, or ten seconds if it said it does not have it;
 - in slices of at most 1 MiB, so a block of any size crosses the transport, within
   its transfer time for the whole block. Its header is known before it is asked for,
   so a peer that answers with another block, or claims one larger than the data

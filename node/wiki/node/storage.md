@@ -116,10 +116,32 @@ values that block left, which it reads from the state before undoing it. Connect
 that block again applies them without executing it; a block without redo data is
 executed again, which gives the same result.
 
-Undo data is the largest thing a node keeps, and nothing in the protocol bounds it:
-an overwrite of a large record pays no growth, so one block can replace about 10 MB
-of values. A node therefore keeps it for a window, by default the last 43,200
-canonical blocks, 30 days, and the redo data of disconnected blocks as long
+Undo data is the largest thing a node keeps, and nothing in the protocol bounds it.
+What a block writes is paid for by the byte, in compute for each value's leaf hash.
+What it deletes or overwrites is not: a delete or an overwrite costs two state
+accesses whatever the size of the record it replaces
+([state access](../resources/counters.md#s-state-access)), and reads only that
+record's length. One block can therefore replace as many records as half its
+state-access capacity, about a thousand at the production capacities, each of any
+size, and its undo data is as large as they were.
+
+The node therefore never holds a block's previous values in memory together. The
+changes a block's execution reports name each changed record and the value it has
+now, not the one it had. When the node connects the block it copies each previous
+value from the record's own rows to the block's undo rows, a part of 1 MiB at a time,
+before it writes the new one. Undoing a block moves values the same way, from the
+records to its redo rows and from its undo rows back to the records, and connecting
+it again moves its redo rows to the records; the leaf of each restored value is
+hashed as the value moves, and the root is checked once every record is in place,
+before the commit. A replay's undo data is copied between the two databases a row and
+a part at a time too. The memory one block takes is then the values it writes, which
+its compute bounds, one part of a value on its way, and the database's page cache,
+whatever the size of the records it replaces. The disk space it takes is not bounded
+that way: connecting a block that deletes a record writes a second copy of the value
+as undo data before the record's own rows are freed.
+
+A node keeps undo data for a window, by default the last 43,200 canonical blocks,
+30 days, and the redo data of disconnected blocks as long
 ([deep reorganizations](#deep-reorganizations)). `"undo_window"` in `config.json`
 sets the window in blocks; `0` keeps everything.
 
@@ -206,8 +228,10 @@ is another branch, the node moves to it:
 Every state root reached is checked against its header. The move goes in steps, each
 one database transaction: disconnecting up to 64 blocks, connecting up to 64
 already-executed blocks, or executing one block. A reorganization of any depth
-therefore never holds more than one step's changes in memory, and the node answers
-requests between steps. Between two steps the tip may briefly have less work than
+therefore never holds more in memory than one block's written values and tree
+changes, with one part of a value on its way
+([per-block changes](#per-block-changes)), and the node answers requests between
+steps. Between two steps the tip may briefly have less work than
 before; the next step continues toward the heavier branch. Until the move ends, every
 choice is measured against the tip it began from, not the one it has reached.
 
@@ -332,7 +356,8 @@ Before it serves anything it checks that:
 
 A stored block whose parent was only a header when the node stopped, as blocks
 arrive out of order, waits outside the index until that header comes again, and is
-then indexed with it.
+then indexed with it. One at or below the settled height, with no block above that
+height waiting on it, is forgotten like a side branch that far behind.
 
 Frames appended after the file cursor, left by a crash before their commits reached
 the disk, are stored again in the order they were written, without appending another
@@ -341,7 +366,10 @@ tried again once the others are in, for as long as that stores more; one still l
 over, such as one whose parent was only a header, is passed over, and its block is
 fetched again. Nothing refers to a frame after the cursor, so a damaged one
 (incomplete, zero-filled as a power loss may leave it, or with a wrong checksum) is
-truncated with everything after it in its file, and its block is fetched again.
+truncated with everything after it in its file, and its block is fetched again. A
+block file that nothing indexed lies in yet may have lost its header the same way,
+cut short or zero-filled: the node writes it again. A header that is neither this
+chain's nor empty is refused, as below.
 
 Then the operator's marks are applied, and the node connects the heaviest stored
 branch, as in [connecting the best branch](#connecting-the-best-branch): after a
@@ -351,7 +379,8 @@ every block.
 
 Indexed frames are checksum-verified when they are read, rather than scanned at every
 restart; a stored block whose frame no longer reads back is forgotten, its header
-kept, and fetched again. The database's own checksums are responsible for physical
+kept, with its limits and any undo and redo data, and fetched again. A block is
+read before it is connected, so one that cannot be read is never connected. The database's own checksums are responsible for physical
 integrity.
 
 A database or block file made for a different storage format or a different genesis
