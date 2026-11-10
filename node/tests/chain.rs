@@ -3540,8 +3540,9 @@ fn a_page_begins_at_most_one_presync_however_often_a_header_repeats() {
     let mut history = vec![];
     let mut side = None;
     let mut other = None;
+    let mut third = None;
     for i in 0..2_000 {
-        if i == 400 || i == 500 {
+        if i == 300 || i == 400 || i == 500 {
             let mut x = runtime
                 .build_candidate(
                     &g,
@@ -3555,10 +3556,10 @@ fn a_page_begins_at_most_one_presync_however_often_a_header_repeats() {
             while !consensus::valid_pow(&x.header) {
                 x.header.nonce += 1;
             }
-            if i == 400 {
-                other = Some(x.header);
-            } else {
-                side = Some(x.header);
+            match i {
+                300 => third = Some(x.header),
+                400 => other = Some(x.header),
+                _ => side = Some(x.header),
             }
         }
         let block = mine(&runtime, &g, &mut history, vec![], "A");
@@ -3589,13 +3590,17 @@ fn a_page_begins_at_most_one_presync_however_often_a_header_repeats() {
     assert_eq!(again["next"], hex(&side.id()));
     assert_eq!(chain.height(), 2_000);
     // Page after page of such headers, each from another block, costs no
-    // walk after walk either: the peer's next presync from another block
-    // waits, its page ending like the repeated one, while one from the block
-    // it last began at begins at once, by the walk already made.
-    let (elsewhere, _) = timed(&mut chain, std::slice::from_ref(&other.unwrap()));
-    assert_eq!(elsewhere["next"], serde_json::Value::Null);
-    let (back, _) = timed(&mut chain, std::slice::from_ref(&side));
-    assert_eq!(back["next"], hex(&side.id()));
+    // walk after walk either. A second block is walked from at once, as a
+    // peer whose branch changes twice running needs; a third so soon is not,
+    // its page ending like the repeated one, while the block the peer last
+    // began at begins at once, by the walk already made.
+    let (other, third) = (other.unwrap(), third.unwrap());
+    let (second, _) = timed(&mut chain, std::slice::from_ref(&other));
+    assert_eq!(second["next"], hex(&other.id()));
+    let (refused, _) = timed(&mut chain, std::slice::from_ref(&third));
+    assert_eq!(refused["next"], serde_json::Value::Null);
+    let (back, _) = timed(&mut chain, std::slice::from_ref(&other));
+    assert_eq!(back["next"], hex(&other.id()));
 }
 #[test]
 fn a_damaged_deferred_set_is_set_aside_and_the_node_starts() {

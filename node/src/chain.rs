@@ -130,9 +130,15 @@ pub const HEADERS_PAGE: usize = 2_000;
 const WINDOW: usize = 1_024;
 const PER_PEER: usize = 64;
 const LAPSED_WAIT: u64 = 120;
+/// A block a peer said it does not have is not asked of it again for this
+/// many seconds: long enough that the others, told at once, take it first,
+/// and no longer, since a peer that lacked a block a moment ago may have it
+/// now, and may be the only one that does.
+const MISSING_WAIT: u64 = 10;
 /// A peer's header chain too far behind to be indexed is checked from a walk
 /// over the epochs before its fork point, made on the chain thread. One peer
-/// gets a walk from a new fork point this many seconds apart at most.
+/// gets two walks from new fork points within this many seconds at most: a
+/// peer that changes branch twice running is still followed at once.
 const WALK_GAP: u64 = 30;
 /// The time a peer has to deliver a block or transaction of up to `bytes`, in
 /// slices (wiki: node/sync): a minute, and ten seconds more for every slice,
@@ -444,14 +450,15 @@ pub struct Chain {
     /// Blocks asked of a peer, and when; and blocks a peer let expire, which
     /// are not given back to that peer for a while.
     in_flight: BTreeMap<Hash, (String, u64)>,
-    /// The blocks a peer was asked for and did not give, in time or at all,
-    /// each with when: not asked of that peer again for `LAPSED_WAIT`.
+    /// The blocks a peer was asked for and did not give, each with the time
+    /// until which it is not asked of that peer again: `LAPSED_WAIT` after
+    /// one it let lapse, `MISSING_WAIT` after one it said it does not have.
     expired: BTreeMap<(Hash, String), u64>,
     /// How many times a peer gave back blocks it was asked for (`Event`).
     released: u64,
-    /// The walk each peer's presync last began from, with its fork point and
-    /// when it was made (`presync_walk`).
-    walks: BTreeMap<String, (Hash, Walk, u64)>,
+    /// The walk each peer's presync last began from, with its fork point,
+    /// and when the peer's last two walks were made (`presync_walk`).
+    walks: BTreeMap<String, (Hash, Walk, [u64; 2])>,
     /// Header chains under check, by peer.
     presync: BTreeMap<String, Presync>,
     /// The peer each stored, not yet connected block came from, and the peers
@@ -2691,18 +2698,24 @@ impl Chain {
     /// `start`. A page begins at most one presync, so a page costs at most
     /// one walk; but a peer can send page after page, each a single cheap
     /// header from far back. So the walk last made for the peer is kept: its
-    /// chain beginning again at the same block costs nothing, and at another
-    /// block a new walk is made `WALK_GAP` seconds after the last at the
-    /// earliest, and none until then.
+    /// chain beginning again at the same block costs nothing, and at other
+    /// blocks it gets two new walks within `WALK_GAP` seconds and none
+    /// beyond them, its page ending there. Two, so that a peer whose branch
+    /// changes twice running, as in a run of competing blocks, is followed
+    /// without waiting for its next announcement.
     fn presync_walk(&mut self, peer: &str, start: Hash) -> Result<Option<Walk>> {
         let current = now();
-        if let Some((at, walk, made)) = self.walks.get(peer) {
+        let mut made = [0; 2];
+        if let Some((at, walk, earlier)) = self.walks.get(peer) {
             if *at == start {
                 return Ok(Some(walk.clone()));
             }
-            if made.saturating_add(WALK_GAP) > current {
+            // The one before the last was made within the gap: this would
+            // be the third.
+            if earlier[0].saturating_add(WALK_GAP) > current {
                 return Ok(None);
             }
+            made = *earlier;
         }
         let walk = self.walk_from(start)?;
         if self.walks.len() >= 64
@@ -2710,20 +2723,20 @@ impl Chain {
             && let Some(oldest) = self
                 .walks
                 .iter()
-                .min_by_key(|(_, (_, _, made))| *made)
+                .min_by_key(|(_, (_, _, made))| made[1])
                 .map(|(peer, _)| peer.clone())
         {
             self.walks.remove(&oldest);
         }
         self.walks
-            .insert(peer.into(), (start, walk.clone(), current));
+            .insert(peer.into(), (start, walk.clone(), [made[1], current]));
         Ok(Some(walk))
     }
     /// Blocks for a peer to fetch, along the best header's branch (wiki:
     /// node/sync): from the lowest one not yet stored, within `WINDOW` of it,
     /// at most `PER_PEER` asked of this peer at once, none of two peers at once
     /// until its transfer time, by its data capacity, passes, and none of a
-    /// peer that did not give it, in time or at all, for `LAPSED_WAIT`.
+    /// peer that just did not give it (`expired`).
     fn blocks_wanted(&mut self, peer: &str) -> Vec<Hash> {
         let current = now();
         let mut lapsed = Vec::new();
@@ -2737,10 +2750,10 @@ impl Chain {
             keep
         });
         for lapsed in lapsed {
-            self.expired.insert(lapsed, current);
+            self.expired
+                .insert(lapsed, current.saturating_add(LAPSED_WAIT));
         }
-        self.expired
-            .retain(|_, at| at.saturating_add(LAPSED_WAIT) > current);
+        self.expired.retain(|_, until| *until > current);
         self.advance_frontier();
         let lacking: BTreeSet<Hash> = self
             .expired
@@ -3713,14 +3726,16 @@ impl Chain {
                     None => self.in_flight.retain(|_, (holder, _)| *holder != peer),
                 }
                 // The blocks it names as `missing` it does not have: they are
-                // not asked of it again for a while, whatever tip it announces
-                // next. Without that, a peer could take the lowest missing
-                // blocks, hand them back, and take them again for as long as
-                // it liked.
+                // not asked of it again for a moment, whatever tip it
+                // announces next, so that the others, told below, take them
+                // first. Without that, a peer could take the lowest missing
+                // blocks, hand them back, and take them again ahead of the
+                // others for as long as it liked.
                 if let Some(missing) = p["missing"].as_array() {
                     for id in missing.iter().take(WINDOW) {
                         let id = hash_arg(id.as_str().ok_or("expected a block id")?)?;
-                        self.expired.insert((id, peer.clone()), current);
+                        let until = self.expired.entry((id, peer.clone())).or_default();
+                        *until = (*until).max(current.saturating_add(MISSING_WAIT));
                     }
                 }
                 // Only a connection that ended gives up its presync as well.

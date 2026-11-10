@@ -481,22 +481,21 @@ impl Link {
                 return Err(error);
             }
         };
-        let Some(stop) = stop else {
+        // A block the chain refused for now leaves the rest as they are:
+        // given back, they would be asked for and refused again at once.
+        if stop != Some(Stop::Missing) {
             return Ok(());
-        };
+        }
         // This peer does not have one of them: this one is asked again once
         // it announces a new tip.
-        if stop == Stop::Missing {
-            self.fetch = false;
-            // The blocks asked for lead to the best header: a peer whose
-            // tip is as high claimed more than it holds.
-            let best = handle.events().borrow().best;
-            self.lacking |= self.checked.is_some_and(|(_, height)| height >= best);
-        }
+        self.fetch = false;
+        // The blocks asked for lead to the best header: a peer whose
+        // tip is as high claimed more than it holds.
+        let best = handle.events().borrow().best;
+        self.lacking |= self.checked.is_some_and(|(_, height)| height >= best);
         // What it was asked for and did not give goes back to the others at
-        // once, also when the chain refused a block for now, and the blocks
-        // it lacks are not asked of it again for a while, whatever tip it
-        // announces.
+        // once, and the blocks it lacks are not asked of it again for a
+        // moment, whatever tip it announces.
         let missing: Vec<String> = missing.iter().map(|id| hex(id)).collect();
         handle
             .call("release", json!({"peer":self.peer,"missing":missing}))
