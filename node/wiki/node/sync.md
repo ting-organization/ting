@@ -57,7 +57,8 @@ tip changes, and the node follows:
      and stores it ([blocks](#blocks)). A peer that does not have one gives back
      what it was asked for: the others are asked at once, and the blocks it lacks
      are not asked of it again for ten seconds, whatever tip it announces, so
-     that the others take them first.
+     that the others take them first. When the ten seconds end the connection
+     wakes, and asks for them if the peer announced a new tip meanwhile.
    - **Push**, when this node's tip has changed and has more work than the peer's:
      the node asks the peer for its `state` and finds their best common block from
      the peer's locator, with the last block the peer took from this connection's

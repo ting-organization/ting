@@ -134,7 +134,7 @@ const LAPSED_WAIT: u64 = 120;
 /// many seconds: long enough that the others, told at once, take it first,
 /// and no longer, since a peer that lacked a block a moment ago may have it
 /// now, and may be the only one that does.
-const MISSING_WAIT: u64 = 10;
+pub const MISSING_WAIT: u64 = 10;
 /// A peer's header chain too far behind to be indexed is checked from a walk
 /// over the epochs before its fork point, made on the chain thread. One peer
 /// gets two walks from new fork points within this many seconds at most: a
@@ -3522,7 +3522,7 @@ impl Chain {
                     None => continue,
                 }
             } else {
-                match self.pool.iter().find(|pooled| pooled.id == *id) {
+                match self.pool.pooled(id) {
                     Some(pooled) if !self.deferred.contains_key(id) => {
                         (&pooled.tx, pooled.bytes, None)
                     }
@@ -3738,9 +3738,11 @@ impl Chain {
                         *until = (*until).max(current.saturating_add(MISSING_WAIT));
                     }
                 }
-                // Only a connection that ended gives up its presync as well.
+                // Only a connection that ended gives up its presync as well,
+                // and the walk kept for it: its address is not used again.
                 if p["ended"] == true {
                     self.presync.remove(&peer);
+                    self.walks.remove(&peer);
                 }
                 // The other connections are told, and ask for them now.
                 if self.in_flight.len() != asked {

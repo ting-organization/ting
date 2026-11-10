@@ -53,11 +53,16 @@ impl Pool {
         let low = after.map_or(Bound::Unbounded, Bound::Excluded);
         self.ids.range((low, Bound::Unbounded))
     }
-    pub fn get(&self, id: &Hash) -> Option<&Transaction> {
+    /// The pooled transaction `id` with what the pool keeps of it. One that
+    /// is not pooled is told from the ids alone, without a pass over the pool.
+    pub fn pooled(&self, id: &Hash) -> Option<&Pooled> {
         if !self.contains(id) {
             return None;
         }
-        self.items.iter().find(|p| p.id == *id).map(|p| &p.tx)
+        self.items.iter().find(|p| p.id == *id)
+    }
+    pub fn get(&self, id: &Hash) -> Option<&Transaction> {
+        self.pooled(id).map(|p| &p.tx)
     }
     /// Whether a transaction of `bytes` fits beside the rest, within `count`
     /// transactions and `most` bytes.

@@ -11,8 +11,8 @@ use crate::{
     FRAME_MAX, Result,
     chain::{
         DEFERRED_FULL, DEFERRED_MAX, Event, HEADERS_PAGE, Handle, INVALID, INVENTORY_PAGE,
-        LOCATOR_MAX, NOT_ASKED, POOL_FULL, RELAY_PAGE, SLICE_MAX, TOO_LARGE, is_invalid, is_policy,
-        transfer_time,
+        LOCATOR_MAX, MISSING_WAIT, NOT_ASKED, POOL_FULL, RELAY_PAGE, SLICE_MAX, TOO_LARGE,
+        is_invalid, is_policy, transfer_time,
     },
     config,
     daemon::Node,
@@ -269,6 +269,11 @@ struct Link {
     next: Option<Hash>,
     pull: bool,
     fetch: bool,
+    /// When the blocks the peer said it does not have may be asked of it
+    /// again (`MISSING_WAIT`): the connection wakes then, so that a peer that
+    /// announced a new tip meanwhile, and may be the only one that has them,
+    /// is asked without waiting for its next announcement or the keepalive.
+    barred: Option<Instant>,
     push: bool,
     /// The last block the peer took from a push: where the next push starts,
     /// while it is on this node's branch.
@@ -363,6 +368,9 @@ impl Link {
             self.addresses().await;
         }
         let mut more = false;
+        if self.barred.is_some_and(|until| Instant::now() >= until) {
+            self.barred = None;
+        }
         if self.pull {
             self.pull = false;
             more |= self.headers().await?;
@@ -500,6 +508,9 @@ impl Link {
         handle
             .call("release", json!({"peer":self.peer,"missing":missing}))
             .await?;
+        // A second more than the chain keeps them from it, whose clock counts
+        // whole seconds.
+        self.barred = Some(Instant::now() + Duration::from_secs(MISSING_WAIT + 1));
         Ok(())
     }
     /// The blocks the chain wants of this peer, each with its most bytes,
@@ -1139,6 +1150,7 @@ async fn follow(
         next: None,
         pull: true,
         fetch: true,
+        barred: None,
         push: true,
         pushed: None,
         swap: true,
@@ -1172,6 +1184,9 @@ async fn follow(
             };
             // An exchange that waits for its time wakes the connection then.
             let (swapping, swap_due) = (link.swap, link.swap_due);
+            // So does the end of the wait for blocks the peer lacked: the
+            // round after it asks for them if the peer announced a new tip.
+            let barred = link.barred;
             tokio::select! {
                 changed = events.changed() => {
                     if changed.is_err() {
@@ -1185,6 +1200,7 @@ async fn follow(
                     link.swap = true;
                 }
                 _ = tokio::time::sleep_until(swap_due), if swapping => {}
+                _ = tokio::time::sleep_until(barred.unwrap_or(last)), if barred.is_some() => {}
                 _ = node.stopped() => return Ok(()),
             }
         }
